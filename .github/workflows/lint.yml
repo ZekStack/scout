@@ -1,0 +1,35 @@
+name: Lint
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  whitespace:
+    runs-on: [self-hosted, zekstack-ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check whitespace
+        run: git diff --check HEAD
+
+  metadata:
+    runs-on: [self-hosted, zekstack-ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse library metadata
+        run: |
+          python3 -m json.tool library.json >/dev/null
+          python3 scripts/check_version.py
