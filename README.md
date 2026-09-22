@@ -186,6 +186,11 @@ scout.deinit();
 | Example | Description |
 | --- | --- |
 | `Basic` | Initialize Scout, receive discovery events, and inspect runtime diagnostics. |
+| `Events` | Observe scan, device, coverage, and error events. |
+| `Registry` | Enumerate the device registry, inspect endpoints, and look up a device by MAC address. |
+| `ManualScan` | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`. |
+| `Diagnostics` | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics. |
+| `MultiInterface` | Inspect devices observed through multiple eligible ESP-NETIF interfaces. |
 
 Start with:
 
