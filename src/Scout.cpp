@@ -768,7 +768,7 @@ struct ScoutImpl {
 			xTaskNotifyGive(task.handle());
 		}
 
-		if (!readyForDelete.load() && !stopped.take(timeoutTicks(timeoutMs))) {
+		if (!stopped.take(timeoutTicks(timeoutMs))) {
 			return ScoutResult::failure(ScoutStatus::Timeout, "Scout shutdown timed out");
 		}
 
