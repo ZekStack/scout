@@ -121,7 +121,7 @@ Serial.println(Strata::toString(diag.taskStackRegion));
 
 ## Discovery model
 
-Scout `0.1.0` starts with active ARP discovery.
+Scout v0.1.0 starts with active ARP discovery.
 
 For each eligible interface, Scout calculates the directly connected IPv4 subnet, rejects scans larger than `maxHostsPerSubnet`, and processes targets in small batches. Direct lwIP calls such as `etharp_request()`, `etharp_find_addr()`, and interface lookup execute through `esp_netif_tcpip_exec()` in the lwIP TCP/IP context.
 
