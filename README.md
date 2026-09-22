@@ -198,6 +198,18 @@ Start with:
 examples/Basic
 ```
 
+## Testing
+
+Scout includes host-side regression tests for platform-independent discovery logic. The suite covers IPv4 subnet target generation and bounds, MAC helpers, public configuration defaults, endpoint refresh behavior, multi-interface endpoint handling, bounded endpoint replacement, and interface-name truncation.
+
+Run the host suite with:
+
+```sh
+bash tests/host/run.sh
+```
+
+CI runs the host suite with address and undefined-behavior sanitizers before the ESP32 example build matrix.
+
 ## Documentation
 
 | Document | Description |

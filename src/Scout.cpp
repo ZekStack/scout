@@ -1,5 +1,6 @@
 #include "Scout.h"
 
+#include "internal/ScoutLogic.h"
 #include "internal/ScoutNetwork.h"
 
 #include <strata/freertos/BinarySemaphore.h>
@@ -64,20 +65,6 @@ class ScoutLock {
 	for (;;) {
 		vTaskDelay(portMAX_DELAY);
 	}
-}
-
-bool sameMac(const uint8_t *left, const uint8_t *right) {
-	return std::memcmp(left, right, 6) == 0;
-}
-
-bool sameMac(const ScoutMacAddress &left, const uint8_t *right) {
-	return std::memcmp(left.bytes, right, sizeof(left.bytes)) == 0;
-}
-
-ScoutMacAddress makeMac(const uint8_t *bytes) {
-	ScoutMacAddress mac;
-	std::memcpy(mac.bytes, bytes, sizeof(mac.bytes));
-	return mac;
 }
 
 } // namespace
@@ -259,80 +246,34 @@ struct ScoutImpl {
 	}
 
 	size_t buildTargets(const scout_internal::InterfaceSnapshot &interfaceSnapshot) {
-		const uint32_t ip = lwip_ntohl(interfaceSnapshot.ipv4);
-		const uint32_t mask = lwip_ntohl(interfaceSnapshot.netmask);
-		const uint32_t network = ip & mask;
-		const uint32_t broadcast = network | ~mask;
+		const scout_internal::Ipv4TargetResult result = scout_internal::buildIpv4Targets(
+		    lwip_ntohl(interfaceSnapshot.ipv4),
+		    lwip_ntohl(interfaceSnapshot.netmask),
+		    config.maxHostsPerSubnet,
+		    targets,
+		    config.maxHostsPerSubnet
+		);
 
-		if (broadcast <= network + 1U) {
+		if (result.status == scout_internal::Ipv4TargetStatus::TooLarge) {
+			return SIZE_MAX;
+		}
+		if (result.status != scout_internal::Ipv4TargetStatus::Ok) {
 			return 0;
 		}
 
-		const uint64_t hostCount =
-		    static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network) - 1ULL;
-		if (hostCount > config.maxHostsPerSubnet) {
-			return SIZE_MAX;
+		for (size_t i = 0; i < result.count; ++i) {
+			targets[i] = lwip_htonl(targets[i]);
 		}
-
-		size_t count = 0;
-		for (uint32_t current = network + 1U; current < broadcast; ++current) {
-			if (current == ip) {
-				continue;
-			}
-			targets[count++] = lwip_htonl(current);
-		}
-		return count;
+		return result.count;
 	}
 
 	size_t findDeviceByMac(const uint8_t *mac) const {
 		for (size_t i = 0; i < deviceCount; ++i) {
-			if (sameMac(devices[i].info.mac, mac)) {
+			if (scout_internal::macEquals(devices[i].info.mac, mac)) {
 				return i;
 			}
 		}
 		return SIZE_MAX;
-	}
-
-	bool upsertEndpoint(
-	    ScoutDeviceInfo &device,
-	    const scout_internal::InterfaceSnapshot &interfaceSnapshot,
-	    uint32_t ipv4,
-	    uint64_t observedAt
-	) {
-		for (size_t i = 0; i < device.endpointCount; ++i) {
-			auto &endpoint = device.endpoints[i];
-			if (endpoint.interfaceIndex == interfaceSnapshot.index &&
-			    endpoint.ipv4.value == ipv4) {
-				endpoint.lastSeenAtMs = observedAt;
-				return false;
-			}
-		}
-
-		size_t targetIndex = device.endpointCount;
-		if (targetIndex >= SCOUT_MAX_ENDPOINTS_PER_DEVICE) {
-			targetIndex = 0;
-			for (size_t i = 1; i < device.endpointCount; ++i) {
-				if (device.endpoints[i].lastSeenAtMs <
-				    device.endpoints[targetIndex].lastSeenAtMs) {
-					targetIndex = i;
-				}
-			}
-		} else {
-			device.endpointCount++;
-		}
-
-		auto &endpoint = device.endpoints[targetIndex];
-		endpoint = {};
-		endpoint.ipv4.value = ipv4;
-		endpoint.interfaceIndex = interfaceSnapshot.index;
-		endpoint.lastSeenAtMs = observedAt;
-		std::strncpy(
-		    endpoint.interfaceName,
-		    interfaceSnapshot.name,
-		    sizeof(endpoint.interfaceName) - 1
-		);
-		endpoint.interfaceName[sizeof(endpoint.interfaceName) - 1] = '\0';
-		return true;
 	}
 
 	void observe(
@@ -368,14 +309,20 @@ struct ScoutImpl {
 					auto &info = devices[index].info;
 					info = {};
 					info.key.kind = ScoutIdentityKind::Mac;
-					info.key.mac = makeMac(mac);
+					info.key.mac = scout_internal::macFromBytes(mac);
 					info.mac = info.key.mac;
 					info.firstSeenAtMs = observedAt;
 					info.lastSeenAtMs = observedAt;
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
-					(void)upsertEndpoint(info, interfaceSnapshot, ipv4, observedAt);
+					(void)scout_internal::upsertEndpoint(
+					    info,
+					    interfaceSnapshot.index,
+					    interfaceSnapshot.name,
+					    ipv4,
+					    observedAt
+					);
 
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
@@ -398,8 +345,13 @@ struct ScoutImpl {
 				}
 				info.observationSources |= scoutObservationMask(source);
 				info.observationCount++;
-				const bool endpointChanged =
-				    upsertEndpoint(info, interfaceSnapshot, ipv4, observedAt);
+				const bool endpointChanged = scout_internal::upsertEndpoint(
+				    info,
+				    interfaceSnapshot.index,
+				    interfaceSnapshot.name,
+				    ipv4,
+				    observedAt
+				);
 
 				if (endpointChanged || confirmed) {
 					event.type = endpointChanged ? ScoutEventType::DeviceChanged
@@ -509,7 +461,7 @@ struct ScoutImpl {
 				}
 
 				const bool wasCached = beforeMappings[i].found &&
-				                       sameMac(beforeMappings[i].mac, afterMappings[i].mac);
+				                       scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
 				const bool confirmed = !wasCached;
 				const ScoutObservationSource source =
 				    confirmed ? ScoutObservationSource::ArpProbe
