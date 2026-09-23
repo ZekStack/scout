@@ -20,9 +20,11 @@
 namespace {
 
 constexpr const char *TaskName = "scout";
+constexpr const char *CleanupTaskName = "scout_cleanup";
 constexpr uint32_t StopPollMs = 20;
 constexpr uint32_t MinScanIntervalMs = 1000;
 constexpr uint32_t MinTaskStackBytes = 4096;
+constexpr uint32_t CleanupTaskStackBytes = 4096;
 
 uint64_t nowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -35,6 +37,22 @@ bool validStackSize(size_t stackBytes) {
 TickType_t timeoutTicks(uint32_t timeoutMs) {
 	return timeoutMs == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(timeoutMs);
 }
+
+class DeferredCleanupService {
+  public:
+	bool ensureStarted();
+	void enqueue(ScoutImpl *impl);
+
+  private:
+	static void taskEntry(void *context);
+	void run();
+
+	std::atomic_flag startLock = ATOMIC_FLAG_INIT;
+	std::atomic<ScoutImpl *> pending{nullptr};
+	Strata::FreeRTOS::Task task;
+};
+
+DeferredCleanupService *cleanupService();
 
 class ScoutLock {
   public:
@@ -101,7 +119,8 @@ struct ScoutImpl {
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
 	std::atomic<bool> startReady{false};
-	std::atomic<bool> readyForDelete{false};
+
+	ScoutImpl *deferredNext = nullptr;
 
 	ScoutState state = ScoutState::Stopped;
 	bool initialized = false;
