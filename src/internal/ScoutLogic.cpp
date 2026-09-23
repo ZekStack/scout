@@ -19,8 +19,7 @@ Ipv4TargetResult buildIpv4Targets(
 
 	const uint32_t network = ipv4HostOrder & netmaskHostOrder;
 	const uint32_t broadcast = network | ~netmaskHostOrder;
-	const uint64_t span =
-	    static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
+	const uint64_t span = static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
 
 	if (span <= 1ULL) {
 		return {Ipv4TargetStatus::Ok, 0};
@@ -50,8 +49,7 @@ bool macEquals(const uint8_t *left, const uint8_t *right) {
 }
 
 bool macEquals(const ScoutMacAddress &left, const uint8_t *right) {
-	return right != nullptr &&
-	       std::memcmp(left.bytes, right, sizeof(left.bytes)) == 0;
+	return right != nullptr && std::memcmp(left.bytes, right, sizeof(left.bytes)) == 0;
 }
 
 ScoutMacAddress macFromBytes(const uint8_t *bytes) {
@@ -81,8 +79,7 @@ bool upsertEndpoint(
 	if (targetIndex >= SCOUT_MAX_ENDPOINTS_PER_DEVICE) {
 		targetIndex = 0;
 		for (size_t i = 1; i < device.endpointCount; ++i) {
-			if (device.endpoints[i].lastSeenAtMs <
-			    device.endpoints[targetIndex].lastSeenAtMs) {
+			if (device.endpoints[i].lastSeenAtMs < device.endpoints[targetIndex].lastSeenAtMs) {
 				targetIndex = i;
 			}
 		}
@@ -96,22 +93,14 @@ bool upsertEndpoint(
 	endpoint.interfaceIndex = interfaceIndex;
 	endpoint.lastSeenAtMs = observedAt;
 	if (interfaceName != nullptr) {
-		std::strncpy(
-		    endpoint.interfaceName,
-		    interfaceName,
-		    sizeof(endpoint.interfaceName) - 1
-		);
+		std::strncpy(endpoint.interfaceName, interfaceName, sizeof(endpoint.interfaceName) - 1);
 		endpoint.interfaceName[sizeof(endpoint.interfaceName) - 1] = '\0';
 	}
 
 	return true;
 }
 
-bool removeEndpoint(
-    ScoutDeviceInfo &device,
-    uint8_t interfaceIndex,
-    uint32_t ipv4
-) {
+bool removeEndpoint(ScoutDeviceInfo &device, uint8_t interfaceIndex, uint32_t ipv4) {
 	for (size_t i = 0; i < device.endpointCount; ++i) {
 		const auto &endpoint = device.endpoints[i];
 		if (endpoint.interfaceIndex != interfaceIndex || endpoint.ipv4.value != ipv4) {
@@ -128,30 +117,20 @@ bool removeEndpoint(
 	return false;
 }
 
-bool deviceExpired(
-    const ScoutDeviceInfo &device,
-    uint64_t now,
-    uint64_t maxAgeMs
-) {
-	return maxAgeMs > 0 && now >= device.lastSeenAtMs &&
-	       now - device.lastSeenAtMs >= maxAgeMs;
+bool deviceExpired(const ScoutDeviceInfo &device, uint64_t now, uint64_t maxAgeMs) {
+	return maxAgeMs > 0 && now >= device.lastSeenAtMs && now - device.lastSeenAtMs >= maxAgeMs;
 }
 
-void mergeDeviceInfo(
-    ScoutDeviceInfo &target,
-    const ScoutDeviceInfo &source
-) {
+void mergeDeviceInfo(ScoutDeviceInfo &target, const ScoutDeviceInfo &source) {
 	if (target.firstSeenAtMs == 0 ||
 	    (source.firstSeenAtMs != 0 && source.firstSeenAtMs < target.firstSeenAtMs)) {
 		target.firstSeenAtMs = source.firstSeenAtMs;
 	}
 	target.lastSeenAtMs = std::max(target.lastSeenAtMs, source.lastSeenAtMs);
-	target.lastConfirmedAtMs =
-	    std::max(target.lastConfirmedAtMs, source.lastConfirmedAtMs);
+	target.lastConfirmedAtMs = std::max(target.lastConfirmedAtMs, source.lastConfirmedAtMs);
 	target.observationSources |= source.observationSources;
 
-	const uint32_t remaining =
-	    std::numeric_limits<uint32_t>::max() - target.observationCount;
+	const uint32_t remaining = std::numeric_limits<uint32_t>::max() - target.observationCount;
 	target.observationCount += std::min(remaining, source.observationCount);
 
 	for (size_t i = 0; i < source.endpointCount; ++i) {

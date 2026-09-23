@@ -165,10 +165,8 @@ struct ScoutImpl {
 			std::construct_at(&devices[i]);
 		}
 
-		targets = Strata::allocateArray<uint32_t>(
-		    incoming.maxHostsPerSubnet,
-		    incoming.memory.allocation
-		);
+		targets =
+		    Strata::allocateArray<uint32_t>(incoming.maxHostsPerSubnet, incoming.memory.allocation);
 		if (targets == nullptr) {
 			releaseBuffers();
 			return false;
@@ -206,12 +204,7 @@ struct ScoutImpl {
 		}
 	}
 
-	void emitSimple(
-	    ScoutEventType type,
-	    ScoutStatus status,
-	    uint64_t scanId,
-	    const char *message
-	) {
+	void emitSimple(ScoutEventType type, ScoutStatus status, uint64_t scanId, const char *message) {
 		emit(ScoutEvent{
 		    .type = type,
 		    .status = status,
@@ -234,12 +227,12 @@ struct ScoutImpl {
 			if (!coverageKnown || coverageAvailable != available) {
 				coverageKnown = true;
 				coverageAvailable = available;
-				event.type = available ? ScoutEventType::CoverageRestored
-				                       : ScoutEventType::CoverageLost;
+				event.type =
+				    available ? ScoutEventType::CoverageRestored : ScoutEventType::CoverageLost;
 				event.status = available ? ScoutStatus::Ok : ScoutStatus::NetworkUnavailable;
 				event.scanId = scanId;
-				event.message = available ? "network coverage available"
-				                          : "no eligible ARP-capable interface";
+				event.message =
+				    available ? "network coverage available" : "no eligible ARP-capable interface";
 				shouldEmit = true;
 			}
 		}
@@ -297,21 +290,15 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
-	size_t findEndpointOwner(
-	    uint8_t interfaceIndex,
-	    uint32_t ipv4,
-	    size_t excludedIndex
-	) const {
+	size_t findEndpointOwner(uint8_t interfaceIndex, uint32_t ipv4, size_t excludedIndex) const {
 		for (size_t i = 0; i < deviceCount; ++i) {
 			if (i == excludedIndex) {
 				continue;
 			}
 			const auto &info = devices[i].info;
-			for (size_t endpointIndex = 0; endpointIndex < info.endpointCount;
-			     ++endpointIndex) {
+			for (size_t endpointIndex = 0; endpointIndex < info.endpointCount; ++endpointIndex) {
 				const auto &endpoint = info.endpoints[endpointIndex];
-				if (endpoint.interfaceIndex == interfaceIndex &&
-				    endpoint.ipv4.value == ipv4) {
+				if (endpoint.interfaceIndex == interfaceIndex && endpoint.ipv4.value == ipv4) {
 					return i;
 				}
 			}
@@ -336,10 +323,7 @@ struct ScoutImpl {
 		for (size_t i = 0; i < deviceCount; ++i) {
 			size_t j = i + 1;
 			while (j < deviceCount) {
-				if (!scout_internal::macEquals(
-				        devices[i].info.mac,
-				        devices[j].info.mac.bytes
-				    )) {
+				if (!scout_internal::macEquals(devices[i].info.mac, devices[j].info.mac.bytes)) {
 					j++;
 					continue;
 				}
@@ -354,13 +338,11 @@ struct ScoutImpl {
 		while (changed) {
 			changed = false;
 			for (size_t i = 0; i < deviceCount && !changed; ++i) {
-				for (size_t leftIndex = 0;
-				     leftIndex < devices[i].info.endpointCount && !changed;
+				for (size_t leftIndex = 0; leftIndex < devices[i].info.endpointCount && !changed;
 				     ++leftIndex) {
 					const auto left = devices[i].info.endpoints[leftIndex];
 					for (size_t j = i + 1; j < deviceCount && !changed; ++j) {
-						for (size_t rightIndex = 0;
-						     rightIndex < devices[j].info.endpointCount;
+						for (size_t rightIndex = 0; rightIndex < devices[j].info.endpointCount;
 						     ++rightIndex) {
 							const auto right = devices[j].info.endpoints[rightIndex];
 							if (left.interfaceIndex != right.interfaceIndex ||
@@ -371,8 +353,7 @@ struct ScoutImpl {
 							const bool keepLeft =
 							    left.lastSeenAtMs > right.lastSeenAtMs ||
 							    (left.lastSeenAtMs == right.lastSeenAtMs &&
-							     devices[i].info.lastSeenAtMs >=
-							         devices[j].info.lastSeenAtMs);
+							     devices[i].info.lastSeenAtMs >= devices[j].info.lastSeenAtMs);
 							auto &loser = keepLeft ? devices[j].info : devices[i].info;
 							(void)scout_internal::removeEndpoint(
 							    loser,
@@ -385,6 +366,7 @@ struct ScoutImpl {
 						}
 					}
 				}
+			}
 		}
 	}
 
@@ -398,12 +380,11 @@ struct ScoutImpl {
 				if (!lock) {
 					return;
 				}
-				while (index < deviceCount &&
-				       !scout_internal::deviceExpired(
-				           devices[index].info,
-				           currentTime,
-				           config.deviceMaxAgeMs
-				       )) {
+				while (index < deviceCount && !scout_internal::deviceExpired(
+				                                  devices[index].info,
+				                                  currentTime,
+				                                  config.deviceMaxAgeMs
+				                              )) {
 					index++;
 				}
 				if (index < deviceCount) {
@@ -498,12 +479,11 @@ struct ScoutImpl {
 			if (index != SIZE_MAX) {
 				const size_t previousOwner =
 				    findEndpointOwner(interfaceSnapshot.index, ipv4, index);
-				if (previousOwner != SIZE_MAX &&
-				    scout_internal::removeEndpoint(
-				        devices[previousOwner].info,
-				        interfaceSnapshot.index,
-				        ipv4
-				    )) {
+				if (previousOwner != SIZE_MAX && scout_internal::removeEndpoint(
+				                                     devices[previousOwner].info,
+				                                     interfaceSnapshot.index,
+				                                     ipv4
+				                                 )) {
 					diag.endpointReassignmentCount++;
 					auto &event = events[eventCount++];
 					event.type = ScoutEventType::DeviceChanged;
@@ -537,14 +517,14 @@ struct ScoutImpl {
 				} else if (endpointChanged || confirmed) {
 					auto &event = events[eventCount++];
 					event.type = endpointChanged ? ScoutEventType::DeviceChanged
-					                            : ScoutEventType::DeviceObserved;
+					                             : ScoutEventType::DeviceObserved;
 					event.status = ScoutStatus::Ok;
 					event.scanId = scanId;
 					event.source = source;
 					event.hasDevice = true;
 					event.device = info;
-					event.message = endpointChanged ? "device endpoint changed"
-					                                : "device actively observed";
+					event.message =
+					    endpointChanged ? "device endpoint changed" : "device actively observed";
 				}
 			}
 		}
@@ -557,10 +537,8 @@ struct ScoutImpl {
 		}
 	}
 
-	ScoutStatus scanInterface(
-	    const scout_internal::InterfaceSnapshot &interfaceSnapshot,
-	    uint64_t scanId
-	) {
+	ScoutStatus
+	scanInterface(const scout_internal::InterfaceSnapshot &interfaceSnapshot, uint64_t scanId) {
 		const size_t targetCount = buildTargets(interfaceSnapshot);
 		if (targetCount == SIZE_MAX) {
 			{
@@ -619,12 +597,8 @@ struct ScoutImpl {
 			}
 
 			scout_internal::ArpRequestStats requestStats;
-			const esp_err_t requestResult = scout_internal::requestArp(
-			    interfaceSnapshot.index,
-			    batch,
-			    count,
-			    requestStats
-			);
+			const esp_err_t requestResult =
+			    scout_internal::requestArp(interfaceSnapshot.index, batch, count, requestStats);
 			{
 				ScoutLock lock(mutex);
 				if (lock) {
@@ -658,12 +632,12 @@ struct ScoutImpl {
 					continue;
 				}
 
-				const bool wasCached = beforeMappings[i].found &&
-				                       scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
+				const bool wasCached =
+				    beforeMappings[i].found &&
+				    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
 				const bool confirmed = !wasCached;
 				const ScoutObservationSource source =
-				    confirmed ? ScoutObservationSource::ArpProbe
-				              : ScoutObservationSource::ArpCache;
+				    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache;
 
 				{
 					ScoutLock lock(mutex);
@@ -685,8 +659,7 @@ struct ScoutImpl {
 				);
 			}
 
-			if (config.interBatchDelayMs > 0 &&
-			    !waitInterruptible(config.interBatchDelayMs)) {
+			if (config.interBatchDelayMs > 0 && !waitInterruptible(config.interBatchDelayMs)) {
 				return ScoutStatus::Cancelled;
 			}
 		}
@@ -700,12 +673,7 @@ struct ScoutImpl {
 		return ScoutStatus::Ok;
 	}
 
-	void finishScan(
-	    uint64_t scanId,
-	    uint64_t startedAt,
-	    ScoutStatus status,
-	    const char *message
-	) {
+	void finishScan(uint64_t scanId, uint64_t startedAt, ScoutStatus status, const char *message) {
 		{
 			ScoutLock lock(mutex);
 			if (lock) {
@@ -815,11 +783,10 @@ struct ScoutImpl {
 		    scanId,
 		    startedAt,
 		    scanStatus,
-		    scanStatus == ScoutStatus::Ok
-		        ? "scan completed"
-		        : scanStatus == ScoutStatus::Cancelled
-		              ? "scan cancelled"
-		              : "scan completed with skipped or failed interfaces"
+		    scanStatus == ScoutStatus::Ok ? "scan completed"
+		    : scanStatus == ScoutStatus::Cancelled
+		        ? "scan cancelled"
+		        : "scan completed with skipped or failed interfaces"
 		);
 	}
 
@@ -836,8 +803,7 @@ struct ScoutImpl {
 			}
 		}
 
-		uint64_t nextScanAt =
-		    scanRequested.load() ? nowMs() : nowMs() + config.scanIntervalMs;
+		uint64_t nextScanAt = scanRequested.load() ? nowMs() : nowMs() + config.scanIntervalMs;
 
 		while (!stopRequested.load()) {
 			const uint64_t current = nowMs();
@@ -849,8 +815,7 @@ struct ScoutImpl {
 			}
 
 			const uint64_t remaining = nextScanAt - current;
-			const uint32_t waitMs =
-			    static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
+			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
 			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(waitMs, 1)));
 		}
 
@@ -878,12 +843,9 @@ struct ScoutImpl {
 		}
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
 		    !Strata::validPlacement(incoming.memory.taskStack) ||
-		    incoming.scanIntervalMs < MinScanIntervalMs ||
-		    incoming.deviceMaxAgeMs == 0 ||
-		    incoming.arpResponseWaitMs == 0 ||
-		    incoming.maxDevices == 0 ||
-		    incoming.maxHostsPerSubnet == 0 ||
-		    incoming.arpBatchSize == 0 ||
+		    incoming.scanIntervalMs < MinScanIntervalMs || incoming.deviceMaxAgeMs == 0 ||
+		    incoming.arpResponseWaitMs == 0 || incoming.maxDevices == 0 ||
+		    incoming.maxHostsPerSubnet == 0 || incoming.arpBatchSize == 0 ||
 		    !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
 		}
@@ -913,10 +875,7 @@ struct ScoutImpl {
 			);
 		}
 		if (state != ScoutState::Stopped) {
-			return ScoutResult::failure(
-			    ScoutStatus::Busy,
-			    "Scout is starting or stopping"
-			);
+			return ScoutResult::failure(ScoutStatus::Busy, "Scout is starting or stopping");
 		}
 
 		config = incoming;
@@ -955,7 +914,10 @@ struct ScoutImpl {
 			releaseBuffers();
 			state = ScoutState::Stopped;
 			diag.state = state;
-			return ScoutResult::failure(ScoutStatus::TaskCreateFailed, "failed to create Scout task");
+			return ScoutResult::failure(
+			    ScoutStatus::TaskCreateFailed,
+			    "failed to create Scout task"
+			);
 		}
 
 		initialized = true;
@@ -1115,8 +1077,7 @@ ScoutResult ScoutResult::failure(ScoutStatus status, const char *message) {
 	return {status, message};
 }
 
-Scout::Scout()
-    : _impl(Strata::makeUnique<ScoutImpl>(Strata::Placement::PreferExternal)) {
+Scout::Scout() : _impl(Strata::makeUnique<ScoutImpl>(Strata::Placement::PreferExternal)) {
 }
 
 Scout::~Scout() {

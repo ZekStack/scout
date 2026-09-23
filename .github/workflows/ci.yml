@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: scout-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: https://espressif.github.io/arduino-esp32/package_esp32_index.json
@@ -216,9 +216,31 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-        with:
-          version: ${{ env.ARDUINO_CLI_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64|amd64)
+              archive="arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz"
+              ;;
+            aarch64|arm64)
+              archive="arduino-cli_${ARDUINO_CLI_VERSION}_Linux_ARM64.tar.gz"
+              ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          install_dir="${RUNNER_TEMP}/arduino-cli"
+          url="https://github.com/arduino/arduino-cli/releases/download/v${ARDUINO_CLI_VERSION}/${archive}"
+          mkdir -p "$install_dir"
+
+          curl --fail --location             --retry 5             --retry-all-errors             --retry-delay 2             --connect-timeout 15             --max-time 180             "$url"             --output "${RUNNER_TEMP}/${archive}"
+
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "$install_dir" arduino-cli
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/arduino-cli" version
 
       - name: Cache Arduino CLI packages
         uses: actions/cache@v4

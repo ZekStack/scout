@@ -48,10 +48,8 @@ enum class ScoutObservationSource : uint32_t {
 	Nbns = 1U << 5,
 };
 
-constexpr ScoutObservationSource operator|(
-    ScoutObservationSource left,
-    ScoutObservationSource right
-) {
+constexpr ScoutObservationSource
+operator|(ScoutObservationSource left, ScoutObservationSource right) {
 	return static_cast<ScoutObservationSource>(
 	    static_cast<uint32_t>(left) | static_cast<uint32_t>(right)
 	);
