@@ -2,7 +2,7 @@
 
 Scout is a continuous local-network discovery and observation library for ESP32.
 
-Scout discovers devices on directly connected IPv4 networks, keeps a bounded in-memory registry keyed by MAC address, tracks per-interface endpoints and observation timestamps, and reports discovery and coverage events from a dedicated background task. Scout owns discovery and observation only; application-level online/offline policy belongs in the consuming application.
+Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC-keyed registry, enriches known devices through ICMP, mDNS/DNS-SD, SSDP/UPnP, optional NBNS/reverse DNS and application-provided OUI lookup, and exposes conservative physical-device identity relationships. Scout owns discovery and observation only; application-level online/offline policy belongs in the consuming application.
 
 [![CI](https://github.com/ZekStack/scout/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/scout/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/scout?sort=semver)](https://github.com/ZekStack/scout/releases)
@@ -12,7 +12,9 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded in-
 
 * **Continuous discovery** - periodically scans eligible local IPv4 interfaces from a background FreeRTOS task.
 * **Public lwIP path** - active ARP requests and lookups run through ESP-NETIF's TCP/IP-context bridge instead of touching private lwIP ARP structures.
-* **MAC-first identity** - devices are keyed by MAC address while IPv4 addresses are tracked as per-interface endpoints.
+* **MAC-first identity** - devices are keyed by MAC address while IPv4/IPv6 aliases are tracked as per-interface endpoints.
+* **Rich enrichment** - learns friendly names, hostnames, services, manufacturer/model data and stable protocol identifiers.
+* **Conservative physical identity** - strong evidence can group multiple MAC identities without destructively merging their network records.
 * **Bounded registry lifetime** - stale observations expire after the configurable `deviceMaxAgeMs`, and endpoint ownership is deduplicated across devices.
 * **Coverage-aware** - reports when Scout can or cannot observe an eligible ARP-capable interface.
 * **Bounded work** - device capacity, subnet size, ARP batch size, response wait, and scan cadence are explicit.
@@ -107,7 +109,7 @@ config.memory.allocation = Strata::Placement::PreferExternal;
 config.memory.taskStack = Strata::Placement::PreferExternal;
 ```
 
-`memory.allocation` controls movable Scout-owned storage, including the device registry, subnet target buffer, and ARP scratch buffers.
+`memory.allocation` controls movable Scout-owned storage, including the rich device registry, provider target tables, identity tables, UPnP scratch storage, subnet target buffer, and ARP scratch buffers.
 
 `memory.taskStack` controls the Scout background task stack.
 
@@ -137,7 +139,7 @@ Scout distinguishes two ARP observation sources:
 
 Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
 
-The registry and source mask are intended to accept additional discovery providers such as ICMP, mDNS/DNS-SD, SSDP, and optional NBNS without changing higher-level presence policy.
+After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names, IPv6 aliases, and OUI vendor information without changing higher-level presence policy.
 
 ### Registry retention and deduplication
 
@@ -165,7 +167,8 @@ A presence layer built on Scout should suppress offline inference while coverage
 * Scout never retains lwIP `struct netif` or ARP-table pointers outside the TCP/IP-context callback.
 * Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
 * A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
-* Scout currently performs no persistence, port scanning, device-type classification, or OUI-vendor lookup.
+* Scout performs no persistence, port scanning, or heuristic device-type classification. OUI lookup is supported through an application-provided resolver so Scout does not ship a stale vendor database.
+* Rich `ScoutDeviceDetails` snapshots are intentionally large; keep reusable buffers in PSRAM rather than on a small task stack.
 * `PreferExternal` is deliberately different from `RequireExternal`; systems without usable PSRAM can still operate using Strata's fallback behavior.
 
 ## API overview
@@ -208,6 +211,9 @@ scout.deinit();
 | `ManualScan` | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`. |
 | `Diagnostics` | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics. |
 | `MultiInterface` | Inspect devices observed through multiple eligible ESP-NETIF interfaces. |
+| `EnrichedDiscovery` | Inspect preferred names, vendor/manufacturer/model data and discovered services. |
+| `IdentityGroups` | Inspect strong physical-device groups and their MAC-level members. |
+| `NetworkDeviceManagerStyle` | Project Scout data into the simple fields a non-technical device UI would consume. |
 
 For a first scan on a Wi-Fi-capable board, set the credentials in `examples/WiFiDiscovery/WiFiDiscovery.ino` and start with:
 
@@ -236,6 +242,8 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 | [`docs/architecture.md`](docs/architecture.md) | Responsibility boundaries, task ownership, identity, and coverage. |
 | [`docs/discovery.md`](docs/discovery.md) | ARP scan flow and observation semantics. |
 | [`docs/memory.md`](docs/memory.md) | Strata integration and external-memory policy. |
+| [`docs/enrichment.md`](docs/enrichment.md) | ICMP, mDNS, SSDP/UPnP, OUI, NBNS, DNS and metadata freshness. |
+| [`docs/identity.md`](docs/identity.md) | Physical-device relations, confidence and non-destructive grouping. |
 
 ## Compatibility
 
