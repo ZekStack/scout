@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Scout.h>
 
+#include <cstring>
+
 Scout scout;
 Strata::UniquePtr<ScoutDeviceDetails> details;
 
@@ -13,7 +15,7 @@ void setup() {
 	scout.setOuiLookup([](const ScoutMacAddress &mac, ScoutVendorInfo &vendor) {
 		if (mac.bytes[0] == 0x24 && mac.bytes[1] == 0x6F && mac.bytes[2] == 0x28) {
 			vendor.known = true;
-			strncpy(vendor.name, "Example vendor", sizeof(vendor.name) - 1);
+			std::strncpy(vendor.name, "Application vendor", sizeof(vendor.name) - 1);
 			return true;
 		}
 		return false;
