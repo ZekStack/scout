@@ -397,8 +397,8 @@ void testIdentityEvidenceAndContradictions() {
 	assert(relation.evidence.type == ScoutIdentityEvidenceType::UpnpUdn);
 	assert(relation.evidence.confidence == ScoutIdentityConfidence::Certain);
 
-	firstDetails = {};
-	secondDetails = {};
+	firstDetails = ScoutDeviceDetails{};
+	secondDetails = ScoutDeviceDetails{};
 	scout_internal::upsertName(
 	    firstDetails,
 	    ScoutNameSource::MdnsHostname,
