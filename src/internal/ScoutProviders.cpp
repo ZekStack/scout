@@ -538,7 +538,7 @@ ProviderRunStats runIcmpProvider(
 		return stats;
 	}
 #if SCOUT_HAS_PING
-	const size_t limit = std::min(MaxProviderTargetsPerRun, targetCount);
+	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
 	for (size_t processed = 0; processed < limit; ++processed) {
 		const size_t index = (cursor + processed) % targetCount;
 		const auto &target = targets[index];
@@ -691,10 +691,13 @@ ProviderRunStats runMdnsProvider(
 	const uint32_t queryBudget =
 	    config.queryTimeoutMs > enumerationTimeout ? config.queryTimeoutMs - enumerationTimeout :
 	                                                  config.queryTimeoutMs;
-	const uint32_t perQueryTimeout =
-	    std::max<uint32_t>(20, typeCount > 0 ? queryBudget / static_cast<uint32_t>(typeCount) : 20);
+	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
+	const uint32_t perQueryTimeout = std::max<uint32_t>(
+	    20,
+	    queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 20
+	);
 
-	for (size_t i = 0; i < typeCount; ++i) {
+	for (size_t i = 0; i < queryCount; ++i) {
 		mdns_result_t *results = nullptr;
 		const esp_err_t queryResult = mdns_query_ptr(
 		    types[i].service,
@@ -850,7 +853,7 @@ ProviderRunStats runSsdpProvider(
 
 			if (config.fetchDeviceDescription && parsed.location[0] != '\0' &&
 			    httpScratch != nullptr && httpScratchCapacity > 1 &&
-			    descriptionFetches < MaxSsdpDescriptionFetches) {
+			    descriptionFetches < std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
 				const size_t bodyLength = fetchHttpBody(
 				    parsed.location,
 				    config.httpTimeoutMs,
@@ -907,7 +910,8 @@ ProviderRunStats runSsdpProvider(
 				} else {
 					stats.timeouts++;
 				}
-			} else if (descriptionFetches >= MaxSsdpDescriptionFetches) {
+			} else if (descriptionFetches >=
+			           std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
 				stats.dropped++;
 			}
 
@@ -941,7 +945,8 @@ ProviderRunStats runNbnsProvider(
 			continue;
 		}
 
-		for (size_t i = 0; i < targetCount; ++i) {
+		const size_t targetLimit = std::min(targetCount, config.maxTargetsPerRun);
+		for (size_t i = 0; i < targetLimit; ++i) {
 			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
 				continue;
 			}
@@ -1034,7 +1039,7 @@ ProviderRunStats runReverseDnsProvider(
 		return stats;
 	}
 	(void)config.timeoutMs;
-	const size_t limit = std::min(MaxProviderTargetsPerRun, targetCount);
+	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
 	for (size_t processed = 0; processed < limit; ++processed) {
 		const size_t index = (cursor + processed) % targetCount;
 		const auto &target = targets[index];
