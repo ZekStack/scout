@@ -297,6 +297,146 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	size_t findEndpointOwner(
+	    uint8_t interfaceIndex,
+	    uint32_t ipv4,
+	    size_t excludedIndex
+	) const {
+		for (size_t i = 0; i < deviceCount; ++i) {
+			if (i == excludedIndex) {
+				continue;
+			}
+			const auto &info = devices[i].info;
+			for (size_t endpointIndex = 0; endpointIndex < info.endpointCount;
+			     ++endpointIndex) {
+				const auto &endpoint = info.endpoints[endpointIndex];
+				if (endpoint.interfaceIndex == interfaceIndex &&
+				    endpoint.ipv4.value == ipv4) {
+					return i;
+				}
+			}
+		}
+		return SIZE_MAX;
+	}
+
+	void removeDeviceAtLocked(size_t index) {
+		if (index >= deviceCount) {
+			return;
+		}
+		const size_t lastIndex = deviceCount - 1;
+		if (index != lastIndex) {
+			devices[index] = devices[lastIndex];
+		}
+		devices[lastIndex].info = {};
+		deviceCount--;
+		diag.deviceCount = deviceCount;
+	}
+
+	void deduplicateRegistryLocked() {
+		for (size_t i = 0; i < deviceCount; ++i) {
+			size_t j = i + 1;
+			while (j < deviceCount) {
+				if (!scout_internal::macEquals(
+				        devices[i].info.mac,
+				        devices[j].info.mac.bytes
+				    )) {
+					j++;
+					continue;
+				}
+
+				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
+				removeDeviceAtLocked(j);
+				diag.deduplicatedDeviceCount++;
+			}
+		}
+
+		bool changed = true;
+		while (changed) {
+			changed = false;
+			for (size_t i = 0; i < deviceCount && !changed; ++i) {
+				for (size_t leftIndex = 0;
+				     leftIndex < devices[i].info.endpointCount && !changed;
+				     ++leftIndex) {
+					const auto left = devices[i].info.endpoints[leftIndex];
+					for (size_t j = i + 1; j < deviceCount && !changed; ++j) {
+						for (size_t rightIndex = 0;
+						     rightIndex < devices[j].info.endpointCount;
+						     ++rightIndex) {
+							const auto right = devices[j].info.endpoints[rightIndex];
+							if (left.interfaceIndex != right.interfaceIndex ||
+							    left.ipv4 != right.ipv4) {
+								continue;
+							}
+
+							const bool keepLeft =
+							    left.lastSeenAtMs > right.lastSeenAtMs ||
+							    (left.lastSeenAtMs == right.lastSeenAtMs &&
+							     devices[i].info.lastSeenAtMs >=
+							         devices[j].info.lastSeenAtMs);
+							auto &loser = keepLeft ? devices[j].info : devices[i].info;
+							(void)scout_internal::removeEndpoint(
+							    loser,
+							    left.interfaceIndex,
+							    left.ipv4.value
+							);
+							diag.endpointReassignmentCount++;
+							changed = true;
+							break;
+						}
+					}
+				}
+		}
+	}
+
+	void expireStaleDevices(uint64_t scanId, uint64_t currentTime) {
+		size_t index = 0;
+		while (!stopRequested.load()) {
+			ScoutEvent event;
+			bool foundExpired = false;
+			{
+				ScoutLock lock(mutex);
+				if (!lock) {
+					return;
+				}
+				while (index < deviceCount &&
+				       !scout_internal::deviceExpired(
+				           devices[index].info,
+				           currentTime,
+				           config.deviceMaxAgeMs
+				       )) {
+					index++;
+				}
+				if (index < deviceCount) {
+					event.type = ScoutEventType::DeviceExpired;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.hasDevice = true;
+					event.device = devices[index].info;
+					event.message = "device registry entry expired";
+					removeDeviceAtLocked(index);
+					diag.expiredDeviceCount++;
+					foundExpired = true;
+				}
+			}
+
+			if (!foundExpired) {
+				break;
+			}
+			emit(event);
+		}
+	}
+
+	void maintainRegistry(uint64_t scanId) {
+		{
+			ScoutLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			deduplicateRegistryLocked();
+		}
+		expireStaleDevices(scanId, nowMs());
+	}
+
 	void observe(
 	    const scout_internal::InterfaceSnapshot &interfaceSnapshot,
 	    uint32_t ipv4,
