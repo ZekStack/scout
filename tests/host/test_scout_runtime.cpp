@@ -293,10 +293,12 @@ void testDestructionFromCallback() {
 	std::atomic<bool> allowDestroy{false};
 	std::atomic<bool> destroyed{false};
 	std::atomic<int> taskResets{0};
+	std::atomic<int> callbackCount{0};
 
 	Scout *instance = scout.load();
 	instance->onEvent([&](const ScoutEvent &event) {
-		if (event.type != ScoutEventType::ScanStarted || destroyed.load()) {
+		callbackCount.fetch_add(1);
+		if (event.type != ScoutEventType::CoverageLost || destroyed.load()) {
 			return;
 		}
 		while (!allowDestroy.load()) {
@@ -321,6 +323,7 @@ void testDestructionFromCallback() {
 	waitUntil([&] { return taskResets.load() > 0; });
 	Strata::TestHooks::resetTask = {};
 	assert(scout.load() == nullptr);
+	assert(callbackCount.load() == 2);
 }
 } // namespace
 
