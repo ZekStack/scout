@@ -59,7 +59,7 @@ jobs:
       - name: Check production C++ formatting
         run: |
           find src -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' \) -print0 \
-            | xargs -0 python -m clang_format --dry-run --Werror
+            | xargs -0 clang-format --dry-run --Werror
 
   metadata:
     runs-on: [self-hosted, zekstack-ci]
