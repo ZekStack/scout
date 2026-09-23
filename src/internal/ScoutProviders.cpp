@@ -75,7 +75,8 @@ esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
 
 	context->count = 0;
 	esp_netif_t *netif = nullptr;
-	while ((netif = esp_netif_next_unsafe(netif)) != nullptr && context->count < context->capacity) {
+	while ((netif = esp_netif_next_unsafe(netif)) != nullptr &&
+	       context->count < context->capacity) {
 		esp_netif_ip_info_t info{};
 		if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0 ||
 		    info.netmask.addr == 0) {
