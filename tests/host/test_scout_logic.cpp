@@ -18,6 +18,7 @@ void testPublicDefaultsAndValueTypes() {
 	assert(config.memory.allocation == Strata::Placement::PreferExternal);
 	assert(config.memory.taskStack == Strata::Placement::PreferExternal);
 	assert(config.scanOnInit);
+	assert(config.deviceMaxAgeMs == 5ULL * 60ULL * 1000ULL);
 	assert(config.maxDevices == 128);
 	assert(config.maxHostsPerSubnet == 512);
 
@@ -212,6 +213,57 @@ void testEndpointCapacityReplacesOldest() {
 	assert(!foundOldest);
 }
 
+void testEndpointRemovalAndExpiry() {
+	ScoutDeviceInfo device;
+	assert(scout_internal::upsertEndpoint(device, 1, "if1", 1, 100));
+	assert(scout_internal::upsertEndpoint(device, 2, "if2", 2, 200));
+	assert(scout_internal::upsertEndpoint(device, 3, "if3", 3, 300));
+
+	assert(scout_internal::removeEndpoint(device, 2, 2));
+	assert(device.endpointCount == 2);
+	assert(device.endpoints[0].interfaceIndex == 1);
+	assert(device.endpoints[1].interfaceIndex == 3);
+	assert(!scout_internal::removeEndpoint(device, 2, 2));
+
+	device.lastSeenAtMs = 1000;
+	assert(!scout_internal::deviceExpired(device, 1499, 500));
+	assert(scout_internal::deviceExpired(device, 1500, 500));
+	assert(!scout_internal::deviceExpired(device, 999, 500));
+	assert(!scout_internal::deviceExpired(device, 5000, 0));
+}
+
+void testMergeDeviceInfo() {
+	ScoutDeviceInfo target;
+	target.firstSeenAtMs = 200;
+	target.lastSeenAtMs = 300;
+	target.lastConfirmedAtMs = 250;
+	target.observationSources = scoutObservationMask(ScoutObservationSource::ArpCache);
+	target.observationCount = 2;
+	assert(scout_internal::upsertEndpoint(target, 1, "if1", 1, 300));
+
+	ScoutDeviceInfo source;
+	source.firstSeenAtMs = 100;
+	source.lastSeenAtMs = 500;
+	source.lastConfirmedAtMs = 450;
+	source.observationSources = scoutObservationMask(ScoutObservationSource::ArpProbe);
+	source.observationCount = 3;
+	assert(scout_internal::upsertEndpoint(source, 1, "if1", 1, 500));
+	assert(scout_internal::upsertEndpoint(source, 2, "if2", 2, 400));
+
+	scout_internal::mergeDeviceInfo(target, source);
+	assert(target.firstSeenAtMs == 100);
+	assert(target.lastSeenAtMs == 500);
+	assert(target.lastConfirmedAtMs == 450);
+	assert(
+	    target.observationSources ==
+	    (scoutObservationMask(ScoutObservationSource::ArpCache) |
+	     scoutObservationMask(ScoutObservationSource::ArpProbe))
+	);
+	assert(target.observationCount == 5);
+	assert(target.endpointCount == 2);
+	assert(target.endpoints[0].lastSeenAtMs == 500);
+}
+
 } // namespace
 
 int main() {
@@ -221,5 +273,7 @@ int main() {
 	testIpv4TargetBounds();
 	testEndpointInsertAndRefresh();
 	testEndpointCapacityReplacesOldest();
+	testEndpointRemovalAndExpiry();
+	testMergeDeviceInfo();
 	return 0;
 }

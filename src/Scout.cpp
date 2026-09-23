@@ -20,9 +20,11 @@
 namespace {
 
 constexpr const char *TaskName = "scout";
+constexpr const char *CleanupTaskName = "scout_cleanup";
 constexpr uint32_t StopPollMs = 20;
 constexpr uint32_t MinScanIntervalMs = 1000;
 constexpr uint32_t MinTaskStackBytes = 4096;
+constexpr uint32_t CleanupTaskStackBytes = 4096;
 
 uint64_t nowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -35,6 +37,22 @@ bool validStackSize(size_t stackBytes) {
 TickType_t timeoutTicks(uint32_t timeoutMs) {
 	return timeoutMs == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(timeoutMs);
 }
+
+class DeferredCleanupService {
+  public:
+	bool ensureStarted();
+	void enqueue(ScoutImpl *impl);
+
+  private:
+	static void taskEntry(void *context);
+	void run();
+
+	std::atomic_flag startLock = ATOMIC_FLAG_INIT;
+	std::atomic<ScoutImpl *> pending{nullptr};
+	Strata::FreeRTOS::Task task;
+};
+
+DeferredCleanupService *cleanupService();
 
 class ScoutLock {
   public:
@@ -101,7 +119,8 @@ struct ScoutImpl {
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
 	std::atomic<bool> startReady{false};
-	std::atomic<bool> readyForDelete{false};
+
+	ScoutImpl *deferredNext = nullptr;
 
 	ScoutState state = ScoutState::Stopped;
 	bool initialized = false;
@@ -278,6 +297,146 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	size_t findEndpointOwner(
+	    uint8_t interfaceIndex,
+	    uint32_t ipv4,
+	    size_t excludedIndex
+	) const {
+		for (size_t i = 0; i < deviceCount; ++i) {
+			if (i == excludedIndex) {
+				continue;
+			}
+			const auto &info = devices[i].info;
+			for (size_t endpointIndex = 0; endpointIndex < info.endpointCount;
+			     ++endpointIndex) {
+				const auto &endpoint = info.endpoints[endpointIndex];
+				if (endpoint.interfaceIndex == interfaceIndex &&
+				    endpoint.ipv4.value == ipv4) {
+					return i;
+				}
+			}
+		}
+		return SIZE_MAX;
+	}
+
+	void removeDeviceAtLocked(size_t index) {
+		if (index >= deviceCount) {
+			return;
+		}
+		const size_t lastIndex = deviceCount - 1;
+		if (index != lastIndex) {
+			devices[index] = devices[lastIndex];
+		}
+		devices[lastIndex].info = {};
+		deviceCount--;
+		diag.deviceCount = deviceCount;
+	}
+
+	void deduplicateRegistryLocked() {
+		for (size_t i = 0; i < deviceCount; ++i) {
+			size_t j = i + 1;
+			while (j < deviceCount) {
+				if (!scout_internal::macEquals(
+				        devices[i].info.mac,
+				        devices[j].info.mac.bytes
+				    )) {
+					j++;
+					continue;
+				}
+
+				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
+				removeDeviceAtLocked(j);
+				diag.deduplicatedDeviceCount++;
+			}
+		}
+
+		bool changed = true;
+		while (changed) {
+			changed = false;
+			for (size_t i = 0; i < deviceCount && !changed; ++i) {
+				for (size_t leftIndex = 0;
+				     leftIndex < devices[i].info.endpointCount && !changed;
+				     ++leftIndex) {
+					const auto left = devices[i].info.endpoints[leftIndex];
+					for (size_t j = i + 1; j < deviceCount && !changed; ++j) {
+						for (size_t rightIndex = 0;
+						     rightIndex < devices[j].info.endpointCount;
+						     ++rightIndex) {
+							const auto right = devices[j].info.endpoints[rightIndex];
+							if (left.interfaceIndex != right.interfaceIndex ||
+							    left.ipv4 != right.ipv4) {
+								continue;
+							}
+
+							const bool keepLeft =
+							    left.lastSeenAtMs > right.lastSeenAtMs ||
+							    (left.lastSeenAtMs == right.lastSeenAtMs &&
+							     devices[i].info.lastSeenAtMs >=
+							         devices[j].info.lastSeenAtMs);
+							auto &loser = keepLeft ? devices[j].info : devices[i].info;
+							(void)scout_internal::removeEndpoint(
+							    loser,
+							    left.interfaceIndex,
+							    left.ipv4.value
+							);
+							diag.endpointReassignmentCount++;
+							changed = true;
+							break;
+						}
+					}
+				}
+		}
+	}
+
+	void expireStaleDevices(uint64_t scanId, uint64_t currentTime) {
+		size_t index = 0;
+		while (!stopRequested.load()) {
+			ScoutEvent event;
+			bool foundExpired = false;
+			{
+				ScoutLock lock(mutex);
+				if (!lock) {
+					return;
+				}
+				while (index < deviceCount &&
+				       !scout_internal::deviceExpired(
+				           devices[index].info,
+				           currentTime,
+				           config.deviceMaxAgeMs
+				       )) {
+					index++;
+				}
+				if (index < deviceCount) {
+					event.type = ScoutEventType::DeviceExpired;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.hasDevice = true;
+					event.device = devices[index].info;
+					event.message = "device registry entry expired";
+					removeDeviceAtLocked(index);
+					diag.expiredDeviceCount++;
+					foundExpired = true;
+				}
+			}
+
+			if (!foundExpired) {
+				break;
+			}
+			emit(event);
+		}
+	}
+
+	void maintainRegistry(uint64_t scanId) {
+		{
+			ScoutLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			deduplicateRegistryLocked();
+		}
+		expireStaleDevices(scanId, nowMs());
+	}
+
 	void observe(
 	    const scout_internal::InterfaceSnapshot &interfaceSnapshot,
 	    uint32_t ipv4,
@@ -286,8 +445,8 @@ struct ScoutImpl {
 	    bool confirmed,
 	    uint64_t scanId
 	) {
-		ScoutEvent event;
-		bool shouldEmit = false;
+		ScoutEvent events[2]{};
+		size_t eventCount = 0;
 		const uint64_t observedAt = nowMs();
 
 		{
@@ -297,17 +456,19 @@ struct ScoutImpl {
 			}
 
 			size_t index = findDeviceByMac(mac);
+			bool discovered = false;
 			if (index == SIZE_MAX) {
 				if (deviceCount >= deviceCapacity) {
 					diag.deviceLimitDrops++;
+					auto &event = events[eventCount++];
 					event.type = ScoutEventType::Error;
 					event.status = ScoutStatus::DeviceLimitReached;
 					event.scanId = scanId;
 					event.source = source;
 					event.message = "device registry limit reached";
-					shouldEmit = true;
 				} else {
 					index = deviceCount++;
+					discovered = true;
 					auto &info = devices[index].info;
 					info = {};
 					info.key.kind = ScoutIdentityKind::Mac;
@@ -318,26 +479,9 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
-					(void)scout_internal::upsertEndpoint(
-					    info,
-					    interfaceSnapshot.index,
-					    interfaceSnapshot.name,
-					    ipv4,
-					    observedAt
-					);
 
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
-
-					event.type = ScoutEventType::DeviceDiscovered;
-					event.status = ScoutStatus::Ok;
-					event.scanId = scanId;
-					event.source = source;
-					event.hasDevice = true;
-					event.device = info;
-					event.message = confirmed ? "device discovered by active ARP"
-					                          : "device discovered from ARP cache";
-					shouldEmit = true;
 				}
 			} else {
 				auto &info = devices[index].info;
@@ -346,7 +490,32 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = observedAt;
 				}
 				info.observationSources |= scoutObservationMask(source);
-				info.observationCount++;
+				if (info.observationCount != UINT32_MAX) {
+					info.observationCount++;
+				}
+			}
+
+			if (index != SIZE_MAX) {
+				const size_t previousOwner =
+				    findEndpointOwner(interfaceSnapshot.index, ipv4, index);
+				if (previousOwner != SIZE_MAX &&
+				    scout_internal::removeEndpoint(
+				        devices[previousOwner].info,
+				        interfaceSnapshot.index,
+				        ipv4
+				    )) {
+					diag.endpointReassignmentCount++;
+					auto &event = events[eventCount++];
+					event.type = ScoutEventType::DeviceChanged;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.source = source;
+					event.hasDevice = true;
+					event.device = devices[previousOwner].info;
+					event.message = "device endpoint reassigned";
+				}
+
+				auto &info = devices[index].info;
 				const bool endpointChanged = scout_internal::upsertEndpoint(
 				    info,
 				    interfaceSnapshot.index,
@@ -355,7 +524,18 @@ struct ScoutImpl {
 				    observedAt
 				);
 
-				if (endpointChanged || confirmed) {
+				if (discovered) {
+					auto &event = events[eventCount++];
+					event.type = ScoutEventType::DeviceDiscovered;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.source = source;
+					event.hasDevice = true;
+					event.device = info;
+					event.message = confirmed ? "device discovered by active ARP"
+					                          : "device discovered from ARP cache";
+				} else if (endpointChanged || confirmed) {
+					auto &event = events[eventCount++];
 					event.type = endpointChanged ? ScoutEventType::DeviceChanged
 					                            : ScoutEventType::DeviceObserved;
 					event.status = ScoutStatus::Ok;
@@ -365,13 +545,15 @@ struct ScoutImpl {
 					event.device = info;
 					event.message = endpointChanged ? "device endpoint changed"
 					                                : "device actively observed";
-					shouldEmit = true;
 				}
 			}
 		}
 
-		if (shouldEmit) {
-			emit(event);
+		for (size_t i = 0; i < eventCount; ++i) {
+			emit(events[i]);
+			if (stopRequested.load()) {
+				break;
+			}
 		}
 	}
 
@@ -457,7 +639,7 @@ struct ScoutImpl {
 			}
 
 			if (!waitInterruptible(config.arpResponseWaitMs)) {
-				return ScoutStatus::Busy;
+				return ScoutStatus::Cancelled;
 			}
 
 			const esp_err_t afterResult = scout_internal::lookupArpMappings(
@@ -505,14 +687,35 @@ struct ScoutImpl {
 
 			if (config.interBatchDelayMs > 0 &&
 			    !waitInterruptible(config.interBatchDelayMs)) {
-				return ScoutStatus::Busy;
+				return ScoutStatus::Cancelled;
 			}
+		}
+		if (stopRequested.load()) {
+			return ScoutStatus::Cancelled;
 		}
 		if (hadRequestFailures) {
 			recordNetworkError(scanId, "one or more ARP requests failed");
 			return ScoutStatus::InternalError;
 		}
 		return ScoutStatus::Ok;
+	}
+
+	void finishScan(
+	    uint64_t scanId,
+	    uint64_t startedAt,
+	    ScoutStatus status,
+	    const char *message
+	) {
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				if (status == ScoutStatus::Ok) {
+					diag.completedScanCount++;
+				}
+				diag.lastScanDurationMs = nowMs() - startedAt;
+			}
+		}
+		emitSimple(ScoutEventType::ScanCompleted, status, scanId, message);
 	}
 
 	void performScan() {
@@ -527,6 +730,12 @@ struct ScoutImpl {
 		}
 		emitSimple(ScoutEventType::ScanStarted, ScoutStatus::Ok, scanId, "scan started");
 
+		maintainRegistry(scanId);
+		if (stopRequested.load()) {
+			finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
+			return;
+		}
+
 		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
 		size_t interfaceCount = 0;
 		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
@@ -540,10 +749,15 @@ struct ScoutImpl {
 				ScoutLock lock(mutex);
 				if (lock) {
 					diag.skippedScanCount++;
-					diag.lastScanDurationMs = nowMs() - startedAt;
 				}
 			}
 			recordNetworkError(scanId, "failed to enumerate network interfaces");
+			finishScan(
+			    scanId,
+			    startedAt,
+			    ScoutStatus::InternalError,
+			    "scan failed while enumerating network interfaces"
+			);
 			return;
 		}
 
@@ -553,7 +767,6 @@ struct ScoutImpl {
 				ScoutLock lock(mutex);
 				if (lock) {
 					diag.skippedScanCount++;
-					diag.lastScanDurationMs = nowMs() - startedAt;
 				}
 			}
 			emitSimple(
@@ -562,12 +775,27 @@ struct ScoutImpl {
 			    scanId,
 			    "no eligible ARP-capable interface"
 			);
+			finishScan(
+			    scanId,
+			    startedAt,
+			    ScoutStatus::NetworkUnavailable,
+			    "scan completed without an eligible interface"
+			);
 			return;
 		}
 
 		ScoutStatus scanStatus = ScoutStatus::Ok;
-		for (size_t i = 0; i < interfaceCount && !stopRequested.load(); ++i) {
+		for (size_t i = 0; i < interfaceCount; ++i) {
+			if (stopRequested.load()) {
+				scanStatus = ScoutStatus::Cancelled;
+				break;
+			}
+
 			const ScoutStatus interfaceStatus = scanInterface(interfaces[i], scanId);
+			if (interfaceStatus == ScoutStatus::Cancelled) {
+				scanStatus = ScoutStatus::Cancelled;
+				break;
+			}
 			if (interfaceStatus == ScoutStatus::InternalError ||
 			    (scanStatus == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
 				scanStatus = interfaceStatus;
@@ -575,27 +803,23 @@ struct ScoutImpl {
 		}
 
 		if (stopRequested.load()) {
-			return;
+			scanStatus = ScoutStatus::Cancelled;
 		}
 
-		// A partial or failed sweep cannot support absence inference.
-		updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				if (scanStatus == ScoutStatus::Ok) {
-					diag.completedScanCount++;
-				}
-				diag.lastScanDurationMs = nowMs() - startedAt;
-			}
+		if (scanStatus != ScoutStatus::Cancelled) {
+			// A partial or failed sweep cannot support absence inference.
+			updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
 		}
-		emitSimple(
-		    ScoutEventType::ScanCompleted,
-		    scanStatus,
+
+		finishScan(
 		    scanId,
-		    scanStatus == ScoutStatus::Ok ? "scan completed"
-		                                  : "scan completed with skipped or failed interfaces"
+		    startedAt,
+		    scanStatus,
+		    scanStatus == ScoutStatus::Ok
+		        ? "scan completed"
+		        : scanStatus == ScoutStatus::Cancelled
+		              ? "scan cancelled"
+		              : "scan completed with skipped or failed interfaces"
 		);
 	}
 
@@ -636,7 +860,6 @@ struct ScoutImpl {
 				diag.taskStackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
 			}
 		}
-		readyForDelete.store(true);
 		(void)stopped.give();
 		suspendForever();
 	}
@@ -656,12 +879,27 @@ struct ScoutImpl {
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
 		    !Strata::validPlacement(incoming.memory.taskStack) ||
 		    incoming.scanIntervalMs < MinScanIntervalMs ||
+		    incoming.deviceMaxAgeMs == 0 ||
 		    incoming.arpResponseWaitMs == 0 ||
 		    incoming.maxDevices == 0 ||
 		    incoming.maxHostsPerSubnet == 0 ||
 		    incoming.arpBatchSize == 0 ||
 		    !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
+		}
+
+		auto *cleanup = cleanupService();
+		if (cleanup == nullptr) {
+			return ScoutResult::failure(
+			    ScoutStatus::NoMemory,
+			    "failed to allocate Scout cleanup service"
+			);
+		}
+		if (!cleanup->ensureStarted()) {
+			return ScoutResult::failure(
+			    ScoutStatus::TaskCreateFailed,
+			    "failed to create Scout cleanup task"
+			);
 		}
 
 		ScoutLock lock(mutex);
@@ -701,7 +939,6 @@ struct ScoutImpl {
 		stopRequested.store(false);
 		scanRequested.store(incoming.scanOnInit);
 		startReady.store(false, std::memory_order_release);
-		readyForDelete.store(false);
 
 		task = Strata::FreeRTOS::Task::create(
 		    &ScoutImpl::taskEntry,
@@ -792,6 +1029,84 @@ struct ScoutImpl {
 	}
 };
 
+namespace {
+
+DeferredCleanupService *cleanupService() {
+	static DeferredCleanupService *service =
+	    Strata::create<DeferredCleanupService>(Strata::Placement::PreferExternal);
+	return service;
+}
+
+bool DeferredCleanupService::ensureStarted() {
+	while (startLock.test_and_set(std::memory_order_acquire)) {
+		vTaskDelay(1);
+	}
+
+	if (!task) {
+		task = Strata::FreeRTOS::Task::create(
+		    &DeferredCleanupService::taskEntry,
+		    this,
+		    Strata::FreeRTOS::TaskConfig{
+		        .name = CleanupTaskName,
+		        .stackBytes = CleanupTaskStackBytes,
+		        .stackPlacement = Strata::Placement::PreferExternal,
+		        .priority = 1,
+		        .affinity = tskNO_AFFINITY,
+		    }
+		);
+	}
+
+	const bool started = static_cast<bool>(task);
+	startLock.clear(std::memory_order_release);
+	return started;
+}
+
+void DeferredCleanupService::enqueue(ScoutImpl *impl) {
+	if (impl == nullptr) {
+		return;
+	}
+
+	ScoutImpl *head = pending.load(std::memory_order_relaxed);
+	do {
+		impl->deferredNext = head;
+	} while (!pending.compare_exchange_weak(
+	    head,
+	    impl,
+	    std::memory_order_release,
+	    std::memory_order_relaxed
+	));
+
+	if (task.handle() != nullptr) {
+		xTaskNotifyGive(task.handle());
+	}
+}
+
+void DeferredCleanupService::run() {
+	for (;;) {
+		(void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		ScoutImpl *list = pending.exchange(nullptr, std::memory_order_acquire);
+		while (list != nullptr) {
+			ScoutImpl *next = list->deferredNext;
+			list->deferredNext = nullptr;
+			Strata::UniquePtr<ScoutImpl> owned{list};
+			if (owned->initialized) {
+				(void)owned->deinit(UINT32_MAX);
+			}
+			list = next;
+		}
+	}
+}
+
+void DeferredCleanupService::taskEntry(void *context) {
+	auto *self = static_cast<DeferredCleanupService *>(context);
+	if (self == nullptr) {
+		suspendForever();
+	}
+	self->run();
+}
+
+} // namespace
+
 ScoutResult ScoutResult::success(const char *message) {
 	return {ScoutStatus::Ok, message};
 }
@@ -805,9 +1120,28 @@ Scout::Scout()
 }
 
 Scout::~Scout() {
-	if (_impl && _impl->initialized) {
-		(void)_impl->deinit(UINT32_MAX);
+	if (!_impl || !_impl->initialized) {
+		return;
 	}
+
+	if (_impl->task.handle() == xTaskGetCurrentTaskHandle()) {
+		auto *service = cleanupService();
+		{
+			ScoutLock lock(_impl->mutex);
+			if (lock) {
+				_impl->callback = {};
+			}
+		}
+		ScoutImpl *deferred = _impl.release();
+		deferred->stopRequested.store(true);
+		deferred->scanRequested.store(false);
+		if (service != nullptr) {
+			service->enqueue(deferred);
+		}
+		return;
+	}
+
+	(void)_impl->deinit(UINT32_MAX);
 }
 
 ScoutResult Scout::init(const ScoutConfig &config) {
@@ -965,6 +1299,8 @@ const char *Scout::statusToString(ScoutStatus status) const {
 		return "task_create_failed";
 	case ScoutStatus::Busy:
 		return "busy";
+	case ScoutStatus::Cancelled:
+		return "cancelled";
 	case ScoutStatus::Timeout:
 		return "timeout";
 	case ScoutStatus::NetworkUnavailable:
@@ -1007,6 +1343,8 @@ const char *Scout::eventTypeToString(ScoutEventType type) const {
 		return "device_observed";
 	case ScoutEventType::DeviceChanged:
 		return "device_changed";
+	case ScoutEventType::DeviceExpired:
+		return "device_expired";
 	case ScoutEventType::CoverageLost:
 		return "coverage_lost";
 	case ScoutEventType::CoverageRestored:

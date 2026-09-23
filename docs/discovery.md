@@ -35,7 +35,15 @@ This prevents Scout from pretending that an old ARP cache entry is a fresh liven
 
 The default scan interval is 60 seconds. scanNow schedules an immediate scan and returns without waiting for the subnet sweep to complete.
 
-A dedicated Scout task performs the scan. ARP batches use bounded waits, check the shutdown request between batches, and yield between batches. An interface with no ARP targets or a subnet larger than `maxHostsPerSubnet` emits `ScanSkipped`; an ARP operation failure emits `Error`. The final `ScanCompleted` status is non-OK if any interface was skipped or failed, and only fully successful sweeps increment `completedScanCount`. Coverage is updated after the sweep, so `CoverageRestored` follows the observations that established it.
+A dedicated Scout task performs the scan. ARP batches use bounded waits, check the shutdown request between batches, and yield between batches. An interface with no ARP targets or a subnet larger than `maxHostsPerSubnet` emits `ScanSkipped`; an ARP operation failure emits `Error`. Every `ScanStarted` has exactly one terminal `ScanCompleted` with the same `scanId`. Shutdown interruption completes with `Cancelled`. The final status is otherwise non-OK if any interface was skipped or failed, and only fully successful sweeps increment `completedScanCount`. Coverage is updated after the sweep, so `CoverageRestored` follows the observations that established it.
+
+## Registry retention
+
+Before each scan, Scout normalizes duplicate registry state and removes records older than `deviceMaxAgeMs` according to `lastSeenAtMs`. Each removal emits `DeviceExpired` with the final snapshot. The default retention age is five minutes.
+
+Expiry is deliberately not based on `lastConfirmedAtMs`: registry retention asks whether Scout has observed a device at all, while stronger presence semantics belong to the consumer.
+
+MAC identity is never deduplicated using IPv4 alone. A reused `(interface, IPv4)` endpoint is transferred to the most recently observed MAC so stale address ownership cannot remain duplicated in the registry.
 
 ## Planned observation providers
 

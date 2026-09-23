@@ -13,6 +13,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded in-
 * **Continuous discovery** - periodically scans eligible local IPv4 interfaces from a background FreeRTOS task.
 * **Public lwIP path** - active ARP requests and lookups run through ESP-NETIF's TCP/IP-context bridge instead of touching private lwIP ARP structures.
 * **MAC-first identity** - devices are keyed by MAC address while IPv4 addresses are tracked as per-interface endpoints.
+* **Bounded registry lifetime** - stale observations expire after the configurable `deviceMaxAgeMs`, and endpoint ownership is deduplicated across devices.
 * **Coverage-aware** - reports when Scout can or cannot observe an eligible ARP-capable interface.
 * **Bounded work** - device capacity, subnet size, ARP batch size, response wait, and scan cadence are explicit.
 * **PSRAM-first** - Scout-owned movable storage and the Scout task stack prefer external memory by default.
@@ -110,7 +111,7 @@ config.memory.taskStack = Strata::Placement::PreferExternal;
 
 `memory.taskStack` controls the Scout background task stack.
 
-The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
+The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. The shared deferred-cleanup task used for callback-safe destruction also has an external-preferred stack. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
 
 Diagnostics report both requested placement and observed regions:
 
@@ -138,11 +139,19 @@ Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP 
 
 The registry and source mask are intended to accept additional discovery providers such as ICMP, mDNS/DNS-SD, SSDP, and optional NBNS without changing higher-level presence policy.
 
+### Registry retention and deduplication
+
+`deviceMaxAgeMs` controls registry retention, not presence state. The default is five minutes. A record expires when Scout has not observed it for that duration, based on `lastSeenAtMs`, and Scout emits `DeviceExpired` with the final device snapshot. For stable continuous discovery, configure the retention age to at least twice the normal scan interval; smaller values are valid but can intentionally produce expire/rediscover churn.
+
+MAC address remains the device identity. Scout never merges two different MAC addresses merely because they used the same IPv4 address. Within the registry, a specific `(interface, IPv4)` endpoint has one current MAC owner; observing that endpoint on another MAC transfers the endpoint while retaining the older device record until its own retention period expires.
+
+`lastConfirmedAtMs` remains separate from retention. Applications that need Online/Offline state should continue to apply their own presence policy above Scout.
+
 ## Coverage model
 
 Coverage is separate from device observations.
 
-Scout reports `CoverageLost` when no eligible interface is available or a scan of any eligible interface is skipped or fails. It reports `CoverageRestored` after every eligible interface completes a scan successfully. A skipped or failed interface gives the final `ScanCompleted` event a non-OK status.
+Scout reports `CoverageLost` when no eligible interface is available or a scan of any eligible interface is skipped or fails. It reports `CoverageRestored` after every eligible interface completes a scan successfully. A skipped or failed interface gives the final `ScanCompleted` event a non-OK status. Every emitted `ScanStarted` has exactly one terminal `ScanCompleted` with the same `scanId`, including cancellation during shutdown.
 
 A presence layer built on Scout should suppress offline inference while coverage is unavailable and revalidate known devices after coverage returns.
 
@@ -152,7 +161,7 @@ A presence layer built on Scout should suppress offline inference while coverage
 > Scout reports network observations, not application-level online/offline state.
 
 * `scanNow()` schedules an immediate scan and returns; it does not block until the subnet sweep completes.
-* Event callbacks run from the Scout task. Keep them short and do not call `deinit()` from a Scout callback.
+* Event callbacks run from the Scout task. Keep them short. Explicit `deinit()` from a callback returns `Busy`; destroying the `Scout` object from its callback is supported through deferred cleanup on a separate Strata-owned task.
 * Scout never retains lwIP `struct netif` or ARP-table pointers outside the TCP/IP-context callback.
 * Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
 * A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
@@ -166,6 +175,7 @@ A presence layer built on Scout should suppress offline inference while coverage
 ```cpp
 ScoutConfig config;
 config.scanIntervalMs = 60'000;
+config.deviceMaxAgeMs = 5 * 60'000ULL;
 config.maxDevices = 128;
 config.maxHostsPerSubnet = 512;
 
@@ -209,7 +219,7 @@ The other sketches expect the application to start a Wi-Fi or Ethernet interface
 
 ## Testing
 
-Scout includes host-side regression tests for platform-independent discovery logic. The suite covers IPv4 subnet target generation and bounds, MAC helpers, public configuration defaults, endpoint refresh behavior, multi-interface endpoint handling, bounded endpoint replacement, and interface-name truncation.
+Scout includes host-side regression tests for platform-independent discovery logic and runtime lifecycle behavior. The suite covers IPv4 target generation, registry aging and deduplication, endpoint reassignment, terminal scan events, callback destruction, public configuration defaults, and bounded endpoint handling.
 
 Run the host suite with:
 

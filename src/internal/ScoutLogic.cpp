@@ -1,6 +1,8 @@
 #include "ScoutLogic.h"
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace scout_internal {
 
@@ -103,6 +105,65 @@ bool upsertEndpoint(
 	}
 
 	return true;
+}
+
+bool removeEndpoint(
+    ScoutDeviceInfo &device,
+    uint8_t interfaceIndex,
+    uint32_t ipv4
+) {
+	for (size_t i = 0; i < device.endpointCount; ++i) {
+		const auto &endpoint = device.endpoints[i];
+		if (endpoint.interfaceIndex != interfaceIndex || endpoint.ipv4.value != ipv4) {
+			continue;
+		}
+
+		for (size_t j = i + 1; j < device.endpointCount; ++j) {
+			device.endpoints[j - 1] = device.endpoints[j];
+		}
+		device.endpointCount--;
+		device.endpoints[device.endpointCount] = {};
+		return true;
+	}
+	return false;
+}
+
+bool deviceExpired(
+    const ScoutDeviceInfo &device,
+    uint64_t now,
+    uint64_t maxAgeMs
+) {
+	return maxAgeMs > 0 && now >= device.lastSeenAtMs &&
+	       now - device.lastSeenAtMs >= maxAgeMs;
+}
+
+void mergeDeviceInfo(
+    ScoutDeviceInfo &target,
+    const ScoutDeviceInfo &source
+) {
+	if (target.firstSeenAtMs == 0 ||
+	    (source.firstSeenAtMs != 0 && source.firstSeenAtMs < target.firstSeenAtMs)) {
+		target.firstSeenAtMs = source.firstSeenAtMs;
+	}
+	target.lastSeenAtMs = std::max(target.lastSeenAtMs, source.lastSeenAtMs);
+	target.lastConfirmedAtMs =
+	    std::max(target.lastConfirmedAtMs, source.lastConfirmedAtMs);
+	target.observationSources |= source.observationSources;
+
+	const uint32_t remaining =
+	    std::numeric_limits<uint32_t>::max() - target.observationCount;
+	target.observationCount += std::min(remaining, source.observationCount);
+
+	for (size_t i = 0; i < source.endpointCount; ++i) {
+		const auto &endpoint = source.endpoints[i];
+		(void)upsertEndpoint(
+		    target,
+		    endpoint.interfaceIndex,
+		    endpoint.interfaceName,
+		    endpoint.ipv4.value,
+		    endpoint.lastSeenAtMs
+		);
+	}
 }
 
 } // namespace scout_internal
