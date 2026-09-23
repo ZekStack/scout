@@ -22,6 +22,45 @@ env:
   STRATA_VERSION: v0.1.2
 
 jobs:
+  whitespace:
+    runs-on: [self-hosted, zekstack-ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${BASE_SHA}" == "0000000000000000000000000000000000000000" || -z "${BASE_SHA}" ]]; then
+            git show --check --format= HEAD
+          else
+            git diff --check "${BASE_SHA}" "${HEAD_SHA}"
+          fi
+
+  formatting:
+    runs-on: [self-hosted, zekstack-ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install clang-format
+        run: python -m pip install "clang-format==19.1.7"
+
+      - name: Check C++ formatting
+        run: |
+          find src tests examples -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.ino' \) -print0 \
+            | xargs -0 python -m clang_format --dry-run --Werror
+
   metadata:
     runs-on: [self-hosted, zekstack-ci]
     steps:
@@ -88,7 +127,7 @@ jobs:
 
   host-tests:
     runs-on: [self-hosted, zekstack-ci]
-    needs: [metadata, source-audit]
+    needs: [metadata, source-audit, formatting]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -224,7 +263,15 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, source-audit, host-tests, arduino-lint, build-examples, arduino-cli]
+    needs:
+      - whitespace
+      - formatting
+      - metadata
+      - source-audit
+      - host-tests
+      - arduino-lint
+      - build-examples
+      - arduino-cli
     permissions:
       contents: write
     uses: ./.github/workflows/release.yml
