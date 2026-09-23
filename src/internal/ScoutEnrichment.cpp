@@ -430,11 +430,7 @@ bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &
 		if (used + 1 < sizeof(out.value)) {
 			out.value[used] = ' ';
 			out.value[used + 1] = '\0';
-			copyText(
-			    out.value + used + 1,
-			    sizeof(out.value) - used - 1,
-			    details.modelName
-			);
+			copyText(out.value + used + 1, sizeof(out.value) - used - 1, details.modelName);
 		}
 		return true;
 	}
