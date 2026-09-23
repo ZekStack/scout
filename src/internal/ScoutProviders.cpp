@@ -575,9 +575,10 @@ ProviderRunStats runIcmpProvider(
 		while (!pingContext.done.load(std::memory_order_acquire) && providerNowMs() < deadline) {
 			vTaskDelay(pdMS_TO_TICKS(5));
 		}
-		if (!pingContext.done.load(std::memory_order_acquire)) {
+		const bool sessionTimedOut =
+		    !pingContext.done.load(std::memory_order_acquire);
+		if (sessionTimedOut) {
 			esp_ping_stop(handle);
-			stats.timeouts++;
 		}
 		const bool replied = pingContext.replied.load(std::memory_order_acquire);
 		esp_ping_delete_session(handle);
@@ -591,6 +592,7 @@ ProviderRunStats runIcmpProvider(
 			sink(target.mac, observation, context);
 			stats.observations++;
 		} else {
+			(void)sessionTimedOut;
 			stats.timeouts++;
 		}
 	}
