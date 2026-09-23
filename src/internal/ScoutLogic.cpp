@@ -5,6 +5,47 @@
 #include <limits>
 
 namespace scout_internal {
+namespace {
+
+void copyBounded(char *destination, size_t capacity, const char *source) {
+	if (destination == nullptr || capacity == 0) {
+		return;
+	}
+	destination[0] = '\0';
+	if (source == nullptr) {
+		return;
+	}
+	std::strncpy(destination, source, capacity - 1);
+	destination[capacity - 1] = '\0';
+}
+
+bool mergeIpv6(ScoutEndpoint &target, const ScoutIpv6Address &address) {
+	if (!address.valid()) {
+		return false;
+	}
+	for (size_t i = 0; i < target.ipv6Count; ++i) {
+		if (target.ipv6[i] == address) {
+			return false;
+		}
+	}
+	if (target.ipv6Count >= SCOUT_MAX_IPV6_PER_ENDPOINT) {
+		return false;
+	}
+	target.ipv6[target.ipv6Count++] = address;
+	return true;
+}
+
+ScoutEndpoint *findEndpoint(ScoutDeviceInfo &device, uint8_t interfaceIndex, uint32_t ipv4) {
+	for (size_t i = 0; i < device.endpointCount; ++i) {
+		if (device.endpoints[i].interfaceIndex == interfaceIndex &&
+		    device.endpoints[i].ipv4.value == ipv4) {
+			return &device.endpoints[i];
+		}
+	}
+	return nullptr;
+}
+
+} // namespace
 
 Ipv4TargetResult buildIpv4Targets(
     uint32_t ipv4HostOrder,
@@ -19,7 +60,8 @@ Ipv4TargetResult buildIpv4Targets(
 
 	const uint32_t network = ipv4HostOrder & netmaskHostOrder;
 	const uint32_t broadcast = network | ~netmaskHostOrder;
-	const uint64_t span = static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
+	const uint64_t span =
+	    static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
 
 	if (span <= 1ULL) {
 		return {Ipv4TargetStatus::Ok, 0};
@@ -64,22 +106,51 @@ bool upsertEndpoint(
     ScoutDeviceInfo &device,
     uint8_t interfaceIndex,
     const char *interfaceName,
+    const char *interfaceKey,
+    ScoutInterfaceType interfaceType,
     uint32_t ipv4,
-    uint64_t observedAt
+    uint64_t observedAt,
+    ScoutObservationSource source,
+    bool confirmed
 ) {
 	for (size_t i = 0; i < device.endpointCount; ++i) {
 		auto &endpoint = device.endpoints[i];
-		if (endpoint.interfaceIndex == interfaceIndex && endpoint.ipv4.value == ipv4) {
-			endpoint.lastSeenAtMs = observedAt;
-			return false;
+		if (endpoint.interfaceIndex != interfaceIndex || endpoint.ipv4.value != ipv4) {
+			continue;
 		}
+
+		const bool metadataChanged =
+		    endpoint.interfaceType != interfaceType ||
+		    (interfaceName != nullptr && std::strncmp(
+		                                     endpoint.interfaceName,
+		                                     interfaceName,
+		                                     sizeof(endpoint.interfaceName)
+		                                 ) != 0) ||
+		    (interfaceKey != nullptr && std::strncmp(
+		                                    endpoint.interfaceKey,
+		                                    interfaceKey,
+		                                    sizeof(endpoint.interfaceKey)
+		                                ) != 0);
+		endpoint.lastSeenAtMs = std::max(endpoint.lastSeenAtMs, observedAt);
+		if (endpoint.firstSeenAtMs == 0) {
+			endpoint.firstSeenAtMs = observedAt;
+		}
+		if (confirmed) {
+			endpoint.lastConfirmedAtMs = std::max(endpoint.lastConfirmedAtMs, observedAt);
+		}
+		endpoint.observationSources |= scoutObservationMask(source);
+		endpoint.interfaceType = interfaceType;
+		copyBounded(endpoint.interfaceName, sizeof(endpoint.interfaceName), interfaceName);
+		copyBounded(endpoint.interfaceKey, sizeof(endpoint.interfaceKey), interfaceKey);
+		return metadataChanged;
 	}
 
 	size_t targetIndex = device.endpointCount;
 	if (targetIndex >= SCOUT_MAX_ENDPOINTS_PER_DEVICE) {
 		targetIndex = 0;
 		for (size_t i = 1; i < device.endpointCount; ++i) {
-			if (device.endpoints[i].lastSeenAtMs < device.endpoints[targetIndex].lastSeenAtMs) {
+			if (device.endpoints[i].lastSeenAtMs <
+			    device.endpoints[targetIndex].lastSeenAtMs) {
 				targetIndex = i;
 			}
 		}
@@ -91,12 +162,13 @@ bool upsertEndpoint(
 	endpoint = {};
 	endpoint.ipv4.value = ipv4;
 	endpoint.interfaceIndex = interfaceIndex;
+	endpoint.interfaceType = interfaceType;
+	endpoint.firstSeenAtMs = observedAt;
 	endpoint.lastSeenAtMs = observedAt;
-	if (interfaceName != nullptr) {
-		std::strncpy(endpoint.interfaceName, interfaceName, sizeof(endpoint.interfaceName) - 1);
-		endpoint.interfaceName[sizeof(endpoint.interfaceName) - 1] = '\0';
-	}
-
+	endpoint.lastConfirmedAtMs = confirmed ? observedAt : 0;
+	endpoint.observationSources = scoutObservationMask(source);
+	copyBounded(endpoint.interfaceName, sizeof(endpoint.interfaceName), interfaceName);
+	copyBounded(endpoint.interfaceKey, sizeof(endpoint.interfaceKey), interfaceKey);
 	return true;
 }
 
@@ -134,14 +206,36 @@ void mergeDeviceInfo(ScoutDeviceInfo &target, const ScoutDeviceInfo &source) {
 	target.observationCount += std::min(remaining, source.observationCount);
 
 	for (size_t i = 0; i < source.endpointCount; ++i) {
-		const auto &endpoint = source.endpoints[i];
+		const auto &sourceEndpoint = source.endpoints[i];
 		(void)upsertEndpoint(
 		    target,
-		    endpoint.interfaceIndex,
-		    endpoint.interfaceName,
-		    endpoint.ipv4.value,
-		    endpoint.lastSeenAtMs
+		    sourceEndpoint.interfaceIndex,
+		    sourceEndpoint.interfaceName,
+		    sourceEndpoint.interfaceKey,
+		    sourceEndpoint.interfaceType,
+		    sourceEndpoint.ipv4.value,
+		    sourceEndpoint.lastSeenAtMs,
+		    static_cast<ScoutObservationSource>(sourceEndpoint.observationSources),
+		    sourceEndpoint.lastConfirmedAtMs != 0
 		);
+		auto *targetEndpoint =
+		    findEndpoint(target, sourceEndpoint.interfaceIndex, sourceEndpoint.ipv4.value);
+		if (targetEndpoint == nullptr) {
+			continue;
+		}
+		if (targetEndpoint->firstSeenAtMs == 0 ||
+		    (sourceEndpoint.firstSeenAtMs != 0 &&
+		     sourceEndpoint.firstSeenAtMs < targetEndpoint->firstSeenAtMs)) {
+			targetEndpoint->firstSeenAtMs = sourceEndpoint.firstSeenAtMs;
+		}
+		targetEndpoint->lastSeenAtMs =
+		    std::max(targetEndpoint->lastSeenAtMs, sourceEndpoint.lastSeenAtMs);
+		targetEndpoint->lastConfirmedAtMs =
+		    std::max(targetEndpoint->lastConfirmedAtMs, sourceEndpoint.lastConfirmedAtMs);
+		targetEndpoint->observationSources |= sourceEndpoint.observationSources;
+		for (size_t ipv6Index = 0; ipv6Index < sourceEndpoint.ipv6Count; ++ipv6Index) {
+			mergeIpv6(*targetEndpoint, sourceEndpoint.ipv6[ipv6Index]);
+		}
 	}
 }
 
