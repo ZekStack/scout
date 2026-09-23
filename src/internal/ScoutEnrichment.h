@@ -46,25 +46,17 @@ EnrichmentUpsertResult upsertName(
     uint64_t expiresAtMs
 );
 
-EnrichmentUpsertResult upsertService(
-    ScoutDeviceDetails &details,
-    const ScoutServiceInfo &service
-);
+EnrichmentUpsertResult upsertService(ScoutDeviceDetails &details, const ScoutServiceInfo &service);
 
-EnrichmentUpsertResult upsertMetadata(
-    ScoutDeviceDetails &details,
-    const ScoutMetadataEntry &metadata
-);
+EnrichmentUpsertResult
+upsertMetadata(ScoutDeviceDetails &details, const ScoutMetadataEntry &metadata);
 
 bool upsertIpv6(ScoutEndpoint &endpoint, const ScoutIpv6Address &address);
 
 ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs);
 void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &source);
 
-bool selectPreferredName(
-    const ScoutDeviceDetails &details,
-    ScoutPreferredName &out
-);
+bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &out);
 
 bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out);
 bool parseUpnpDescription(const char *data, size_t length, UpnpDescriptionInfo &out);

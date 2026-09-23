@@ -233,10 +233,8 @@ struct ScoutImpl {
 		    incoming.maxIdentityRelations,
 		    incoming.memory.allocation
 		);
-		identityParents = Strata::allocateArray<size_t>(
-		    incoming.maxDevices,
-		    incoming.memory.allocation
-		);
+		identityParents =
+		    Strata::allocateArray<size_t>(incoming.maxDevices, incoming.memory.allocation);
 		identityRelationCapacity = incoming.maxIdentityRelations;
 
 		if (providerTargets == nullptr || identityGroups == nullptr ||
@@ -248,10 +246,8 @@ struct ScoutImpl {
 		if (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
 		    incoming.providers.ssdp.maxDescriptionBytes > 0) {
 			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes;
-			httpScratch = Strata::allocateArray<char>(
-			    httpScratchCapacity,
-			    incoming.memory.allocation
-			);
+			httpScratch =
+			    Strata::allocateArray<char>(httpScratchCapacity, incoming.memory.allocation);
 			if (httpScratch == nullptr) {
 				releaseBuffers();
 				return false;
@@ -627,10 +623,8 @@ struct ScoutImpl {
 		}
 	}
 
-
 	ScoutEndpoint *findObservationEndpointLocked(
-	    ScoutDeviceInfo &info,
-	    const scout_internal::EnrichmentObservation &observation
+	    ScoutDeviceInfo &info, const scout_internal::EnrichmentObservation &observation
 	) {
 		for (size_t i = 0; i < info.endpointCount; ++i) {
 			auto &endpoint = info.endpoints[i];
@@ -646,8 +640,7 @@ struct ScoutImpl {
 	}
 
 	void accumulateProviderStats(
-	    ScoutProviderDiagnostics &target,
-	    const scout_internal::ProviderRunStats &run
+	    ScoutProviderDiagnostics &target, const scout_internal::ProviderRunStats &run
 	) {
 		ScoutLock lock(mutex);
 		if (!lock) {
@@ -816,9 +809,8 @@ struct ScoutImpl {
 					}
 					return false;
 				};
-				for (size_t relationIndex = 0;
-				     relationIndex < identityRelationCountValue &&
-				     group.evidenceCount < SCOUT_MAX_IDENTITY_EVIDENCE;
+				for (size_t relationIndex = 0; relationIndex < identityRelationCountValue &&
+				                               group.evidenceCount < SCOUT_MAX_IDENTITY_EVIDENCE;
 				     ++relationIndex) {
 					const auto &relation = identityRelations[relationIndex];
 					if (!contains(relation.first) || !contains(relation.second) ||
@@ -865,8 +857,7 @@ struct ScoutImpl {
 	}
 
 	void applyEnrichmentObservation(
-	    const ScoutMacAddress &mac,
-	    const scout_internal::EnrichmentObservation &observation
+	    const ScoutMacAddress &mac, const scout_internal::EnrichmentObservation &observation
 	) {
 		ScoutEvent event{};
 		bool shouldEmit = false;
@@ -886,11 +877,10 @@ struct ScoutImpl {
 			const uint64_t observedAt = nowMs();
 			ScoutDeviceChange changes = ScoutDeviceChange::None;
 
-			const bool directObservation =
-			    observation.source == ScoutObservationSource::Icmp ||
-			    observation.source == ScoutObservationSource::Mdns ||
-			    observation.source == ScoutObservationSource::Ssdp ||
-			    observation.source == ScoutObservationSource::Nbns;
+			const bool directObservation = observation.source == ScoutObservationSource::Icmp ||
+			                               observation.source == ScoutObservationSource::Mdns ||
+			                               observation.source == ScoutObservationSource::Ssdp ||
+			                               observation.source == ScoutObservationSource::Nbns;
 			if (directObservation) {
 				info.lastSeenAtMs = std::max(info.lastSeenAtMs, observedAt);
 				info.observationSources |= scoutObservationMask(observation.source);
@@ -910,8 +900,7 @@ struct ScoutImpl {
 					endpoint->observationSources |= scoutObservationMask(observation.source);
 				}
 				if (observation.confirmed) {
-					endpoint->lastConfirmedAtMs =
-					    std::max(endpoint->lastConfirmedAtMs, observedAt);
+					endpoint->lastConfirmedAtMs = std::max(endpoint->lastConfirmedAtMs, observedAt);
 				}
 				for (size_t i = 0; i < observation.ipv6Count; ++i) {
 					if (scout_internal::upsertIpv6(*endpoint, observation.ipv6[i])) {
@@ -937,8 +926,7 @@ struct ScoutImpl {
 			}
 
 			if (observation.hasService) {
-				const auto result =
-				    scout_internal::upsertService(details, observation.service);
+				const auto result = scout_internal::upsertService(details, observation.service);
 				if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
 					changes |= ScoutDeviceChange::Service;
 					if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
@@ -958,17 +946,16 @@ struct ScoutImpl {
 				}
 			}
 
-			auto updateText = [&](char *destination,
-			                      size_t capacity,
-			                      const char *source,
-			                      ScoutDeviceChange change) {
-				if (source == nullptr || source[0] == '\0' ||
-				    std::strncmp(destination, source, capacity) == 0) {
-					return;
-				}
-				scout_internal::copyText(destination, capacity, source);
-				changes |= change;
-			};
+			auto updateText =
+			    [&](char *destination, size_t capacity, const char *source, ScoutDeviceChange change
+			    ) {
+				    if (source == nullptr || source[0] == '\0' ||
+				        std::strncmp(destination, source, capacity) == 0) {
+					    return;
+				    }
+				    scout_internal::copyText(destination, capacity, source);
+				    changes |= change;
+			    };
 			updateText(
 			    details.manufacturer,
 			    sizeof(details.manufacturer),
@@ -1008,8 +995,7 @@ struct ScoutImpl {
 
 			if (observation.source == ScoutObservationSource::Ssdp &&
 			    observation.manufacturer[0] != '\0' &&
-			    (!details.vendor.known ||
-			     details.vendor.source == ScoutVendorSource::Oui)) {
+			    (!details.vendor.known || details.vendor.source == ScoutVendorSource::Oui)) {
 				details.vendor.known = true;
 				details.vendor.source = ScoutVendorSource::Ssdp;
 				scout_internal::copyText(
@@ -1035,12 +1021,11 @@ struct ScoutImpl {
 				identityDirty = true;
 			}
 			if (changeMask != 0) {
-				event.type = observation.confirmed && changeMask ==
-				                                 scoutDeviceChangeMask(
-				                                     ScoutDeviceChange::Confirmation
-				                                 )
-				                 ? ScoutEventType::DeviceObserved
-				                 : ScoutEventType::DeviceChanged;
+				event.type =
+				    observation.confirmed &&
+				            changeMask == scoutDeviceChangeMask(ScoutDeviceChange::Confirmation)
+				        ? ScoutEventType::DeviceObserved
+				        : ScoutEventType::DeviceChanged;
 				event.status = ScoutStatus::Ok;
 				event.source = observation.source;
 				event.changes = changeMask;
@@ -1249,7 +1234,6 @@ struct ScoutImpl {
 		}
 		flushIdentityIfDirty();
 	}
-
 
 	ScoutStatus
 	scanInterface(const scout_internal::InterfaceSnapshot &interfaceSnapshot, uint64_t scanId) {
@@ -1518,14 +1502,12 @@ struct ScoutImpl {
 		}
 
 		const uint64_t startedAt = nowMs();
-		uint64_t nextScanAt =
-		    scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs;
+		uint64_t nextScanAt = scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs;
 		uint64_t nextIcmpAt = config.providers.icmp.enabled ? startedAt : UINT64_MAX;
 		uint64_t nextMdnsAt = config.providers.mdns.enabled ? startedAt : UINT64_MAX;
 		uint64_t nextSsdpAt = config.providers.ssdp.enabled ? startedAt : UINT64_MAX;
 		uint64_t nextNbnsAt = config.providers.nbns.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextReverseDnsAt =
-		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextReverseDnsAt = config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
 
 		while (!stopRequested.load()) {
 			const uint64_t current = nowMs();
@@ -1565,16 +1547,10 @@ struct ScoutImpl {
 			}
 
 			const uint64_t nextWorkAt = std::min(
-			    {nextScanAt,
-			     nextIcmpAt,
-			     nextMdnsAt,
-			     nextSsdpAt,
-			     nextNbnsAt,
-			     nextReverseDnsAt}
+			    {nextScanAt, nextIcmpAt, nextMdnsAt, nextSsdpAt, nextNbnsAt, nextReverseDnsAt}
 			);
 			const uint64_t remaining = nextWorkAt > current ? nextWorkAt - current : 1;
-			const uint32_t waitMs =
-			    static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
+			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
 			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(waitMs, 1)));
 		}
 
@@ -1629,8 +1605,7 @@ struct ScoutImpl {
 		    incoming.maxHostsPerSubnet == 0 || incoming.arpBatchSize == 0 ||
 		    incoming.maxIdentityRelations == 0 ||
 		    incoming.maxDevices > SIZE_MAX / SCOUT_MAX_ENDPOINTS_PER_DEVICE ||
-		    (incoming.providers.ssdp.enabled &&
-		     incoming.providers.ssdp.fetchDeviceDescription &&
+		    (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
 		     incoming.providers.ssdp.maxDescriptionBytes == 0) ||
 		    invalidProviderSchedule || !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
@@ -2128,7 +2103,10 @@ ScoutResult Scout::identityRelationAt(size_t index, ScoutIdentityRelation &out) 
 		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
 	}
 	if (index >= _impl->identityRelationCountValue) {
-		return ScoutResult::failure(ScoutStatus::NotFound, "identity relation index is out of range");
+		return ScoutResult::failure(
+		    ScoutStatus::NotFound,
+		    "identity relation index is out of range"
+		);
 	}
 	out = _impl->identityRelations[index];
 	return ScoutResult::success();

@@ -8,8 +8,7 @@
 namespace scout_internal {
 namespace {
 
-template <size_t N>
-void removeAt(auto (&items)[N], size_t &count, size_t index) {
+template <size_t N> void removeAt(auto (&items)[N], size_t &count, size_t index) {
 	if (index >= count) {
 		return;
 	}
@@ -90,7 +89,7 @@ const char *findHeader(const char *data, size_t length, const char *name, size_t
 		bool matches = true;
 		for (size_t j = 0; j < nameLength; ++j) {
 			if (std::tolower(static_cast<unsigned char>(data[i + j])) !=
-		    std::tolower(static_cast<unsigned char>(name[j]))) {
+			    std::tolower(static_cast<unsigned char>(name[j]))) {
 				matches = false;
 				break;
 			}
@@ -116,11 +115,7 @@ const char *findHeader(const char *data, size_t length, const char *name, size_t
 }
 
 bool extractXmlTag(
-    const char *data,
-    size_t length,
-    const char *tag,
-    char *out,
-    size_t outCapacity
+    const char *data, size_t length, const char *tag, char *out, size_t outCapacity
 ) {
 	if (data == nullptr || tag == nullptr || out == nullptr || outCapacity == 0) {
 		return false;
@@ -170,8 +165,7 @@ bool hasMatchingMdnsHostname(const ScoutDeviceDetails &left, const ScoutDeviceDe
 }
 
 bool hasMatchingServiceFingerprint(
-    const ScoutDeviceDetails &left,
-    const ScoutDeviceDetails &right
+    const ScoutDeviceDetails &left, const ScoutDeviceDetails &right
 ) {
 	for (size_t i = 0; i < left.serviceCount; ++i) {
 		const auto &a = left.services[i];
@@ -261,10 +255,8 @@ EnrichmentUpsertResult upsertName(
 	return replacing ? EnrichmentUpsertResult::Replaced : EnrichmentUpsertResult::Changed;
 }
 
-EnrichmentUpsertResult upsertService(
-    ScoutDeviceDetails &details,
-    const ScoutServiceInfo &incoming
-) {
+EnrichmentUpsertResult
+upsertService(ScoutDeviceDetails &details, const ScoutServiceInfo &incoming) {
 	if (incoming.type[0] == '\0') {
 		return EnrichmentUpsertResult::Unchanged;
 	}
@@ -277,9 +269,8 @@ EnrichmentUpsertResult upsertService(
 		    !textEqualsIgnoreCase(service.instanceName, incoming.instanceName)) {
 			continue;
 		}
-		const bool changed =
-		    service.port != incoming.port ||
-		    !textEqualsIgnoreCase(service.hostname, incoming.hostname);
+		const bool changed = service.port != incoming.port ||
+		                     !textEqualsIgnoreCase(service.hostname, incoming.hostname);
 		const uint64_t firstSeen = service.firstSeenAtMs;
 		service = incoming;
 		service.firstSeenAtMs = firstSeen != 0 ? firstSeen : incoming.lastSeenAtMs;
@@ -295,10 +286,8 @@ EnrichmentUpsertResult upsertService(
 	return replacing ? EnrichmentUpsertResult::Replaced : EnrichmentUpsertResult::Changed;
 }
 
-EnrichmentUpsertResult upsertMetadata(
-    ScoutDeviceDetails &details,
-    const ScoutMetadataEntry &incoming
-) {
+EnrichmentUpsertResult
+upsertMetadata(ScoutDeviceDetails &details, const ScoutMetadataEntry &incoming) {
 	if (incoming.key[0] == '\0') {
 		return EnrichmentUpsertResult::Unchanged;
 	}
@@ -388,8 +377,7 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 	if (!target.vendor.known && source.vendor.known) {
 		target.vendor = source.vendor;
 	}
-	target.locallyAdministeredMac =
-	    target.locallyAdministeredMac || source.locallyAdministeredMac;
+	target.locallyAdministeredMac = target.locallyAdministeredMac || source.locallyAdministeredMac;
 	target.multicastMac = target.multicastMac || source.multicastMac;
 	if (target.manufacturer[0] == '\0') {
 		copyText(target.manufacturer, sizeof(target.manufacturer), source.manufacturer);
@@ -545,7 +533,12 @@ bool parseNbnsNodeStatusName(const uint8_t *data, size_t length, char *out, size
 				nameLength--;
 			}
 			if (nameLength > 0) {
-				return copyTextN(out, outCapacity, reinterpret_cast<const char *>(entry), nameLength);
+				return copyTextN(
+				    out,
+				    outCapacity,
+				    reinterpret_cast<const char *>(entry),
+				    nameLength
+				);
 			}
 		}
 	}
@@ -573,12 +566,8 @@ bool identityRelation(
 	    !textEqualsIgnoreCase(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
 		return false;
 	}
-	if (leftDetails.persistentDeviceId[0] != '\0' &&
-	    rightDetails.persistentDeviceId[0] != '\0' &&
-	    !textEqualsIgnoreCase(
-	        leftDetails.persistentDeviceId,
-	        rightDetails.persistentDeviceId
-	    )) {
+	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
+	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		return false;
 	}
 	if (sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&

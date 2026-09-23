@@ -60,8 +60,7 @@ Ipv4TargetResult buildIpv4Targets(
 
 	const uint32_t network = ipv4HostOrder & netmaskHostOrder;
 	const uint32_t broadcast = network | ~netmaskHostOrder;
-	const uint64_t span =
-	    static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
+	const uint64_t span = static_cast<uint64_t>(broadcast) - static_cast<uint64_t>(network);
 
 	if (span <= 1ULL) {
 		return {Ipv4TargetStatus::Ok, 0};
@@ -121,16 +120,11 @@ bool upsertEndpoint(
 
 		const bool metadataChanged =
 		    endpoint.interfaceType != interfaceType ||
-		    (interfaceName != nullptr && std::strncmp(
-		                                     endpoint.interfaceName,
-		                                     interfaceName,
-		                                     sizeof(endpoint.interfaceName)
-		                                 ) != 0) ||
-		    (interfaceKey != nullptr && std::strncmp(
-		                                    endpoint.interfaceKey,
-		                                    interfaceKey,
-		                                    sizeof(endpoint.interfaceKey)
-		                                ) != 0);
+		    (interfaceName != nullptr &&
+		     std::strncmp(endpoint.interfaceName, interfaceName, sizeof(endpoint.interfaceName)) !=
+		         0) ||
+		    (interfaceKey != nullptr &&
+		     std::strncmp(endpoint.interfaceKey, interfaceKey, sizeof(endpoint.interfaceKey)) != 0);
 		endpoint.lastSeenAtMs = std::max(endpoint.lastSeenAtMs, observedAt);
 		if (endpoint.firstSeenAtMs == 0) {
 			endpoint.firstSeenAtMs = observedAt;
@@ -149,8 +143,7 @@ bool upsertEndpoint(
 	if (targetIndex >= SCOUT_MAX_ENDPOINTS_PER_DEVICE) {
 		targetIndex = 0;
 		for (size_t i = 1; i < device.endpointCount; ++i) {
-			if (device.endpoints[i].lastSeenAtMs <
-			    device.endpoints[targetIndex].lastSeenAtMs) {
+			if (device.endpoints[i].lastSeenAtMs < device.endpoints[targetIndex].lastSeenAtMs) {
 				targetIndex = i;
 			}
 		}

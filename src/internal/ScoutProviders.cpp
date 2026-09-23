@@ -90,10 +90,7 @@ bool targetMatchesInterface(const ProviderTarget &target, const char *interfaceK
 }
 
 const ProviderTarget *findTarget(
-    const ProviderTarget *targets,
-    size_t targetCount,
-    uint32_t ipv4,
-    const char *interfaceKey
+    const ProviderTarget *targets, size_t targetCount, uint32_t ipv4, const char *interfaceKey
 ) {
 	if (targets == nullptr || ipv4 == 0) {
 		return nullptr;
@@ -114,7 +111,7 @@ const ProviderTarget *findTarget(
 }
 
 bool setSocketTimeout(int socketFd, uint32_t timeoutMs) {
-	struct timeval timeout {
+	struct timeval timeout{
 	    .tv_sec = static_cast<time_t>(timeoutMs / 1000U),
 	    .tv_usec = static_cast<suseconds_t>((timeoutMs % 1000U) * 1000U),
 	};
@@ -148,7 +145,8 @@ void appendMetadata(
     uint64_t now,
     uint64_t expiresAt
 ) {
-	if (key == nullptr || key[0] == '\0' || observation.metadataCount >= ProviderObservationMetadataCapacity) {
+	if (key == nullptr || key[0] == '\0' ||
+	    observation.metadataCount >= ProviderObservationMetadataCapacity) {
 		return;
 	}
 	auto &metadata = observation.metadata[observation.metadataCount++];
@@ -181,27 +179,18 @@ void addName(
 }
 
 void maybeSetPersistentField(
-    EnrichmentObservation &observation,
-    const char *key,
-    const char *value
+    EnrichmentObservation &observation, const char *key, const char *value
 ) {
 	if (key == nullptr || value == nullptr || value[0] == '\0') {
 		return;
 	}
 	if (textEqualsIgnoreCase(key, "deviceid") || textEqualsIgnoreCase(key, "device_id")) {
-		copyText(
-		    observation.persistentDeviceId,
-		    sizeof(observation.persistentDeviceId),
-		    value
-		);
-	} else if (textEqualsIgnoreCase(key, "serial") ||
-	           textEqualsIgnoreCase(key, "serialnumber")) {
+		copyText(observation.persistentDeviceId, sizeof(observation.persistentDeviceId), value);
+	} else if (textEqualsIgnoreCase(key, "serial") || textEqualsIgnoreCase(key, "serialnumber")) {
 		copyText(observation.serialNumber, sizeof(observation.serialNumber), value);
-	} else if (textEqualsIgnoreCase(key, "manufacturer") ||
-	           textEqualsIgnoreCase(key, "vendor")) {
+	} else if (textEqualsIgnoreCase(key, "manufacturer") || textEqualsIgnoreCase(key, "vendor")) {
 		copyText(observation.manufacturer, sizeof(observation.manufacturer), value);
-	} else if (textEqualsIgnoreCase(key, "model") ||
-	           textEqualsIgnoreCase(key, "modelname")) {
+	} else if (textEqualsIgnoreCase(key, "model") || textEqualsIgnoreCase(key, "modelname")) {
 		copyText(observation.modelName, sizeof(observation.modelName), value);
 	}
 }
@@ -231,11 +220,7 @@ void onPingEnd(esp_ping_handle_t, void *args) {
 #endif
 
 bool addServiceType(
-    MdnsServiceType *types,
-    size_t &count,
-    size_t capacity,
-    const char *service,
-    const char *proto
+    MdnsServiceType *types, size_t &count, size_t capacity, const char *service, const char *proto
 ) {
 	if (types == nullptr || service == nullptr || proto == nullptr || service[0] == '\0' ||
 	    proto[0] == '\0') {
@@ -257,11 +242,7 @@ bool addServiceType(
 }
 
 bool splitServiceDescriptor(
-    const char *value,
-    char *service,
-    size_t serviceCapacity,
-    char *proto,
-    size_t protoCapacity
+    const char *value, char *service, size_t serviceCapacity, char *proto, size_t protoCapacity
 ) {
 	if (value == nullptr) {
 		return false;
@@ -325,14 +306,12 @@ void emitMdnsResult(
 			service.expiresAtMs = expiresAt;
 		}
 
-		for (size_t i = 0;
-		     i < result.txt_count && i < ProviderObservationMetadataCapacity;
-		     ++i) {
+		for (size_t i = 0; i < result.txt_count && i < ProviderObservationMetadataCapacity; ++i) {
 			const char *key = result.txt[i].key;
 			const char *value = result.txt[i].value;
-			const size_t valueLength =
-			    result.txt_value_len != nullptr ? result.txt_value_len[i] :
-			                                      (value != nullptr ? std::strlen(value) : 0);
+			const size_t valueLength = result.txt_value_len != nullptr
+			                               ? result.txt_value_len[i]
+			                               : (value != nullptr ? std::strlen(value) : 0);
 			auto &metadata = observation.metadata[observation.metadataCount++];
 			metadata = {};
 			metadata.source = ScoutObservationSource::Mdns;
@@ -412,12 +391,7 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	return out.host[0] != '\0';
 }
 
-size_t fetchHttpBody(
-    const char *url,
-    uint32_t timeoutMs,
-    char *scratch,
-    size_t capacity
-) {
+size_t fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t capacity) {
 	if (scratch == nullptr || capacity < 2) {
 		return 0;
 	}
@@ -575,8 +549,7 @@ ProviderRunStats runIcmpProvider(
 		while (!pingContext.done.load(std::memory_order_acquire) && providerNowMs() < deadline) {
 			vTaskDelay(pdMS_TO_TICKS(5));
 		}
-		const bool sessionTimedOut =
-		    !pingContext.done.load(std::memory_order_acquire);
+		const bool sessionTimedOut = !pingContext.done.load(std::memory_order_acquire);
 		if (sessionTimedOut) {
 			esp_ping_stop(handle);
 		}
@@ -632,24 +605,15 @@ ProviderRunStats runMdnsProvider(
 		const char *service;
 		const char *proto;
 	} CommonServices[] = {
-	    {"_http", "_tcp"},
-	    {"_https", "_tcp"},
-	    {"_workstation", "_tcp"},
-	    {"_device-info", "_tcp"},
-	    {"_airplay", "_tcp"},
-	    {"_raop", "_tcp"},
-	    {"_googlecast", "_tcp"},
-	    {"_ipp", "_tcp"},
-	    {"_ipps", "_tcp"},
-	    {"_printer", "_tcp"},
-	    {"_ssh", "_tcp"},
-	    {"_sftp-ssh", "_tcp"},
-	    {"_smb", "_tcp"},
-	    {"_home-assistant", "_tcp"},
-	    {"_hap", "_tcp"},
-	    {"_matter", "_tcp"},
-	    {"_matterc", "_udp"},
-	    {"_arduino", "_tcp"},
+	    {"_http", "_tcp"},        {"_https", "_tcp"},
+	    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
+	    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
+	    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
+	    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
+	    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
+	    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
+	    {"_hap", "_tcp"},         {"_matter", "_tcp"},
+	    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
 	    {"_esphomelib", "_tcp"},
 	};
 	for (const auto &service : CommonServices) {
@@ -677,13 +641,7 @@ ProviderRunStats runMdnsProvider(
 			        proto,
 			        sizeof(proto)
 			    )) {
-				if (!addServiceType(
-				        types,
-				        typeCount,
-				        MaxMdnsServiceTypes,
-				        service,
-				        proto
-				    ) &&
+				if (!addServiceType(types, typeCount, MaxMdnsServiceTypes, service, proto) &&
 				    typeCount >= MaxMdnsServiceTypes) {
 					stats.dropped++;
 				}
@@ -692,9 +650,9 @@ ProviderRunStats runMdnsProvider(
 		mdns_query_results_free(serviceTypes);
 	}
 
-	const uint32_t queryBudget =
-	    config.queryTimeoutMs > enumerationTimeout ? config.queryTimeoutMs - enumerationTimeout :
-	                                                  config.queryTimeoutMs;
+	const uint32_t queryBudget = config.queryTimeoutMs > enumerationTimeout
+	                                 ? config.queryTimeoutMs - enumerationTimeout
+	                                 : config.queryTimeoutMs;
 	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
 	const uint32_t perQueryTimeout = std::max<uint32_t>(
 	    20,
@@ -747,12 +705,11 @@ ProviderRunStats runSsdpProvider(
 
 	LocalInterface interfaces[MaxLocalInterfaces]{};
 	const size_t interfaceCount = collectLocalInterfaces(interfaces, MaxLocalInterfaces);
-	constexpr char Search[] =
-	    "M-SEARCH * HTTP/1.1\r\n"
-	    "HOST: 239.255.255.250:1900\r\n"
-	    "MAN: \"ssdp:discover\"\r\n"
-	    "MX: 1\r\n"
-	    "ST: ssdp:all\r\n\r\n";
+	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
+	                          "HOST: 239.255.255.250:1900\r\n"
+	                          "MAN: \"ssdp:discover\"\r\n"
+	                          "MX: 1\r\n"
+	                          "ST: ssdp:all\r\n\r\n";
 	sockaddr_in destination{};
 	destination.sin_family = AF_INET;
 	destination.sin_port = htons(1900);
@@ -795,12 +752,8 @@ ProviderRunStats runSsdpProvider(
 			if (received <= 0) {
 				continue;
 			}
-			const ProviderTarget *target = findTarget(
-			    targets,
-			    targetCount,
-			    sender.sin_addr.s_addr,
-			    interfaceInfo.key
-			);
+			const ProviderTarget *target =
+			    findTarget(targets, targetCount, sender.sin_addr.s_addr, interfaceInfo.key);
 			if (target == nullptr) {
 				continue;
 			}
@@ -811,11 +764,8 @@ ProviderRunStats runSsdpProvider(
 				continue;
 			}
 			const uint64_t now = providerNowMs();
-			const uint64_t expiresAt = expiryFromTtl(
-			    now,
-			    parsed.maxAgeSeconds,
-			    config.fallbackMaxAgeMs
-			);
+			const uint64_t expiresAt =
+			    expiryFromTtl(now, parsed.maxAgeSeconds, config.fallbackMaxAgeMs);
 
 			EnrichmentObservation observation{};
 			observation.source = ScoutObservationSource::Ssdp;
@@ -857,7 +807,8 @@ ProviderRunStats runSsdpProvider(
 
 			if (config.fetchDeviceDescription && parsed.location[0] != '\0' &&
 			    httpScratch != nullptr && httpScratchCapacity > 1 &&
-			    descriptionFetches < std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
+			    descriptionFetches <
+			        std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
 				const size_t bodyLength = fetchHttpBody(
 				    parsed.location,
 				    config.httpTimeoutMs,
@@ -992,12 +943,8 @@ ProviderRunStats runNbnsProvider(
 			if (received <= 0) {
 				continue;
 			}
-			const ProviderTarget *target = findTarget(
-			    targets,
-			    targetCount,
-			    sender.sin_addr.s_addr,
-			    interfaceInfo.key
-			);
+			const ProviderTarget *target =
+			    findTarget(targets, targetCount, sender.sin_addr.s_addr, interfaceInfo.key);
 			if (target == nullptr) {
 				continue;
 			}
@@ -1015,13 +962,7 @@ ProviderRunStats runNbnsProvider(
 			observation.source = ScoutObservationSource::Nbns;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
-			addName(
-			    observation,
-			    ScoutNameSource::Nbns,
-			    name,
-			    now,
-			    now + config.maxAgeMs
-			);
+			addName(observation, ScoutNameSource::Nbns, name, now, now + config.maxAgeMs);
 			sink(target->mac, observation, context);
 			stats.observations++;
 		}
@@ -1068,13 +1009,7 @@ ProviderRunStats runReverseDnsProvider(
 		observation.source = ScoutObservationSource::ReverseDns;
 		observation.ipv4 = target.ipv4;
 		observation.interfaceIndex = target.interfaceIndex;
-		addName(
-		    observation,
-		    ScoutNameSource::ReverseDns,
-		    hostname,
-		    now,
-		    now + config.maxAgeMs
-		);
+		addName(observation, ScoutNameSource::ReverseDns, hostname, now, now + config.maxAgeMs);
 		sink(target.mac, observation, context);
 		stats.observations++;
 	}
