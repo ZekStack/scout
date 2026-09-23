@@ -860,7 +860,6 @@ struct ScoutImpl {
 				diag.taskStackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
 			}
 		}
-		readyForDelete.store(true);
 		(void)stopped.give();
 		suspendForever();
 	}
@@ -880,12 +879,27 @@ struct ScoutImpl {
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
 		    !Strata::validPlacement(incoming.memory.taskStack) ||
 		    incoming.scanIntervalMs < MinScanIntervalMs ||
+		    incoming.deviceMaxAgeMs == 0 ||
 		    incoming.arpResponseWaitMs == 0 ||
 		    incoming.maxDevices == 0 ||
 		    incoming.maxHostsPerSubnet == 0 ||
 		    incoming.arpBatchSize == 0 ||
 		    !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
+		}
+
+		auto *cleanup = cleanupService();
+		if (cleanup == nullptr) {
+			return ScoutResult::failure(
+			    ScoutStatus::NoMemory,
+			    "failed to allocate Scout cleanup service"
+			);
+		}
+		if (!cleanup->ensureStarted()) {
+			return ScoutResult::failure(
+			    ScoutStatus::TaskCreateFailed,
+			    "failed to create Scout cleanup task"
+			);
 		}
 
 		ScoutLock lock(mutex);
@@ -925,7 +939,6 @@ struct ScoutImpl {
 		stopRequested.store(false);
 		scanRequested.store(incoming.scanOnInit);
 		startReady.store(false, std::memory_order_release);
-		readyForDelete.store(false);
 
 		task = Strata::FreeRTOS::Task::create(
 		    &ScoutImpl::taskEntry,
@@ -1016,6 +1029,84 @@ struct ScoutImpl {
 	}
 };
 
+namespace {
+
+DeferredCleanupService *cleanupService() {
+	static DeferredCleanupService *service =
+	    Strata::create<DeferredCleanupService>(Strata::Placement::PreferExternal);
+	return service;
+}
+
+bool DeferredCleanupService::ensureStarted() {
+	while (startLock.test_and_set(std::memory_order_acquire)) {
+		vTaskDelay(1);
+	}
+
+	if (!task) {
+		task = Strata::FreeRTOS::Task::create(
+		    &DeferredCleanupService::taskEntry,
+		    this,
+		    Strata::FreeRTOS::TaskConfig{
+		        .name = CleanupTaskName,
+		        .stackBytes = CleanupTaskStackBytes,
+		        .stackPlacement = Strata::Placement::PreferExternal,
+		        .priority = 1,
+		        .affinity = tskNO_AFFINITY,
+		    }
+		);
+	}
+
+	const bool started = static_cast<bool>(task);
+	startLock.clear(std::memory_order_release);
+	return started;
+}
+
+void DeferredCleanupService::enqueue(ScoutImpl *impl) {
+	if (impl == nullptr) {
+		return;
+	}
+
+	ScoutImpl *head = pending.load(std::memory_order_relaxed);
+	do {
+		impl->deferredNext = head;
+	} while (!pending.compare_exchange_weak(
+	    head,
+	    impl,
+	    std::memory_order_release,
+	    std::memory_order_relaxed
+	));
+
+	if (task.handle() != nullptr) {
+		xTaskNotifyGive(task.handle());
+	}
+}
+
+void DeferredCleanupService::run() {
+	for (;;) {
+		(void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		ScoutImpl *list = pending.exchange(nullptr, std::memory_order_acquire);
+		while (list != nullptr) {
+			ScoutImpl *next = list->deferredNext;
+			list->deferredNext = nullptr;
+			Strata::UniquePtr<ScoutImpl> owned{list};
+			if (owned->initialized) {
+				(void)owned->deinit(UINT32_MAX);
+			}
+			list = next;
+		}
+	}
+}
+
+void DeferredCleanupService::taskEntry(void *context) {
+	auto *self = static_cast<DeferredCleanupService *>(context);
+	if (self == nullptr) {
+		suspendForever();
+	}
+	self->run();
+}
+
+} // namespace
+
 ScoutResult ScoutResult::success(const char *message) {
 	return {ScoutStatus::Ok, message};
 }
@@ -1029,9 +1120,22 @@ Scout::Scout()
 }
 
 Scout::~Scout() {
-	if (_impl && _impl->initialized) {
-		(void)_impl->deinit(UINT32_MAX);
+	if (!_impl || !_impl->initialized) {
+		return;
 	}
+
+	if (_impl->task.handle() == xTaskGetCurrentTaskHandle()) {
+		auto *service = cleanupService();
+		ScoutImpl *deferred = _impl.release();
+		deferred->stopRequested.store(true);
+		deferred->scanRequested.store(false);
+		if (service != nullptr) {
+			service->enqueue(deferred);
+		}
+		return;
+	}
+
+	(void)_impl->deinit(UINT32_MAX);
 }
 
 ScoutResult Scout::init(const ScoutConfig &config) {
@@ -1189,6 +1293,8 @@ const char *Scout::statusToString(ScoutStatus status) const {
 		return "task_create_failed";
 	case ScoutStatus::Busy:
 		return "busy";
+	case ScoutStatus::Cancelled:
+		return "cancelled";
 	case ScoutStatus::Timeout:
 		return "timeout";
 	case ScoutStatus::NetworkUnavailable:
@@ -1231,6 +1337,8 @@ const char *Scout::eventTypeToString(ScoutEventType type) const {
 		return "device_observed";
 	case ScoutEventType::DeviceChanged:
 		return "device_changed";
+	case ScoutEventType::DeviceExpired:
+		return "device_expired";
 	case ScoutEventType::CoverageLost:
 		return "coverage_lost";
 	case ScoutEventType::CoverageRestored:
