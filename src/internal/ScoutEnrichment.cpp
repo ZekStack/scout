@@ -566,6 +566,27 @@ bool identityRelation(
 	out.first = leftInfo.key;
 	out.second = rightInfo.key;
 
+	// Strong identifiers are also contradiction evidence. Never let a weaker
+	// hostname/service coincidence relate devices that explicitly advertise
+	// different persistent identities.
+	if (leftDetails.upnpUdn[0] != '\0' && rightDetails.upnpUdn[0] != '\0' &&
+	    !textEqualsIgnoreCase(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
+		return false;
+	}
+	if (leftDetails.persistentDeviceId[0] != '\0' &&
+	    rightDetails.persistentDeviceId[0] != '\0' &&
+	    !textEqualsIgnoreCase(
+	        leftDetails.persistentDeviceId,
+	        rightDetails.persistentDeviceId
+	    )) {
+		return false;
+	}
+	if (sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&
+	    leftDetails.serialNumber[0] != '\0' && rightDetails.serialNumber[0] != '\0' &&
+	    !textEqualsIgnoreCase(leftDetails.serialNumber, rightDetails.serialNumber)) {
+		return false;
+	}
+
 	if (sameNonEmpty(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
 		out.evidence = {
 		    .type = ScoutIdentityEvidenceType::UpnpUdn,
