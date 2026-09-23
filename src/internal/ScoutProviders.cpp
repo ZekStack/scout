@@ -983,8 +983,9 @@ ProviderRunStats runReverseDnsProvider(
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
 		return stats;
 	}
-	(void)config.timeoutMs;
 	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
+#if defined(NI_NAMEREQD)
+	(void)config.timeoutMs;
 	for (size_t processed = 0; processed < limit; ++processed) {
 		const size_t index = (cursor + processed) % targetCount;
 		const auto &target = targets[index];
@@ -1013,6 +1014,10 @@ ProviderRunStats runReverseDnsProvider(
 		sink(target.mac, observation, context);
 		stats.observations++;
 	}
+#else
+	(void)config;
+	stats.errors += limit;
+#endif
 	cursor = (cursor + limit) % targetCount;
 	return stats;
 }
