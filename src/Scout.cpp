@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -2004,6 +2005,135 @@ ScoutResult Scout::findByMac(const ScoutMacAddress &mac, ScoutDeviceInfo &out) c
 	return ScoutResult::success();
 }
 
+ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->deviceCount) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device index is out of range");
+	}
+	out = _impl->devices[index].details;
+	return ScoutResult::success();
+}
+
+ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetails &out) const {
+	if (!mac.valid()) {
+		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
+	}
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	const size_t index = _impl->findDeviceByMac(mac.bytes);
+	if (index == SIZE_MAX) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
+	}
+	out = _impl->devices[index].details;
+	return ScoutResult::success();
+}
+
+ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName &out) const {
+	out = {};
+	if (!mac.valid()) {
+		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
+	}
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	const size_t index = _impl->findDeviceByMac(mac.bytes);
+	if (index == SIZE_MAX) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
+	}
+	if (scout_internal::selectPreferredName(_impl->devices[index].details, out)) {
+		return ScoutResult::success();
+	}
+	std::snprintf(
+	    out.value,
+	    sizeof(out.value),
+	    "%02X:%02X:%02X:%02X:%02X:%02X",
+	    static_cast<unsigned>(mac.bytes[0]),
+	    static_cast<unsigned>(mac.bytes[1]),
+	    static_cast<unsigned>(mac.bytes[2]),
+	    static_cast<unsigned>(mac.bytes[3]),
+	    static_cast<unsigned>(mac.bytes[4]),
+	    static_cast<unsigned>(mac.bytes[5])
+	);
+	out.source = ScoutNameSource::None;
+	return ScoutResult::success("MAC address fallback");
+}
+
+size_t Scout::identityGroupCount() const {
+	if (!_impl) {
+		return 0;
+	}
+	ScoutLock lock(_impl->mutex);
+	return lock && _impl->initialized ? _impl->identityGroupCountValue : 0;
+}
+
+ScoutResult Scout::identityGroupAt(size_t index, ScoutIdentityGroup &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->identityGroupCountValue) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "identity group index is out of range");
+	}
+	out = _impl->identityGroups[index];
+	return ScoutResult::success();
+}
+
+size_t Scout::identityRelationCount() const {
+	if (!_impl) {
+		return 0;
+	}
+	ScoutLock lock(_impl->mutex);
+	return lock && _impl->initialized ? _impl->identityRelationCountValue : 0;
+}
+
+ScoutResult Scout::identityRelationAt(size_t index, ScoutIdentityRelation &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->identityRelationCountValue) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "identity relation index is out of range");
+	}
+	out = _impl->identityRelations[index];
+	return ScoutResult::success();
+}
+
 ScoutDiagnostics Scout::diagnostics() const {
 	if (!_impl) {
 		return {};
@@ -2019,11 +2149,24 @@ ScoutDiagnostics Scout::diagnostics() const {
 	snapshot.deviceCount = _impl->deviceCount;
 	snapshot.registryRegion = Strata::regionOf(_impl->devices);
 	snapshot.targetBufferRegion = Strata::regionOf(_impl->targets);
+	snapshot.enrichmentRegion = Strata::regionOf(_impl->providerTargets);
+	snapshot.identityGroupCount = _impl->identityGroupCountValue;
+	snapshot.identityRelationCount = _impl->identityRelationCountValue;
 	if (_impl->task) {
 		snapshot.taskStackRegion = _impl->task.stackRegion();
 		snapshot.taskStackHighWaterMarkBytes = _impl->task.stackHighWaterMarkBytes();
 	}
 	return snapshot;
+}
+
+void Scout::setOuiLookup(ScoutOuiLookupCallback callback) {
+	if (!_impl) {
+		return;
+	}
+	ScoutLock lock(_impl->mutex);
+	if (lock) {
+		_impl->ouiLookup = std::move(callback);
+	}
 }
 
 void Scout::onEvent(ScoutEventCallback callback) {
@@ -2098,6 +2241,8 @@ const char *Scout::eventTypeToString(ScoutEventType type) const {
 		return "device_changed";
 	case ScoutEventType::DeviceExpired:
 		return "device_expired";
+	case ScoutEventType::IdentityGroupChanged:
+		return "identity_group_changed";
 	case ScoutEventType::CoverageLost:
 		return "coverage_lost";
 	case ScoutEventType::CoverageRestored:
