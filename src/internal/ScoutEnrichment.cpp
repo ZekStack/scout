@@ -369,6 +369,53 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 	return changes;
 }
 
+void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &source) {
+	for (size_t i = 0; i < source.nameCount; ++i) {
+		(void)upsertName(
+		    target,
+		    source.names[i].source,
+		    source.names[i].value,
+		    source.names[i].lastSeenAtMs,
+		    source.names[i].expiresAtMs
+		);
+	}
+	for (size_t i = 0; i < source.serviceCount; ++i) {
+		(void)upsertService(target, source.services[i]);
+	}
+	for (size_t i = 0; i < source.metadataCount; ++i) {
+		(void)upsertMetadata(target, source.metadata[i]);
+	}
+	if (!target.vendor.known && source.vendor.known) {
+		target.vendor = source.vendor;
+	}
+	target.locallyAdministeredMac =
+	    target.locallyAdministeredMac || source.locallyAdministeredMac;
+	target.multicastMac = target.multicastMac || source.multicastMac;
+	if (target.manufacturer[0] == '\0') {
+		copyText(target.manufacturer, sizeof(target.manufacturer), source.manufacturer);
+	}
+	if (target.modelName[0] == '\0') {
+		copyText(target.modelName, sizeof(target.modelName), source.modelName);
+	}
+	if (target.modelNumber[0] == '\0') {
+		copyText(target.modelNumber, sizeof(target.modelNumber), source.modelNumber);
+	}
+	if (target.serialNumber[0] == '\0') {
+		copyText(target.serialNumber, sizeof(target.serialNumber), source.serialNumber);
+	}
+	if (target.persistentDeviceId[0] == '\0') {
+		copyText(
+		    target.persistentDeviceId,
+		    sizeof(target.persistentDeviceId),
+		    source.persistentDeviceId
+		);
+	}
+	if (target.upnpUdn[0] == '\0') {
+		copyText(target.upnpUdn, sizeof(target.upnpUdn), source.upnpUdn);
+	}
+	target.lastEnrichedAtMs = std::max(target.lastEnrichedAtMs, source.lastEnrichedAtMs);
+}
+
 bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &out) {
 	out = {};
 	int bestPriority = 1000;
