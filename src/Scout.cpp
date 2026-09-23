@@ -639,7 +639,7 @@ struct ScoutImpl {
 			}
 
 			if (!waitInterruptible(config.arpResponseWaitMs)) {
-				return ScoutStatus::Busy;
+				return ScoutStatus::Cancelled;
 			}
 
 			const esp_err_t afterResult = scout_internal::lookupArpMappings(
@@ -687,14 +687,35 @@ struct ScoutImpl {
 
 			if (config.interBatchDelayMs > 0 &&
 			    !waitInterruptible(config.interBatchDelayMs)) {
-				return ScoutStatus::Busy;
+				return ScoutStatus::Cancelled;
 			}
+		}
+		if (stopRequested.load()) {
+			return ScoutStatus::Cancelled;
 		}
 		if (hadRequestFailures) {
 			recordNetworkError(scanId, "one or more ARP requests failed");
 			return ScoutStatus::InternalError;
 		}
 		return ScoutStatus::Ok;
+	}
+
+	void finishScan(
+	    uint64_t scanId,
+	    uint64_t startedAt,
+	    ScoutStatus status,
+	    const char *message
+	) {
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				if (status == ScoutStatus::Ok) {
+					diag.completedScanCount++;
+				}
+				diag.lastScanDurationMs = nowMs() - startedAt;
+			}
+		}
+		emitSimple(ScoutEventType::ScanCompleted, status, scanId, message);
 	}
 
 	void performScan() {
@@ -709,6 +730,12 @@ struct ScoutImpl {
 		}
 		emitSimple(ScoutEventType::ScanStarted, ScoutStatus::Ok, scanId, "scan started");
 
+		maintainRegistry(scanId);
+		if (stopRequested.load()) {
+			finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
+			return;
+		}
+
 		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
 		size_t interfaceCount = 0;
 		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
@@ -722,10 +749,15 @@ struct ScoutImpl {
 				ScoutLock lock(mutex);
 				if (lock) {
 					diag.skippedScanCount++;
-					diag.lastScanDurationMs = nowMs() - startedAt;
 				}
 			}
 			recordNetworkError(scanId, "failed to enumerate network interfaces");
+			finishScan(
+			    scanId,
+			    startedAt,
+			    ScoutStatus::InternalError,
+			    "scan failed while enumerating network interfaces"
+			);
 			return;
 		}
 
@@ -735,7 +767,6 @@ struct ScoutImpl {
 				ScoutLock lock(mutex);
 				if (lock) {
 					diag.skippedScanCount++;
-					diag.lastScanDurationMs = nowMs() - startedAt;
 				}
 			}
 			emitSimple(
@@ -744,12 +775,27 @@ struct ScoutImpl {
 			    scanId,
 			    "no eligible ARP-capable interface"
 			);
+			finishScan(
+			    scanId,
+			    startedAt,
+			    ScoutStatus::NetworkUnavailable,
+			    "scan completed without an eligible interface"
+			);
 			return;
 		}
 
 		ScoutStatus scanStatus = ScoutStatus::Ok;
-		for (size_t i = 0; i < interfaceCount && !stopRequested.load(); ++i) {
+		for (size_t i = 0; i < interfaceCount; ++i) {
+			if (stopRequested.load()) {
+				scanStatus = ScoutStatus::Cancelled;
+				break;
+			}
+
 			const ScoutStatus interfaceStatus = scanInterface(interfaces[i], scanId);
+			if (interfaceStatus == ScoutStatus::Cancelled) {
+				scanStatus = ScoutStatus::Cancelled;
+				break;
+			}
 			if (interfaceStatus == ScoutStatus::InternalError ||
 			    (scanStatus == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
 				scanStatus = interfaceStatus;
@@ -757,27 +803,23 @@ struct ScoutImpl {
 		}
 
 		if (stopRequested.load()) {
-			return;
+			scanStatus = ScoutStatus::Cancelled;
 		}
 
-		// A partial or failed sweep cannot support absence inference.
-		updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				if (scanStatus == ScoutStatus::Ok) {
-					diag.completedScanCount++;
-				}
-				diag.lastScanDurationMs = nowMs() - startedAt;
-			}
+		if (scanStatus != ScoutStatus::Cancelled) {
+			// A partial or failed sweep cannot support absence inference.
+			updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
 		}
-		emitSimple(
-		    ScoutEventType::ScanCompleted,
-		    scanStatus,
+
+		finishScan(
 		    scanId,
-		    scanStatus == ScoutStatus::Ok ? "scan completed"
-		                                  : "scan completed with skipped or failed interfaces"
+		    startedAt,
+		    scanStatus,
+		    scanStatus == ScoutStatus::Ok
+		        ? "scan completed"
+		        : scanStatus == ScoutStatus::Cancelled
+		              ? "scan cancelled"
+		              : "scan completed with skipped or failed interfaces"
 		);
 	}
 
