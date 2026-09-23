@@ -445,8 +445,8 @@ struct ScoutImpl {
 	    bool confirmed,
 	    uint64_t scanId
 	) {
-		ScoutEvent event;
-		bool shouldEmit = false;
+		ScoutEvent events[2]{};
+		size_t eventCount = 0;
 		const uint64_t observedAt = nowMs();
 
 		{
@@ -456,17 +456,19 @@ struct ScoutImpl {
 			}
 
 			size_t index = findDeviceByMac(mac);
+			bool discovered = false;
 			if (index == SIZE_MAX) {
 				if (deviceCount >= deviceCapacity) {
 					diag.deviceLimitDrops++;
+					auto &event = events[eventCount++];
 					event.type = ScoutEventType::Error;
 					event.status = ScoutStatus::DeviceLimitReached;
 					event.scanId = scanId;
 					event.source = source;
 					event.message = "device registry limit reached";
-					shouldEmit = true;
 				} else {
 					index = deviceCount++;
+					discovered = true;
 					auto &info = devices[index].info;
 					info = {};
 					info.key.kind = ScoutIdentityKind::Mac;
@@ -477,26 +479,9 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
-					(void)scout_internal::upsertEndpoint(
-					    info,
-					    interfaceSnapshot.index,
-					    interfaceSnapshot.name,
-					    ipv4,
-					    observedAt
-					);
 
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
-
-					event.type = ScoutEventType::DeviceDiscovered;
-					event.status = ScoutStatus::Ok;
-					event.scanId = scanId;
-					event.source = source;
-					event.hasDevice = true;
-					event.device = info;
-					event.message = confirmed ? "device discovered by active ARP"
-					                          : "device discovered from ARP cache";
-					shouldEmit = true;
 				}
 			} else {
 				auto &info = devices[index].info;
@@ -505,7 +490,32 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = observedAt;
 				}
 				info.observationSources |= scoutObservationMask(source);
-				info.observationCount++;
+				if (info.observationCount != UINT32_MAX) {
+					info.observationCount++;
+				}
+			}
+
+			if (index != SIZE_MAX) {
+				const size_t previousOwner =
+				    findEndpointOwner(interfaceSnapshot.index, ipv4, index);
+				if (previousOwner != SIZE_MAX &&
+				    scout_internal::removeEndpoint(
+				        devices[previousOwner].info,
+				        interfaceSnapshot.index,
+				        ipv4
+				    )) {
+					diag.endpointReassignmentCount++;
+					auto &event = events[eventCount++];
+					event.type = ScoutEventType::DeviceChanged;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.source = source;
+					event.hasDevice = true;
+					event.device = devices[previousOwner].info;
+					event.message = "device endpoint reassigned";
+				}
+
+				auto &info = devices[index].info;
 				const bool endpointChanged = scout_internal::upsertEndpoint(
 				    info,
 				    interfaceSnapshot.index,
@@ -514,7 +524,18 @@ struct ScoutImpl {
 				    observedAt
 				);
 
-				if (endpointChanged || confirmed) {
+				if (discovered) {
+					auto &event = events[eventCount++];
+					event.type = ScoutEventType::DeviceDiscovered;
+					event.status = ScoutStatus::Ok;
+					event.scanId = scanId;
+					event.source = source;
+					event.hasDevice = true;
+					event.device = info;
+					event.message = confirmed ? "device discovered by active ARP"
+					                          : "device discovered from ARP cache";
+				} else if (endpointChanged || confirmed) {
+					auto &event = events[eventCount++];
 					event.type = endpointChanged ? ScoutEventType::DeviceChanged
 					                            : ScoutEventType::DeviceObserved;
 					event.status = ScoutStatus::Ok;
@@ -524,13 +545,15 @@ struct ScoutImpl {
 					event.device = info;
 					event.message = endpointChanged ? "device endpoint changed"
 					                                : "device actively observed";
-					shouldEmit = true;
 				}
 			}
 		}
 
-		if (shouldEmit) {
-			emit(event);
+		for (size_t i = 0; i < eventCount; ++i) {
+			emit(events[i]);
+			if (stopRequested.load()) {
+				break;
+			}
 		}
 	}
 
