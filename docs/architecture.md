@@ -24,7 +24,7 @@ Scout owns one long-lived FreeRTOS task through Strata::FreeRTOS::Task.
 
 The task owns scanning and registry mutation. Buffer and task publication, teardown, and public snapshot queries are protected with a Strata recursive mutex. Shutdown is cooperative: deinit requests stop, waits for the Scout task to reach its external-deletion handoff, and then resets the Strata task from the caller context.
 
-Callbacks are never invoked while the Scout registry mutex is held.
+Callbacks are never invoked while the Scout registry mutex is held. Explicit `deinit()` is rejected from the Scout task because Strata task storage must be reset from another task context. If a `Scout` object is destroyed from its own callback, ownership of the runtime is transferred to a shared Strata-owned cleanup task, which performs the normal cooperative shutdown and releases the runtime only after the Scout task has stopped.
 
 ## Network threading
 
@@ -41,6 +41,14 @@ ARP discovery uses the MAC address as the stable registry key.
 A device may expose several endpoints. Each endpoint contains an IPv4 address and lwIP interface index/name. This lets an ESP32 with simultaneous Ethernet and Wi-Fi observe the same MAC from more than one interface without duplicating the device record.
 
 The public identity enum already reserves ProvisionalIpv4 for future mechanisms that can discover an IP address before a MAC address is known.
+
+Registry maintenance preserves three invariants:
+
+- one device record per MAC address;
+- no duplicate endpoint inside one device;
+- one current MAC owner for each `(interface, IPv4)` endpoint across the registry.
+
+If an endpoint is later observed on another MAC, ownership moves to the new observation but the older device record remains until its retention age expires.
 
 ## Coverage
 
@@ -60,3 +68,5 @@ The v0.1 foundation uses fixed-capacity Strata-backed buffers allocated during i
 - ARP-after scratch buffer.
 
 A subnet larger than maxHostsPerSubnet is skipped instead of allowing an accidental /16 or /8 sweep.
+
+Device records are also time-bounded. `deviceMaxAgeMs` removes records that have not been observed recently enough according to `lastSeenAtMs`. This is registry housekeeping only; it does not define application-level Online/Offline state.
