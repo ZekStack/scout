@@ -38,4 +38,21 @@ bool upsertEndpoint(
     uint64_t observedAt
 );
 
+bool removeEndpoint(
+    ScoutDeviceInfo &device,
+    uint8_t interfaceIndex,
+    uint32_t ipv4
+);
+
+bool deviceExpired(
+    const ScoutDeviceInfo &device,
+    uint64_t now,
+    uint64_t maxAgeMs
+);
+
+void mergeDeviceInfo(
+    ScoutDeviceInfo &target,
+    const ScoutDeviceInfo &source
+);
+
 } // namespace scout_internal
