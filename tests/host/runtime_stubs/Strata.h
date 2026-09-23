@@ -27,6 +27,9 @@ template <typename T> T *allocateArray(size_t count, Placement) {
 }
 template <typename T> void free(T *pointer) { ::operator delete(pointer); }
 template <typename T> using UniquePtr = std::unique_ptr<T>;
+template <typename T> T *create(Placement) {
+	return new (std::nothrow) T();
+}
 template <typename T> UniquePtr<T> makeUnique(Placement) {
 	return UniquePtr<T>(new (std::nothrow) T());
 }
