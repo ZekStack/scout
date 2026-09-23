@@ -1,7 +1,9 @@
 #include "Scout.h"
 
+#include "internal/ScoutEnrichment.h"
 #include "internal/ScoutLogic.h"
 #include "internal/ScoutNetwork.h"
+#include "internal/ScoutProviders.h"
 
 #include <strata/freertos/BinarySemaphore.h>
 #include <strata/freertos/Mutex.h>
@@ -89,6 +91,7 @@ class ScoutLock {
 
 struct ScoutDeviceRecord {
 	ScoutDeviceInfo info{};
+	ScoutDeviceDetails details{};
 };
 
 struct ScoutImpl {
@@ -110,11 +113,25 @@ struct ScoutImpl {
 	uint32_t *targets = nullptr;
 	scout_internal::ArpMapping *beforeMappings = nullptr;
 	scout_internal::ArpMapping *afterMappings = nullptr;
+	scout_internal::ProviderTarget *providerTargets = nullptr;
+	ScoutIdentityGroup *identityGroups = nullptr;
+	ScoutIdentityRelation *identityRelations = nullptr;
+	size_t *identityParents = nullptr;
+	char *httpScratch = nullptr;
+
 	size_t deviceCapacity = 0;
 	size_t deviceCount = 0;
 	size_t mappingCapacity = 0;
+	size_t providerTargetCapacity = 0;
+	size_t identityGroupCountValue = 0;
+	size_t identityRelationCountValue = 0;
+	size_t identityRelationCapacity = 0;
+	size_t httpScratchCapacity = 0;
 
 	ScoutEventCallback callback;
+	ScoutOuiLookupCallback ouiLookup;
+	size_t icmpCursor = 0;
+	size_t reverseDnsCursor = 0;
 
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
@@ -145,9 +162,24 @@ struct ScoutImpl {
 		beforeMappings = nullptr;
 		Strata::free(afterMappings);
 		afterMappings = nullptr;
+		Strata::free(providerTargets);
+		providerTargets = nullptr;
+		Strata::free(identityGroups);
+		identityGroups = nullptr;
+		Strata::free(identityRelations);
+		identityRelations = nullptr;
+		Strata::free(identityParents);
+		identityParents = nullptr;
+		Strata::free(httpScratch);
+		httpScratch = nullptr;
 		deviceCapacity = 0;
 		deviceCount = 0;
 		mappingCapacity = 0;
+		providerTargetCapacity = 0;
+		identityGroupCountValue = 0;
+		identityRelationCountValue = 0;
+		identityRelationCapacity = 0;
+		httpScratchCapacity = 0;
 	}
 
 	bool allocateBuffers(const ScoutConfig &incoming) {
@@ -184,6 +216,44 @@ struct ScoutImpl {
 		if (beforeMappings == nullptr || afterMappings == nullptr) {
 			releaseBuffers();
 			return false;
+		}
+
+		providerTargetCapacity = incoming.maxDevices * SCOUT_MAX_ENDPOINTS_PER_DEVICE;
+		providerTargets = Strata::allocateArray<scout_internal::ProviderTarget>(
+		    providerTargetCapacity,
+		    incoming.memory.allocation
+		);
+		identityGroups = Strata::allocateArray<ScoutIdentityGroup>(
+		    incoming.maxDevices,
+		    incoming.memory.allocation
+		);
+		identityRelations = Strata::allocateArray<ScoutIdentityRelation>(
+		    incoming.maxIdentityRelations,
+		    incoming.memory.allocation
+		);
+		identityParents = Strata::allocateArray<size_t>(
+		    incoming.maxDevices,
+		    incoming.memory.allocation
+		);
+		identityRelationCapacity = incoming.maxIdentityRelations;
+
+		if (providerTargets == nullptr || identityGroups == nullptr ||
+		    identityRelations == nullptr || identityParents == nullptr) {
+			releaseBuffers();
+			return false;
+		}
+
+		if (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
+		    incoming.providers.ssdp.maxDescriptionBytes > 0) {
+			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes;
+			httpScratch = Strata::allocateArray<char>(
+			    httpScratchCapacity,
+			    incoming.memory.allocation
+			);
+			if (httpScratch == nullptr) {
+				releaseBuffers();
+				return false;
+			}
 		}
 
 		return true;
