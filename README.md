@@ -141,7 +141,7 @@ The registry and source mask are intended to accept additional discovery provide
 
 ### Registry retention and deduplication
 
-`deviceMaxAgeMs` controls registry retention, not presence state. The default is five minutes. A record expires when Scout has not observed it for that duration, based on `lastSeenAtMs`, and Scout emits `DeviceExpired` with the final device snapshot.
+`deviceMaxAgeMs` controls registry retention, not presence state. The default is five minutes. A record expires when Scout has not observed it for that duration, based on `lastSeenAtMs`, and Scout emits `DeviceExpired` with the final device snapshot. For stable continuous discovery, configure the retention age to at least twice the normal scan interval; smaller values are valid but can intentionally produce expire/rediscover churn.
 
 MAC address remains the device identity. Scout never merges two different MAC addresses merely because they used the same IPv4 address. Within the registry, a specific `(interface, IPv4)` endpoint has one current MAC owner; observing that endpoint on another MAC transfers the endpoint while retaining the older device record until its own retention period expires.
 
