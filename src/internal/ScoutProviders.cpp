@@ -293,7 +293,7 @@ void emitMdnsResult(
 	    result.esp_netif != nullptr ? esp_netif_get_ifkey(result.esp_netif) : nullptr;
 
 	for (mdns_ip_addr_t *address = result.addr; address != nullptr; address = address->next) {
-		if (address->addr.type != ESP_IPADDR_TYPE_V4) {
+		if (address->addr.type != MDNS_IP_PROTOCOL_V4) {
 			continue;
 		}
 		const uint32_t ipv4 = address->addr.u_addr.ip4.addr;
@@ -355,7 +355,7 @@ void emitMdnsResult(
 		for (mdns_ip_addr_t *extra = result.addr;
 		     extra != nullptr && observation.ipv6Count < SCOUT_MAX_IPV6_PER_ENDPOINT;
 		     extra = extra->next) {
-			if (extra->addr.type != ESP_IPADDR_TYPE_V6) {
+			if (extra->addr.type != MDNS_IP_PROTOCOL_V6) {
 				continue;
 			}
 			auto &ipv6 = observation.ipv6[observation.ipv6Count++];
