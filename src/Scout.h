@@ -393,6 +393,7 @@ struct ScoutIcmpConfig {
 	uint32_t timeoutMs = 300;
 	uint32_t taskStackBytes = 3072;
 	UBaseType_t taskPriority = 1;
+	size_t maxTargetsPerRun = 16;
 };
 
 struct ScoutMdnsConfig {
@@ -401,6 +402,7 @@ struct ScoutMdnsConfig {
 	uint32_t queryTimeoutMs = 800;
 	size_t maxResults = 128;
 	size_t maxServiceTypes = 64;
+	size_t maxServiceQueriesPerRun = 24;
 	uint64_t fallbackMaxAgeMs = 10ULL * 60ULL * 1000ULL;
 };
 
@@ -411,6 +413,7 @@ struct ScoutSsdpConfig {
 	bool fetchDeviceDescription = true;
 	uint32_t httpTimeoutMs = 1500;
 	size_t maxDescriptionBytes = 32U * 1024U;
+	size_t maxDescriptionFetchesPerRun = 16;
 	uint64_t fallbackMaxAgeMs = 30ULL * 60ULL * 1000ULL;
 };
 
@@ -418,6 +421,7 @@ struct ScoutNbnsConfig {
 	bool enabled = false;
 	uint32_t intervalMs = 10U * 60U * 1000U;
 	uint32_t responseWindowMs = 600;
+	size_t maxTargetsPerRun = 256;
 	uint64_t maxAgeMs = 30ULL * 60ULL * 1000ULL;
 };
 
@@ -425,6 +429,7 @@ struct ScoutReverseDnsConfig {
 	bool enabled = false;
 	uint32_t intervalMs = 10U * 60U * 1000U;
 	uint32_t timeoutMs = 500;
+	size_t maxTargetsPerRun = 16;
 	uint64_t maxAgeMs = 30ULL * 60ULL * 1000ULL;
 };
 
