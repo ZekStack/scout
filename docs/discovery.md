@@ -35,7 +35,7 @@ This prevents Scout from pretending that an old ARP cache entry is a fresh liven
 
 The default scan interval is 60 seconds. scanNow schedules an immediate scan and returns without waiting for the subnet sweep to complete.
 
-A dedicated Scout task performs the scan. ARP batches use bounded waits, check the shutdown request between batches, and yield between batches.
+A dedicated Scout task performs the scan. ARP batches use bounded waits, check the shutdown request between batches, and yield between batches. An interface with no ARP targets or a subnet larger than `maxHostsPerSubnet` emits `ScanSkipped`; an ARP operation failure emits `Error`. The final `ScanCompleted` status is non-OK if any interface was skipped or failed, and only fully successful sweeps increment `completedScanCount`. Coverage is updated after the sweep, so `CoverageRestored` follows the observations that established it.
 
 ## Planned observation providers
 

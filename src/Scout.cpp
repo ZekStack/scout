@@ -100,6 +100,7 @@ struct ScoutImpl {
 
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
+	std::atomic<bool> startReady{false};
 	std::atomic<bool> readyForDelete{false};
 
 	ScoutState state = ScoutState::Stopped;
@@ -373,7 +374,7 @@ struct ScoutImpl {
 		}
 	}
 
-	void scanInterface(
+	ScoutStatus scanInterface(
 	    const scout_internal::InterfaceSnapshot &interfaceSnapshot,
 	    uint64_t scanId
 	) {
@@ -391,10 +392,22 @@ struct ScoutImpl {
 			    scanId,
 			    "subnet exceeds maxHostsPerSubnet"
 			);
-			return;
+			return ScoutStatus::InvalidConfig;
 		}
 		if (targetCount == 0) {
-			return;
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.skippedScanCount++;
+				}
+			}
+			emitSimple(
+			    ScoutEventType::ScanSkipped,
+			    ScoutStatus::NetworkUnavailable,
+			    scanId,
+			    "subnet has no ARP targets"
+			);
+			return ScoutStatus::NetworkUnavailable;
 		}
 
 		{
@@ -405,6 +418,7 @@ struct ScoutImpl {
 		}
 
 		const size_t batchSize = mappingCapacity;
+		bool hadRequestFailures = false;
 		for (size_t offset = 0; offset < targetCount && !stopRequested.load();
 		     offset += batchSize) {
 			const size_t count = std::min(batchSize, targetCount - offset);
@@ -416,9 +430,9 @@ struct ScoutImpl {
 			    count,
 			    beforeMappings
 			);
-			if (beforeResult != ESP_OK && beforeResult != ESP_ERR_NOT_FOUND) {
+			if (beforeResult != ESP_OK) {
 				recordNetworkError(scanId, "failed to inspect ARP cache");
-				return;
+				return ScoutStatus::InternalError;
 			}
 
 			scout_internal::ArpRequestStats requestStats;
@@ -435,13 +449,14 @@ struct ScoutImpl {
 					diag.arpRequestFailures += requestStats.failed;
 				}
 			}
+			hadRequestFailures |= requestStats.failed > 0;
 			if (requestResult != ESP_OK) {
 				recordNetworkError(scanId, "failed to send ARP requests");
-				return;
+				return ScoutStatus::InternalError;
 			}
 
 			if (!waitInterruptible(config.arpResponseWaitMs)) {
-				return;
+				return ScoutStatus::Busy;
 			}
 
 			const esp_err_t afterResult = scout_internal::lookupArpMappings(
@@ -452,7 +467,7 @@ struct ScoutImpl {
 			);
 			if (afterResult != ESP_OK) {
 				recordNetworkError(scanId, "failed to read ARP results");
-				return;
+				return ScoutStatus::InternalError;
 			}
 
 			for (size_t i = 0; i < count; ++i) {
@@ -489,9 +504,14 @@ struct ScoutImpl {
 
 			if (config.interBatchDelayMs > 0 &&
 			    !waitInterruptible(config.interBatchDelayMs)) {
-				return;
+				return ScoutStatus::Busy;
 			}
 		}
+		if (hadRequestFailures) {
+			recordNetworkError(scanId, "one or more ARP requests failed");
+			return ScoutStatus::InternalError;
+		}
+		return ScoutStatus::Ok;
 	}
 
 	void performScan() {
@@ -526,8 +546,8 @@ struct ScoutImpl {
 			return;
 		}
 
-		updateCoverage(interfaceCount > 0, interfaceCount, scanId);
 		if (interfaceCount == 0) {
+			updateCoverage(false, 0, scanId);
 			{
 				ScoutLock lock(mutex);
 				if (lock) {
@@ -544,25 +564,45 @@ struct ScoutImpl {
 			return;
 		}
 
+		ScoutStatus scanStatus = ScoutStatus::Ok;
 		for (size_t i = 0; i < interfaceCount && !stopRequested.load(); ++i) {
-			scanInterface(interfaces[i], scanId);
+			const ScoutStatus interfaceStatus = scanInterface(interfaces[i], scanId);
+			if (interfaceStatus == ScoutStatus::InternalError ||
+			    (scanStatus == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
+				scanStatus = interfaceStatus;
+			}
 		}
 
 		if (stopRequested.load()) {
 			return;
 		}
 
+		// A partial or failed sweep cannot support absence inference.
+		updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
+
 		{
 			ScoutLock lock(mutex);
 			if (lock) {
-				diag.completedScanCount++;
+				if (scanStatus == ScoutStatus::Ok) {
+					diag.completedScanCount++;
+				}
 				diag.lastScanDurationMs = nowMs() - startedAt;
 			}
 		}
-		emitSimple(ScoutEventType::ScanCompleted, ScoutStatus::Ok, scanId, "scan completed");
+		emitSimple(
+		    ScoutEventType::ScanCompleted,
+		    scanStatus,
+		    scanId,
+		    scanStatus == ScoutStatus::Ok ? "scan completed"
+		                                  : "scan completed with skipped or failed interfaces"
+		);
 	}
 
 	void run() {
+		while (!startReady.load(std::memory_order_acquire)) {
+			vTaskDelay(1);
+		}
+
 		{
 			ScoutLock lock(mutex);
 			if (lock) {
@@ -634,6 +674,12 @@ struct ScoutImpl {
 				    "Scout is already initialized"
 				);
 			}
+			if (state != ScoutState::Stopped) {
+				return ScoutResult::failure(
+				    ScoutStatus::Busy,
+				    "Scout is starting or stopping"
+				);
+			}
 			config = incoming;
 			state = ScoutState::Starting;
 			diag = {};
@@ -656,6 +702,7 @@ struct ScoutImpl {
 
 		stopRequested.store(false);
 		scanRequested.store(incoming.scanOnInit);
+		startReady.store(false, std::memory_order_release);
 		readyForDelete.store(false);
 
 		task = Strata::FreeRTOS::Task::create(
@@ -682,12 +729,16 @@ struct ScoutImpl {
 		{
 			ScoutLock lock(mutex);
 			if (!lock) {
+				task.reset();
+				releaseBuffers();
+				state = ScoutState::Stopped;
 				return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
 			}
 			initialized = true;
 			diag.registryRegion = Strata::regionOf(devices);
 			diag.targetBufferRegion = Strata::regionOf(targets);
 			diag.taskStackRegion = task.stackRegion();
+			startReady.store(true, std::memory_order_release);
 		}
 
 		return ScoutResult::success("Scout initialized");

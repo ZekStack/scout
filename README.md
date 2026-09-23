@@ -21,13 +21,19 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded in-
 
 ## Install
 
-Scout `0.1.0` requires Strata `v0.1.2` and C++20.
+Scout `0.1.0` requires Strata `v0.1.2`, C++20, and the PIOArduino ESP32 platform used by CI.
 
 ### PlatformIO
 
+Install PIOArduino Core `6.1.19` and use its ESP32 platform `55.03.39`:
+
+```sh
+python -m pip install "pioarduino==6.1.19"
+```
+
 ```ini
 [env:esp32dev]
-platform = espressif32
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
 board = esp32dev
 framework = arduino
 
@@ -41,7 +47,7 @@ build_unflags =
   -std=gnu++11
 ```
 
-Scout's `library.json` pins Strata `v0.1.2`, so PlatformIO can also resolve Strata transitively.
+Scout's `library.json` pins Strata `v0.1.2`, so PIOArduino can also resolve Strata transitively.
 
 ### Arduino IDE
 
@@ -138,7 +144,7 @@ The registry and source mask are intended to accept additional discovery provide
 
 Coverage is separate from device observations.
 
-When no up, link-up, ARP-capable IPv4 interface is available, Scout reports `CoverageLost`. When an eligible interface becomes available again, Scout reports `CoverageRestored`.
+Scout reports `CoverageLost` when no eligible interface is available or a scan of any eligible interface is skipped or fails. It reports `CoverageRestored` after every eligible interface completes a scan successfully. A skipped or failed interface gives the final `ScanCompleted` event a non-OK status.
 
 A presence layer built on Scout should suppress offline inference while coverage is unavailable and revalidate known devices after coverage returns.
 
@@ -223,7 +229,7 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 | Item | Support |
 | --- | --- |
 | Framework | Arduino ESP32 |
-| Platform | `espressif32` / PIOArduino |
+| Platform | PIOArduino ESP32 platform `55.03.39` |
 | Language | C++20 |
 | Network layer | ESP-NETIF and public lwIP ARP APIs |
 | Memory policy | `PreferExternal` by default for Scout-owned movable storage and task stack |
