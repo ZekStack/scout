@@ -1126,6 +1126,12 @@ Scout::~Scout() {
 
 	if (_impl->task.handle() == xTaskGetCurrentTaskHandle()) {
 		auto *service = cleanupService();
+		{
+			ScoutLock lock(_impl->mutex);
+			if (lock) {
+				_impl->callback = {};
+			}
+		}
 		ScoutImpl *deferred = _impl.release();
 		deferred->stopRequested.store(true);
 		deferred->scanRequested.store(false);
