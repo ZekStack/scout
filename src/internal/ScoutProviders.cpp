@@ -13,6 +13,7 @@
 #include <lwip/inet.h>
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
+#include <unistd.h>
 
 #if __has_include(<mdns.h>)
 #include <mdns.h>
@@ -187,8 +188,7 @@ void maybeSetPersistentField(
 	if (key == nullptr || value == nullptr || value[0] == '\0') {
 		return;
 	}
-	if (textEqualsIgnoreCase(key, "deviceid") || textEqualsIgnoreCase(key, "device_id") ||
-	    textEqualsIgnoreCase(key, "uuid")) {
+	if (textEqualsIgnoreCase(key, "deviceid") || textEqualsIgnoreCase(key, "device_id")) {
 		copyText(
 		    observation.persistentDeviceId,
 		    sizeof(observation.persistentDeviceId),
@@ -618,10 +618,12 @@ ProviderRunStats runMdnsProvider(
 		return stats;
 	}
 #if SCOUT_HAS_MDNS
-	const esp_err_t initResult = mdns_init();
-	if (initResult != ESP_OK && initResult != ESP_ERR_INVALID_STATE) {
-		stats.errors++;
-		return stats;
+	if (config.initializeIfNeeded) {
+		const esp_err_t initResult = mdns_init();
+		if (initResult != ESP_OK && initResult != ESP_ERR_INVALID_STATE) {
+			stats.errors++;
+			return stats;
+		}
 	}
 
 	MdnsServiceType types[MaxMdnsServiceTypes]{};
