@@ -382,8 +382,8 @@ struct ScoutImpl {
 		if (index != lastIndex) {
 			devices[index] = devices[lastIndex];
 		}
-		devices[lastIndex].info = {};
-		devices[lastIndex].details = {};
+		devices[lastIndex].info = ScoutDeviceInfo{};
+		devices[lastIndex].details = ScoutDeviceDetails{};
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 		identityDirty = true;
@@ -524,8 +524,8 @@ struct ScoutImpl {
 					discovered = true;
 					auto &info = devices[index].info;
 					auto &details = devices[index].details;
-					info = {};
-					details = {};
+					info = ScoutDeviceInfo{};
+					details = ScoutDeviceDetails{};
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
 					info.mac = info.key.mac;
