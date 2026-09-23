@@ -27,24 +27,14 @@ struct ArpRequestStats {
 	size_t failed = 0;
 };
 
-esp_err_t collectInterfaces(
-    InterfaceSnapshot *out,
-    size_t capacity,
-    size_t &count
-);
+esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count);
 
 esp_err_t lookupArpMappings(
-    uint8_t interfaceIndex,
-    const uint32_t *ipv4Addresses,
-    size_t count,
-    ArpMapping *out
+    uint8_t interfaceIndex, const uint32_t *ipv4Addresses, size_t count, ArpMapping *out
 );
 
 esp_err_t requestArp(
-    uint8_t interfaceIndex,
-    const uint32_t *ipv4Addresses,
-    size_t count,
-    ArpRequestStats &stats
+    uint8_t interfaceIndex, const uint32_t *ipv4Addresses, size_t count, ArpRequestStats &stats
 );
 
 size_t recommendedArpBatchSize(size_t requested);

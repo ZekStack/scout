@@ -118,11 +118,7 @@ esp_err_t lookupArpTcpip(void *rawContext) {
 		}
 
 		context->out[i].found = true;
-		std::memcpy(
-		    context->out[i].mac,
-		    ethernetAddress->addr,
-		    sizeof(context->out[i].mac)
-		);
+		std::memcpy(context->out[i].mac, ethernetAddress->addr, sizeof(context->out[i].mac));
 	}
 
 	return ESP_OK;
@@ -156,11 +152,7 @@ esp_err_t requestArpTcpip(void *rawContext) {
 
 } // namespace
 
-esp_err_t collectInterfaces(
-    InterfaceSnapshot *out,
-    size_t capacity,
-    size_t &count
-) {
+esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count) {
 	CollectContext context{
 	    .out = out,
 	    .capacity = capacity,
@@ -172,10 +164,7 @@ esp_err_t collectInterfaces(
 }
 
 esp_err_t lookupArpMappings(
-    uint8_t interfaceIndex,
-    const uint32_t *ipv4Addresses,
-    size_t count,
-    ArpMapping *out
+    uint8_t interfaceIndex, const uint32_t *ipv4Addresses, size_t count, ArpMapping *out
 ) {
 	if (count == 0) {
 		return ESP_OK;
@@ -191,10 +180,7 @@ esp_err_t lookupArpMappings(
 }
 
 esp_err_t requestArp(
-    uint8_t interfaceIndex,
-    const uint32_t *ipv4Addresses,
-    size_t count,
-    ArpRequestStats &stats
+    uint8_t interfaceIndex, const uint32_t *ipv4Addresses, size_t count, ArpRequestStats &stats
 ) {
 	if (count == 0) {
 		stats = {};
