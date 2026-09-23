@@ -111,7 +111,7 @@ config.memory.taskStack = Strata::Placement::PreferExternal;
 
 `memory.taskStack` controls the Scout background task stack.
 
-The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
+The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. The shared deferred-cleanup task used for callback-safe destruction also has an external-preferred stack. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
 
 Diagnostics report both requested placement and observed regions:
 
