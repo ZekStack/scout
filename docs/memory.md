@@ -29,6 +29,8 @@ These buffers are allocated once during init and reused by subsequent scans.
 
 The Scout task stack uses memory.taskStack and therefore prefers external RAM by default.
 
+Scout also has one process-lifetime deferred-cleanup task shared by all Scout instances. Its stack is fixed to `PreferExternal` because it only exists to reclaim a Scout runtime that is destroyed from its own callback task. Its FreeRTOS control block follows Strata's normal internal-memory safety rule.
+
 ## Safety constraints
 
 Strata's safety constraints remain authoritative. FreeRTOS task control blocks and synchronization control blocks may remain internal even when Scout requests external-preferred storage.
