@@ -144,6 +144,7 @@ struct ScoutImpl {
 	bool shutdownInProgress = false;
 	bool coverageKnown = false;
 	bool coverageAvailable = false;
+	bool identityDirty = false;
 
 	uint64_t nextScanId = 1;
 	ScoutDiagnostics diag{};
@@ -388,6 +389,7 @@ struct ScoutImpl {
 		devices[lastIndex].details = {};
 		deviceCount--;
 		diag.deviceCount = deviceCount;
+		identityDirty = true;
 	}
 
 	void deduplicateRegistryLocked() {
@@ -488,6 +490,7 @@ struct ScoutImpl {
 			deduplicateRegistryLocked();
 		}
 		expireStaleDevices(scanId, nowMs());
+		flushIdentityIfDirty();
 	}
 
 	void observe(
