@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include <esp_netif.h>
+#include <esp_netif_net_stack.h>
 #include <esp_timer.h>
 #include <lwip/inet.h>
 #include <lwip/netdb.h>
@@ -44,6 +45,12 @@ struct LocalInterface {
 	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
 };
 
+struct LocalInterfaceCollectContext {
+	LocalInterface *out = nullptr;
+	size_t capacity = 0;
+	size_t count = 0;
+};
+
 struct MdnsServiceType {
 	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
 	char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
@@ -60,26 +67,42 @@ uint64_t expiryFromTtl(uint64_t now, uint32_t ttlSeconds, uint64_t fallbackMs) {
 	return now + static_cast<uint64_t>(ttlSeconds) * 1000ULL;
 }
 
-size_t collectLocalInterfaces(LocalInterface *out, size_t capacity) {
-	if (out == nullptr || capacity == 0) {
-		return 0;
+esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
+	auto *context = static_cast<LocalInterfaceCollectContext *>(rawContext);
+	if (context == nullptr || context->out == nullptr || context->capacity == 0) {
+		return ESP_ERR_INVALID_ARG;
 	}
-	size_t count = 0;
+
+	context->count = 0;
 	esp_netif_t *netif = nullptr;
-	while ((netif = esp_netif_next(netif)) != nullptr && count < capacity) {
+	while ((netif = esp_netif_next_unsafe(netif)) != nullptr && context->count < context->capacity) {
 		esp_netif_ip_info_t info{};
 		if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0 ||
 		    info.netmask.addr == 0) {
 			continue;
 		}
-		auto &item = out[count++];
+		auto &item = context->out[context->count++];
 		item = {};
 		item.ipv4 = info.ip.addr;
 		item.netmask = info.netmask.addr;
 		const char *key = esp_netif_get_ifkey(netif);
 		copyText(item.key, sizeof(item.key), key != nullptr ? key : "");
 	}
-	return count;
+	return ESP_OK;
+}
+
+size_t collectLocalInterfaces(LocalInterface *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return 0;
+	}
+	LocalInterfaceCollectContext context{
+	    .out = out,
+	    .capacity = capacity,
+	};
+	if (esp_netif_tcpip_exec(collectLocalInterfacesTcpip, &context) != ESP_OK) {
+		return 0;
+	}
+	return context.count;
 }
 
 bool targetMatchesInterface(const ProviderTarget &target, const char *interfaceKey) {
