@@ -22,7 +22,7 @@ The consuming application decides how many missed confirmations imply offline, h
 
 Scout owns one long-lived FreeRTOS task through Strata::FreeRTOS::Task.
 
-The task owns scanning and registry mutation. Public snapshot queries are protected with a Strata recursive mutex. Shutdown is cooperative: deinit requests stop, waits for the Scout task to reach its external-deletion handoff, and then resets the Strata task from the caller context.
+The task owns scanning and registry mutation. Buffer and task publication, teardown, and public snapshot queries are protected with a Strata recursive mutex. Shutdown is cooperative: deinit requests stop, waits for the Scout task to reach its external-deletion handoff, and then resets the Strata task from the caller context.
 
 Callbacks are never invoked while the Scout registry mutex is held.
 

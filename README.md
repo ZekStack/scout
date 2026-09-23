@@ -21,7 +21,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded in-
 
 ## Install
 
-Scout `0.1.0` requires Strata `v0.1.2`, C++20, and the PIOArduino ESP32 platform used by CI.
+Scout `0.1.0` requires Strata `v0.1.2`, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
 
 ### PlatformIO
 
@@ -51,9 +51,7 @@ Scout's `library.json` pins Strata `v0.1.2`, so PIOArduino can also resolve Stra
 
 ### Arduino IDE
 
-Scout and Strata are not published to Arduino Library Manager yet.
-
-Install both repositories into your Arduino libraries folder:
+Scout and Strata are not published to Arduino Library Manager yet. Install Arduino ESP32 core `3.3.9` through Boards Manager, then install both repositories into your Arduino libraries folder:
 
 ```txt
 Arduino/libraries/Scout
@@ -163,6 +161,8 @@ A presence layer built on Scout should suppress offline inference while coverage
 
 ## API overview
 
+`ScoutIpv4Address::value` uses lwIP network byte order. Convert it with `lwip_ntohl()` before extracting address octets. Observation timestamps (`*AtMs`) are monotonic milliseconds since boot from `esp_timer_get_time()`, not Unix timestamps; zero means no active confirmation where applicable. A valid MAC absent from the registry returns `ScoutStatus::NotFound`.
+
 ```cpp
 ScoutConfig config;
 config.scanIntervalMs = 60'000;
@@ -191,18 +191,21 @@ scout.deinit();
 
 | Example | Description |
 | --- | --- |
-| `Basic` | Initialize Scout, receive discovery events, and inspect runtime diagnostics. |
+| `WiFiDiscovery` | Connect a Wi-Fi-capable ESP32 and perform a real discovery scan after setting credentials. |
+| `Basic` | Initialize Scout with an interface already started by the application. |
 | `Events` | Observe scan, device, coverage, and error events. |
 | `Registry` | Enumerate the device registry, inspect endpoints, and look up a device by MAC address. |
 | `ManualScan` | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`. |
 | `Diagnostics` | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics. |
 | `MultiInterface` | Inspect devices observed through multiple eligible ESP-NETIF interfaces. |
 
-Start with:
+For a first scan on a Wi-Fi-capable board, set the credentials in `examples/WiFiDiscovery/WiFiDiscovery.ino` and start with:
 
 ```txt
-examples/Basic
+examples/WiFiDiscovery
 ```
+
+The other sketches expect the application to start a Wi-Fi or Ethernet interface before Scout scans.
 
 ## Testing
 

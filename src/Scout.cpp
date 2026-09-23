@@ -105,6 +105,7 @@ struct ScoutImpl {
 
 	ScoutState state = ScoutState::Stopped;
 	bool initialized = false;
+	bool shutdownInProgress = false;
 	bool coverageKnown = false;
 	bool coverageAvailable = false;
 
@@ -663,40 +664,37 @@ struct ScoutImpl {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
 		}
 
-		{
-			ScoutLock lock(mutex);
-			if (!lock) {
-				return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
-			}
-			if (initialized) {
-				return ScoutResult::failure(
-				    ScoutStatus::AlreadyInitialized,
-				    "Scout is already initialized"
-				);
-			}
-			if (state != ScoutState::Stopped) {
-				return ScoutResult::failure(
-				    ScoutStatus::Busy,
-				    "Scout is starting or stopping"
-				);
-			}
-			config = incoming;
-			state = ScoutState::Starting;
-			diag = {};
-			diag.state = state;
-			diag.allocationPlacement = config.memory.allocation;
-			diag.taskStackPlacement = config.memory.taskStack;
-			coverageKnown = false;
-			coverageAvailable = false;
-			nextScanId = 1;
+		ScoutLock lock(mutex);
+		if (!lock) {
+			return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+		}
+		if (initialized) {
+			return ScoutResult::failure(
+			    ScoutStatus::AlreadyInitialized,
+			    "Scout is already initialized"
+			);
+		}
+		if (state != ScoutState::Stopped) {
+			return ScoutResult::failure(
+			    ScoutStatus::Busy,
+			    "Scout is starting or stopping"
+			);
 		}
 
+		config = incoming;
+		state = ScoutState::Starting;
+		diag = {};
+		diag.state = state;
+		diag.allocationPlacement = config.memory.allocation;
+		diag.taskStackPlacement = config.memory.taskStack;
+		coverageKnown = false;
+		coverageAvailable = false;
+		nextScanId = 1;
+
+		// Keep buffer and task publication under the same lock used by snapshot readers.
 		if (!allocateBuffers(incoming)) {
-			ScoutLock lock(mutex);
-			if (lock) {
-				state = ScoutState::Stopped;
-				diag.state = state;
-			}
+			state = ScoutState::Stopped;
+			diag.state = state;
 			return ScoutResult::failure(ScoutStatus::NoMemory, "failed to allocate Scout buffers");
 		}
 
@@ -718,33 +716,21 @@ struct ScoutImpl {
 		);
 		if (!task) {
 			releaseBuffers();
-			ScoutLock lock(mutex);
-			if (lock) {
-				state = ScoutState::Stopped;
-				diag.state = state;
-			}
+			state = ScoutState::Stopped;
+			diag.state = state;
 			return ScoutResult::failure(ScoutStatus::TaskCreateFailed, "failed to create Scout task");
 		}
 
-		{
-			ScoutLock lock(mutex);
-			if (!lock) {
-				task.reset();
-				releaseBuffers();
-				state = ScoutState::Stopped;
-				return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
-			}
-			initialized = true;
-			diag.registryRegion = Strata::regionOf(devices);
-			diag.targetBufferRegion = Strata::regionOf(targets);
-			diag.taskStackRegion = task.stackRegion();
-			startReady.store(true, std::memory_order_release);
-		}
-
+		initialized = true;
+		diag.registryRegion = Strata::regionOf(devices);
+		diag.targetBufferRegion = Strata::regionOf(targets);
+		diag.taskStackRegion = task.stackRegion();
+		startReady.store(true, std::memory_order_release);
 		return ScoutResult::success("Scout initialized");
 	}
 
 	ScoutResult deinit(uint32_t timeoutMs) {
+		Strata::FreeRTOS::TaskHandle taskHandle = nullptr;
 		{
 			ScoutLock lock(mutex);
 			if (!lock) {
@@ -756,49 +742,52 @@ struct ScoutImpl {
 				    "Scout is not initialized"
 				);
 			}
-			if (task.handle() == xTaskGetCurrentTaskHandle()) {
+			taskHandle = task.handle();
+			if (taskHandle == xTaskGetCurrentTaskHandle()) {
 				return ScoutResult::failure(
 				    ScoutStatus::Busy,
 				    "Scout cannot deinitialize from its own task"
 				);
 			}
+			if (shutdownInProgress) {
+				return ScoutResult::failure(ScoutStatus::Busy, "Scout shutdown is in progress");
+			}
+			shutdownInProgress = true;
 			state = ScoutState::Stopping;
 			diag.state = state;
 			stopRequested.store(true);
 		}
 
-		if (task.handle() != nullptr) {
-			xTaskNotifyGive(task.handle());
+		if (taskHandle != nullptr) {
+			xTaskNotifyGive(taskHandle);
 		}
 
 		if (!stopped.take(timeoutTicks(timeoutMs))) {
+			ScoutLock lock(mutex);
+			if (lock) {
+				shutdownInProgress = false;
+			}
 			return ScoutResult::failure(ScoutStatus::Timeout, "Scout shutdown timed out");
 		}
 
-		{
-			ScoutLock lock(mutex);
-			if (lock && task) {
-				diag.taskStackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
-				diag.taskStackRegion = task.stackRegion();
-			}
+		ScoutLock lock(mutex);
+		if (!lock) {
+			return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+		}
+		if (task) {
+			diag.taskStackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
+			diag.taskStackRegion = task.stackRegion();
 		}
 		task.reset();
-
-		{
-			ScoutLock lock(mutex);
-			if (!lock) {
-				return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
-			}
-			releaseBuffers();
-			initialized = false;
-			state = ScoutState::Stopped;
-			diag.state = state;
-			diag.deviceCount = 0;
-			diag.registryRegion = Strata::Region::Unknown;
-			diag.targetBufferRegion = Strata::Region::Unknown;
-			diag.taskStackRegion = Strata::Region::Unknown;
-		}
-
+		releaseBuffers();
+		initialized = false;
+		shutdownInProgress = false;
+		state = ScoutState::Stopped;
+		diag.state = state;
+		diag.deviceCount = 0;
+		diag.registryRegion = Strata::Region::Unknown;
+		diag.targetBufferRegion = Strata::Region::Unknown;
+		diag.taskStackRegion = Strata::Region::Unknown;
 		return ScoutResult::success("Scout deinitialized");
 	}
 };
@@ -898,7 +887,7 @@ ScoutResult Scout::deviceAt(size_t index, ScoutDeviceInfo &out) const {
 		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
 	}
 	if (index >= _impl->deviceCount) {
-		return ScoutResult::failure(ScoutStatus::InvalidConfig, "device index is out of range");
+		return ScoutResult::failure(ScoutStatus::NotFound, "device index is out of range");
 	}
 	out = _impl->devices[index].info;
 	return ScoutResult::success();
@@ -922,7 +911,7 @@ ScoutResult Scout::findByMac(const ScoutMacAddress &mac, ScoutDeviceInfo &out) c
 
 	const size_t index = _impl->findDeviceByMac(mac.bytes);
 	if (index == SIZE_MAX) {
-		return ScoutResult::failure(ScoutStatus::InvalidConfig, "device not found");
+		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
 	}
 	out = _impl->devices[index].info;
 	return ScoutResult::success();
@@ -984,6 +973,8 @@ const char *Scout::statusToString(ScoutStatus status) const {
 		return "device_limit_reached";
 	case ScoutStatus::InternalError:
 		return "internal_error";
+	case ScoutStatus::NotFound:
+		return "not_found";
 	}
 	return "unknown";
 }
