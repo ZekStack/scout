@@ -382,8 +382,16 @@ struct ScoutImpl {
 		if (index != lastIndex) {
 			devices[index] = devices[lastIndex];
 		}
-		std::memset(static_cast<void *>(&devices[lastIndex].info), 0, sizeof(devices[lastIndex].info));
-		std::memset(static_cast<void *>(&devices[lastIndex].details), 0, sizeof(devices[lastIndex].details));
+		std::memset(
+		    static_cast<void *>(&devices[lastIndex].info),
+		    0,
+		    sizeof(devices[lastIndex].info)
+		);
+		std::memset(
+		    static_cast<void *>(&devices[lastIndex].details),
+		    0,
+		    sizeof(devices[lastIndex].details)
+		);
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 		identityDirty = true;
