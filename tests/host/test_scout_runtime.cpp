@@ -36,13 +36,49 @@ struct Gate {
 	}
 };
 
-enum class NetworkMode { None, SmallSubnet, LargeSubnet, PartialRequestFailure };
+enum class NetworkMode {
+	None,
+	InterfaceError,
+	SmallSubnet,
+	LargeSubnet,
+	PartialRequestFailure,
+};
 std::atomic<NetworkMode> networkMode{NetworkMode::None};
 
 void waitUntilStarted(const std::atomic<bool> &started) {
 	while (!started.load()) {
 		std::this_thread::yield();
 	}
+}
+
+template <typename Predicate>
+void waitUntil(Predicate predicate) {
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!predicate()) {
+		assert(std::chrono::steady_clock::now() < deadline && "timed out waiting for condition");
+		std::this_thread::yield();
+	}
+}
+
+void assertTerminalScanPair(const std::vector<ScoutEvent> &events) {
+	const ScoutEvent *started = nullptr;
+	const ScoutEvent *completed = nullptr;
+	size_t startedCount = 0;
+	size_t completedCount = 0;
+	for (const auto &event : events) {
+		if (event.type == ScoutEventType::ScanStarted) {
+			started = &event;
+			startedCount++;
+		}
+		if (event.type == ScoutEventType::ScanCompleted) {
+			completed = &event;
+			completedCount++;
+		}
+	}
+	assert(startedCount == 1);
+	assert(completedCount == 1);
+	assert(started != nullptr && completed != nullptr);
+	assert(started->scanId == completed->scanId);
 }
 
 void testLifecycleSnapshots() {
@@ -125,15 +161,32 @@ void testScanStatusAndCoverage() {
 	runtime.callback = [&](const ScoutEvent &event) { events.push_back(event); };
 	const auto hasEvent = [&](ScoutEventType type, ScoutStatus status) {
 		for (const auto &event : events) {
-			if (event.type == type && event.status == status) { return true; }
+			if (event.type == type && event.status == status) {
+				return true;
+			}
 		}
 		return false;
 	};
+
+	networkMode.store(NetworkMode::None);
+	runtime.performScan();
+	assert(hasEvent(ScoutEventType::ScanSkipped, ScoutStatus::NetworkUnavailable));
+	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::NetworkUnavailable));
+	assertTerminalScanPair(events);
+	events.clear();
+
+	networkMode.store(NetworkMode::InterfaceError);
+	runtime.performScan();
+	assert(hasEvent(ScoutEventType::Error, ScoutStatus::InternalError));
+	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InternalError));
+	assertTerminalScanPair(events);
+	events.clear();
 
 	networkMode.store(NetworkMode::LargeSubnet);
 	runtime.performScan();
 	assert(hasEvent(ScoutEventType::ScanSkipped, ScoutStatus::InvalidConfig));
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InvalidConfig));
+	assertTerminalScanPair(events);
 	assert(!runtime.diag.coverageAvailable);
 	assert(runtime.diag.completedScanCount == 0);
 	events.clear();
@@ -141,6 +194,7 @@ void testScanStatusAndCoverage() {
 	networkMode.store(NetworkMode::SmallSubnet);
 	runtime.performScan();
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::Ok));
+	assertTerminalScanPair(events);
 	assert(runtime.diag.coverageAvailable);
 	assert(runtime.diag.completedScanCount == 1);
 	events.clear();
@@ -148,16 +202,135 @@ void testScanStatusAndCoverage() {
 	networkMode.store(NetworkMode::PartialRequestFailure);
 	runtime.performScan();
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InternalError));
+	assertTerminalScanPair(events);
 	assert(!runtime.diag.coverageAvailable);
 	assert(runtime.diag.completedScanCount == 1);
 	assert(runtime.diag.arpRequestFailures > 0);
 	runtime.releaseBuffers();
+}
+
+void testRegistryAgingAndDeduplication() {
+	ScoutImpl runtime;
+	runtime.config.deviceMaxAgeMs = 1000;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	std::vector<ScoutEvent> events;
+	runtime.callback = [&](const ScoutEvent &event) { events.push_back(event); };
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot;
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+
+	const uint8_t firstMac[6] = {0x02, 1, 2, 3, 4, 5};
+	const uint8_t secondMac[6] = {0x02, 1, 2, 3, 4, 6};
+	const uint32_t address = lwip_htonl(0xC0A80120U);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    firstMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    firstMac,
+	    ScoutObservationSource::ArpCache,
+	    false,
+	    1
+	);
+	assert(runtime.deviceCount == 1);
+	assert(runtime.devices[0].info.endpointCount == 1);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    secondMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	assert(runtime.deviceCount == 2);
+	const size_t firstIndex = runtime.findDeviceByMac(firstMac);
+	const size_t secondIndex = runtime.findDeviceByMac(secondMac);
+	assert(firstIndex != SIZE_MAX && secondIndex != SIZE_MAX);
+	assert(runtime.devices[firstIndex].info.endpointCount == 0);
+	assert(runtime.devices[secondIndex].info.endpointCount == 1);
+	assert(runtime.diag.endpointReassignmentCount == 1);
+
+	runtime.devices[runtime.deviceCount].info = runtime.devices[secondIndex].info;
+	runtime.deviceCount++;
+	runtime.diag.deviceCount = runtime.deviceCount;
+	runtime.maintainRegistry(2);
+	assert(runtime.deviceCount == 2);
+	assert(runtime.diag.deduplicatedDeviceCount == 1);
+
+	const size_t staleIndex = runtime.findDeviceByMac(firstMac);
+	assert(staleIndex != SIZE_MAX);
+	runtime.devices[staleIndex].info.lastSeenAtMs = nowMs() - 2000;
+	events.clear();
+	runtime.maintainRegistry(3);
+	assert(runtime.findDeviceByMac(firstMac) == SIZE_MAX);
+	assert(runtime.deviceCount == 1);
+	assert(runtime.diag.expiredDeviceCount == 1);
+
+	bool expiredEvent = false;
+	for (const auto &event : events) {
+		if (event.type == ScoutEventType::DeviceExpired && event.hasDevice &&
+		    event.device.mac == scout_internal::macFromBytes(firstMac)) {
+			expiredEvent = true;
+		}
+	}
+	assert(expiredEvent);
+	runtime.releaseBuffers();
+}
+
+void testDestructionFromCallback() {
+	networkMode.store(NetworkMode::None);
+	std::atomic<Scout *> scout{new Scout()};
+	std::atomic<bool> allowDestroy{false};
+	std::atomic<bool> destroyed{false};
+	std::atomic<int> taskResets{0};
+
+	Scout *instance = scout.load();
+	instance->onEvent([&](const ScoutEvent &event) {
+		if (event.type != ScoutEventType::ScanStarted || destroyed.load()) {
+			return;
+		}
+		while (!allowDestroy.load()) {
+			std::this_thread::yield();
+		}
+		Scout *doomed = scout.exchange(nullptr);
+		assert(doomed != nullptr);
+		delete doomed;
+		destroyed.store(true);
+	});
+
+	ScoutConfig config;
+	config.scanOnInit = true;
+	config.arpResponseWaitMs = 1;
+	config.interBatchDelayMs = 0;
+	const ScoutResult initResult = instance->init(config);
+	assert(initResult.status == ScoutStatus::Ok);
+
+	Strata::TestHooks::resetTask = [&] { taskResets.fetch_add(1); };
+	allowDestroy.store(true);
+	waitUntil([&] { return destroyed.load(); });
+	waitUntil([&] { return taskResets.load() > 0; });
+	Strata::TestHooks::resetTask = {};
+	assert(scout.load() == nullptr);
 }
 } // namespace
 
 namespace scout_internal {
 esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count) {
 	const auto mode = networkMode.load();
+	if (mode == NetworkMode::InterfaceError) {
+		count = 0;
+		return ESP_FAIL;
+	}
 	count = mode == NetworkMode::None ? 0 : 1;
 	if (count == 0) { return ESP_OK; }
 	assert(capacity >= 1);
@@ -182,5 +355,7 @@ size_t recommendedArpBatchSize(size_t requested) { return requested; }
 int main() {
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
+	testRegistryAgingAndDeduplication();
+	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
 }
