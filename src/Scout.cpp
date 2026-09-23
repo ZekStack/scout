@@ -385,6 +385,7 @@ struct ScoutImpl {
 			devices[index] = devices[lastIndex];
 		}
 		devices[lastIndex].info = {};
+		devices[lastIndex].details = {};
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 	}
@@ -399,6 +400,7 @@ struct ScoutImpl {
 				}
 
 				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
+				scout_internal::mergeDeviceDetails(devices[i].details, devices[j].details);
 				removeDeviceAtLocked(j);
 				diag.deduplicatedDeviceCount++;
 			}
@@ -521,7 +523,9 @@ struct ScoutImpl {
 					index = deviceCount++;
 					discovered = true;
 					auto &info = devices[index].info;
+					auto &details = devices[index].details;
 					info = {};
+					details = {};
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
 					info.mac = info.key.mac;
@@ -530,6 +534,9 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
+					details.locallyAdministeredMac =
+					    scout_internal::macIsLocallyAdministered(info.mac);
+					details.multicastMac = scout_internal::macIsMulticast(info.mac);
 
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
@@ -562,6 +569,7 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = devices[previousOwner].info;
+					event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Endpoint);
 					event.message = "device endpoint reassigned";
 				}
 
@@ -570,8 +578,12 @@ struct ScoutImpl {
 				    info,
 				    interfaceSnapshot.index,
 				    interfaceSnapshot.name,
+				    interfaceSnapshot.key,
+				    interfaceSnapshot.type,
 				    ipv4,
-				    observedAt
+				    observedAt,
+				    source,
+				    confirmed
 				);
 
 				if (discovered) {
@@ -582,6 +594,7 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = info;
+					event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Endpoint);
 					event.message = confirmed ? "device discovered by active ARP"
 					                          : "device discovered from ARP cache";
 				} else if (endpointChanged || confirmed) {
@@ -593,6 +606,9 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = info;
+					event.changes = endpointChanged
+					                    ? scoutDeviceChangeMask(ScoutDeviceChange::Endpoint)
+					                    : scoutDeviceChangeMask(ScoutDeviceChange::Confirmation);
 					event.message =
 					    endpointChanged ? "device endpoint changed" : "device actively observed";
 				}
