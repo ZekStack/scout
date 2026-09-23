@@ -425,13 +425,17 @@ bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &
 
 	if (details.manufacturer[0] != '\0' && details.modelName[0] != '\0') {
 		out.source = ScoutNameSource::ManufacturerModel;
-		std::snprintf(
-		    out.value,
-		    sizeof(out.value),
-		    "%s %s",
-		    details.manufacturer,
-		    details.modelName
-		);
+		copyText(out.value, sizeof(out.value), details.manufacturer);
+		const size_t used = std::strlen(out.value);
+		if (used + 1 < sizeof(out.value)) {
+			out.value[used] = ' ';
+			out.value[used + 1] = '\0';
+			copyText(
+			    out.value + used + 1,
+			    sizeof(out.value) - used - 1,
+			    details.modelName
+			);
+		}
 		return true;
 	}
 	if (details.modelName[0] != '\0') {
