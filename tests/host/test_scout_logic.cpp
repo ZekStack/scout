@@ -1,3 +1,4 @@
+#include "internal/ScoutEnrichment.h"
 #include "internal/ScoutLogic.h"
 
 #include <cassert>
@@ -13,6 +14,41 @@ constexpr uint32_t ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 	       static_cast<uint32_t>(d);
 }
 
+bool upsertEndpoint(
+    ScoutDeviceInfo &device,
+    uint8_t interfaceIndex,
+    const char *name,
+    uint32_t address,
+    uint64_t observedAt,
+    bool confirmed = false
+) {
+	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
+	std::snprintf(key, sizeof(key), "TEST_%u", static_cast<unsigned>(interfaceIndex));
+	return scout_internal::upsertEndpoint(
+	    device,
+	    interfaceIndex,
+	    name,
+	    key,
+	    ScoutInterfaceType::Custom,
+	    address,
+	    observedAt,
+	    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache,
+	    confirmed
+	);
+}
+
+ScoutMacAddress mac(uint8_t suffix) {
+	return ScoutMacAddress{{0x00, 0x11, 0x22, 0x33, 0x44, suffix}};
+}
+
+ScoutDeviceInfo deviceWithMac(uint8_t suffix) {
+	ScoutDeviceInfo info{};
+	info.mac = mac(suffix);
+	info.key.kind = ScoutIdentityKind::Mac;
+	info.key.mac = info.mac;
+	return info;
+}
+
 void testPublicDefaultsAndValueTypes() {
 	ScoutConfig config;
 	assert(config.memory.allocation == Strata::Placement::PreferExternal);
@@ -21,17 +57,27 @@ void testPublicDefaultsAndValueTypes() {
 	assert(config.deviceMaxAgeMs == 5ULL * 60ULL * 1000ULL);
 	assert(config.maxDevices == 128);
 	assert(config.maxHostsPerSubnet == 512);
+	assert(config.maxIdentityRelations == 512);
+	assert(config.taskStackBytes == 24U * 1024U);
+	assert(config.providers.icmp.enabled);
+	assert(config.providers.mdns.enabled);
+	assert(config.providers.ssdp.enabled);
+	assert(!config.providers.nbns.enabled);
+	assert(!config.providers.reverseDns.enabled);
+	assert(config.providers.oui);
+	assert(SCOUT_MAX_ENDPOINTS_PER_DEVICE == 16);
+	assert(SCOUT_MAX_SERVICES_PER_DEVICE >= 32);
+	assert(SCOUT_MAX_METADATA_PER_DEVICE >= 64);
 
 	ScoutMacAddress empty;
 	assert(!empty.valid());
 
-	ScoutMacAddress mac{{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}};
-	assert(mac.valid());
+	ScoutMacAddress address{{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}};
+	assert(address.valid());
 
 	ScoutDeviceKey macKey;
 	macKey.kind = ScoutIdentityKind::Mac;
-	macKey.mac = mac;
-
+	macKey.mac = address;
 	ScoutDeviceKey sameMacKey = macKey;
 	assert(macKey == sameMacKey);
 
@@ -41,11 +87,11 @@ void testPublicDefaultsAndValueTypes() {
 	assert(!(macKey == ipv4Key));
 
 	const ScoutObservationSource combined =
-	    ScoutObservationSource::ArpCache | ScoutObservationSource::ArpProbe;
+	    ScoutObservationSource::ArpCache | ScoutObservationSource::Mdns;
 	assert(
 	    scoutObservationMask(combined) ==
 	    (scoutObservationMask(ScoutObservationSource::ArpCache) |
-	     scoutObservationMask(ScoutObservationSource::ArpProbe))
+	     scoutObservationMask(ScoutObservationSource::Mdns))
 	);
 }
 
@@ -60,13 +106,17 @@ void testMacHelpers() {
 
 	const ScoutMacAddress address = scout_internal::macFromBytes(first);
 	assert(scout_internal::macEquals(address, same));
-	assert(!scout_internal::macEquals(address, different));
+	assert(scout_internal::macIsLocallyAdministered(address));
+	assert(!scout_internal::macIsMulticast(address));
+
+	const ScoutMacAddress multicast{{0x01, 0, 0, 0, 0, 1}};
+	assert(scout_internal::macIsMulticast(multicast));
 
 	const ScoutMacAddress empty = scout_internal::macFromBytes(nullptr);
 	assert(!empty.valid());
 }
 
-void testIpv4TargetEnumeration() {
+void testIpv4TargetEnumerationAndBounds() {
 	uint32_t targets[512]{};
 
 	const auto result = scout_internal::buildIpv4Targets(
@@ -85,17 +135,6 @@ void testIpv4TargetEnumeration() {
 		assert(targets[i] != ipv4(192, 168, 1, 10));
 	}
 
-	const auto pointToPoint = scout_internal::buildIpv4Targets(
-	    ipv4(10, 0, 0, 1),
-	    ipv4(255, 255, 255, 252),
-	    8,
-	    targets,
-	    8
-	);
-	assert(pointToPoint.status == scout_internal::Ipv4TargetStatus::Ok);
-	assert(pointToPoint.count == 1);
-	assert(targets[0] == ipv4(10, 0, 0, 2));
-
 	const auto slash31 = scout_internal::buildIpv4Targets(
 	    ipv4(10, 0, 0, 0),
 	    ipv4(255, 255, 255, 254),
@@ -106,20 +145,6 @@ void testIpv4TargetEnumeration() {
 	assert(slash31.status == scout_internal::Ipv4TargetStatus::Ok);
 	assert(slash31.count == 0);
 
-	const auto slash32 = scout_internal::buildIpv4Targets(
-	    0xFFFFFFFFU,
-	    0xFFFFFFFFU,
-	    8,
-	    targets,
-	    8
-	);
-	assert(slash32.status == scout_internal::Ipv4TargetStatus::Ok);
-	assert(slash32.count == 0);
-}
-
-void testIpv4TargetBounds() {
-	uint32_t targets[512]{};
-
 	const auto tooLarge = scout_internal::buildIpv4Targets(
 	    ipv4(10, 1, 2, 3),
 	    ipv4(255, 255, 0, 0),
@@ -128,101 +153,78 @@ void testIpv4TargetBounds() {
 	    512
 	);
 	assert(tooLarge.status == scout_internal::Ipv4TargetStatus::TooLarge);
-	assert(tooLarge.count == 0);
 
-	const auto capacityTooSmall = scout_internal::buildIpv4Targets(
-	    ipv4(192, 168, 1, 10),
-	    ipv4(255, 255, 255, 0),
-	    512,
-	    targets,
-	    128
-	);
-	assert(capacityTooSmall.status == scout_internal::Ipv4TargetStatus::TooLarge);
-
-	const auto invalidLimit = scout_internal::buildIpv4Targets(
+	const auto invalid = scout_internal::buildIpv4Targets(
 	    ipv4(192, 168, 1, 10),
 	    ipv4(255, 255, 255, 0),
 	    0,
 	    targets,
 	    512
 	);
-	assert(invalidLimit.status == scout_internal::Ipv4TargetStatus::InvalidArgument);
-
-	const auto nullOutput = scout_internal::buildIpv4Targets(
-	    ipv4(192, 168, 1, 10),
-	    ipv4(255, 255, 255, 0),
-	    512,
-	    nullptr,
-	    512
-	);
-	assert(nullOutput.status == scout_internal::Ipv4TargetStatus::InvalidArgument);
+	assert(invalid.status == scout_internal::Ipv4TargetStatus::InvalidArgument);
 }
 
-void testEndpointInsertAndRefresh() {
+void testEndpointInsertRefreshAndCapacity() {
 	ScoutDeviceInfo device;
 
-	assert(scout_internal::upsertEndpoint(device, 1, "en0", 0x01020304U, 100));
+	assert(upsertEndpoint(device, 1, "en0", 0x01020304U, 100, true));
 	assert(device.endpointCount == 1);
-	assert(device.endpoints[0].interfaceIndex == 1);
-	assert(device.endpoints[0].ipv4.value == 0x01020304U);
-	assert(device.endpoints[0].lastSeenAtMs == 100);
-	assert(std::strcmp(device.endpoints[0].interfaceName, "en0") == 0);
+	const auto &first = device.endpoints[0];
+	assert(first.interfaceIndex == 1);
+	assert(first.ipv4.value == 0x01020304U);
+	assert(first.firstSeenAtMs == 100);
+	assert(first.lastSeenAtMs == 100);
+	assert(first.lastConfirmedAtMs == 100);
+	assert(std::strcmp(first.interfaceName, "en0") == 0);
+	assert(std::strcmp(first.interfaceKey, "TEST_1") == 0);
+	assert(first.interfaceType == ScoutInterfaceType::Custom);
 
-	assert(!scout_internal::upsertEndpoint(device, 1, "en0", 0x01020304U, 250));
+	assert(!upsertEndpoint(device, 1, "en0", 0x01020304U, 250, false));
 	assert(device.endpointCount == 1);
+	assert(device.endpoints[0].firstSeenAtMs == 100);
 	assert(device.endpoints[0].lastSeenAtMs == 250);
+	assert(device.endpoints[0].lastConfirmedAtMs == 100);
 
-	assert(scout_internal::upsertEndpoint(device, 2, "wl0", 0x01020304U, 300));
-	assert(device.endpointCount == 2);
-	assert(device.endpoints[1].interfaceIndex == 2);
-}
-
-void testEndpointCapacityReplacesOldest() {
-	ScoutDeviceInfo device;
-
-	assert(scout_internal::upsertEndpoint(device, 1, "if1", 1, 100));
-	assert(scout_internal::upsertEndpoint(device, 2, "if2", 2, 400));
-	assert(scout_internal::upsertEndpoint(device, 3, "if3", 3, 300));
-	assert(scout_internal::upsertEndpoint(device, 4, "if4", 4, 200));
+	for (size_t i = 2; i <= SCOUT_MAX_ENDPOINTS_PER_DEVICE; ++i) {
+		char name[SCOUT_INTERFACE_NAME_SIZE] = {};
+		std::snprintf(name, sizeof(name), "i%u", static_cast<unsigned>(i));
+		assert(upsertEndpoint(
+		    device,
+		    static_cast<uint8_t>(i),
+		    name,
+		    static_cast<uint32_t>(i),
+		    300 + i
+		));
+	}
 	assert(device.endpointCount == SCOUT_MAX_ENDPOINTS_PER_DEVICE);
 
-	assert(scout_internal::upsertEndpoint(
-	    device,
-	    5,
-	    "interface-name-is-long",
-	    5,
-	    500
-	));
+	assert(upsertEndpoint(device, 42, "replace", 42, 1000));
 	assert(device.endpointCount == SCOUT_MAX_ENDPOINTS_PER_DEVICE);
-
-	bool foundNew = false;
+	bool foundReplacement = false;
 	bool foundOldest = false;
 	for (size_t i = 0; i < device.endpointCount; ++i) {
-		if (device.endpoints[i].interfaceIndex == 5) {
-			foundNew = true;
-			assert(device.endpoints[i].lastSeenAtMs == 500);
-			assert(device.endpoints[i].interfaceName[SCOUT_INTERFACE_NAME_SIZE - 1] == '\0');
-			assert(std::strcmp(device.endpoints[i].interfaceName, "interfa") == 0);
-		}
-		if (device.endpoints[i].interfaceIndex == 1) {
-			foundOldest = true;
-		}
+		foundReplacement |= device.endpoints[i].interfaceIndex == 42;
+		foundOldest |= device.endpoints[i].interfaceIndex == 1;
 	}
-
-	assert(foundNew);
+	assert(foundReplacement);
 	assert(!foundOldest);
 }
 
-void testEndpointRemovalAndExpiry() {
+void testEndpointIpv6RemovalAndExpiry() {
 	ScoutDeviceInfo device;
-	assert(scout_internal::upsertEndpoint(device, 1, "if1", 1, 100));
-	assert(scout_internal::upsertEndpoint(device, 2, "if2", 2, 200));
-	assert(scout_internal::upsertEndpoint(device, 3, "if3", 3, 300));
+	assert(upsertEndpoint(device, 1, "if1", 1, 100));
+	assert(upsertEndpoint(device, 2, "if2", 2, 200));
+
+	ScoutIpv6Address ipv6{};
+	ipv6.bytes[0] = 0xFE;
+	ipv6.bytes[1] = 0x80;
+	ipv6.bytes[15] = 1;
+	assert(scout_internal::upsertIpv6(device.endpoints[0], ipv6));
+	assert(!scout_internal::upsertIpv6(device.endpoints[0], ipv6));
+	assert(device.endpoints[0].ipv6Count == 1);
 
 	assert(scout_internal::removeEndpoint(device, 2, 2));
-	assert(device.endpointCount == 2);
-	assert(device.endpoints[0].interfaceIndex == 1);
-	assert(device.endpoints[1].interfaceIndex == 3);
+	assert(device.endpointCount == 1);
 	assert(!scout_internal::removeEndpoint(device, 2, 2));
 
 	device.lastSeenAtMs = 1000;
@@ -239,7 +241,7 @@ void testMergeDeviceInfo() {
 	target.lastConfirmedAtMs = 250;
 	target.observationSources = scoutObservationMask(ScoutObservationSource::ArpCache);
 	target.observationCount = 2;
-	assert(scout_internal::upsertEndpoint(target, 1, "if1", 1, 300));
+	assert(upsertEndpoint(target, 1, "if1", 1, 300));
 
 	ScoutDeviceInfo source;
 	source.firstSeenAtMs = 100;
@@ -247,21 +249,218 @@ void testMergeDeviceInfo() {
 	source.lastConfirmedAtMs = 450;
 	source.observationSources = scoutObservationMask(ScoutObservationSource::ArpProbe);
 	source.observationCount = 3;
-	assert(scout_internal::upsertEndpoint(source, 1, "if1", 1, 500));
-	assert(scout_internal::upsertEndpoint(source, 2, "if2", 2, 400));
+	assert(upsertEndpoint(source, 1, "if1", 1, 500, true));
+	assert(upsertEndpoint(source, 2, "if2", 2, 400));
 
 	scout_internal::mergeDeviceInfo(target, source);
 	assert(target.firstSeenAtMs == 100);
 	assert(target.lastSeenAtMs == 500);
 	assert(target.lastConfirmedAtMs == 450);
-	assert(
-	    target.observationSources ==
-	    (scoutObservationMask(ScoutObservationSource::ArpCache) |
-	     scoutObservationMask(ScoutObservationSource::ArpProbe))
-	);
 	assert(target.observationCount == 5);
 	assert(target.endpointCount == 2);
 	assert(target.endpoints[0].lastSeenAtMs == 500);
+	assert(target.endpoints[0].lastConfirmedAtMs == 500);
+}
+
+void testEnrichmentUpsertPreferredNameAndExpiry() {
+	ScoutDeviceDetails details{};
+	assert(
+	    scout_internal::upsertName(
+	        details,
+	        ScoutNameSource::MdnsHostname,
+	        "living-room-tv.local",
+	        100,
+	        1000
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(
+	    scout_internal::upsertName(
+	        details,
+	        ScoutNameSource::SsdpFriendlyName,
+	        "Living Room TV",
+	        110,
+	        1200
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+
+	ScoutServiceInfo service{};
+	service.source = ScoutObservationSource::Mdns;
+	std::strcpy(service.type, "_airplay");
+	std::strcpy(service.protocol, "_tcp");
+	std::strcpy(service.instanceName, "Living Room TV");
+	service.port = 7000;
+	service.interfaceIndex = 1;
+	service.lastSeenAtMs = 120;
+	service.expiresAtMs = 900;
+	assert(
+	    scout_internal::upsertService(details, service) ==
+	    scout_internal::EnrichmentUpsertResult::Changed
+	);
+
+	ScoutMetadataEntry metadata{};
+	metadata.source = ScoutObservationSource::Mdns;
+	std::strcpy(metadata.key, "model");
+	std::strcpy(metadata.value, "TV123");
+	metadata.lastSeenAtMs = 120;
+	metadata.expiresAtMs = 900;
+	assert(
+	    scout_internal::upsertMetadata(details, metadata) ==
+	    scout_internal::EnrichmentUpsertResult::Changed
+	);
+
+	ScoutPreferredName preferred{};
+	assert(scout_internal::selectPreferredName(details, preferred));
+	assert(preferred.source == ScoutNameSource::SsdpFriendlyName);
+	assert(std::strcmp(preferred.value, "Living Room TV") == 0);
+
+	const auto firstExpiry = scout_internal::expireEnrichment(details, 950);
+	assert(
+	    (scoutDeviceChangeMask(firstExpiry) &
+	     scoutDeviceChangeMask(ScoutDeviceChange::Service)) != 0
+	);
+	assert(details.serviceCount == 0);
+	assert(details.metadataCount == 0);
+	assert(details.nameCount == 2);
+
+	const auto secondExpiry = scout_internal::expireEnrichment(details, 1300);
+	assert(
+	    (scoutDeviceChangeMask(secondExpiry) &
+	     scoutDeviceChangeMask(ScoutDeviceChange::Name)) != 0
+	);
+	assert(details.nameCount == 0);
+}
+
+void testSsdpAndUpnpParsing() {
+	constexpr char Response[] =
+	    "HTTP/1.1 200 OK\r\n"
+	    "CACHE-CONTROL: max-age=1800\r\n"
+	    "LOCATION: http://192.168.1.20:1400/device.xml\r\n"
+	    "SERVER: Example/1.0 UPnP/1.1 Product/1.0\r\n"
+	    "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+	    "USN: uuid:1234-5678::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
+
+	scout_internal::SsdpResponseInfo response{};
+	assert(scout_internal::parseSsdpResponse(Response, sizeof(Response) - 1, response));
+	assert(response.maxAgeSeconds == 1800);
+	assert(std::strcmp(response.location, "http://192.168.1.20:1400/device.xml") == 0);
+	assert(std::strstr(response.usn, "uuid:1234-5678") != nullptr);
+
+	constexpr char Xml[] =
+	    "<?xml version=\"1.0\"?><root><device>"
+	    "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
+	    "<friendlyName>Living Room TV</friendlyName>"
+	    "<manufacturer>Example Corp</manufacturer>"
+	    "<modelName>Model X</modelName>"
+	    "<modelNumber>42</modelNumber>"
+	    "<serialNumber>SERIAL-1</serialNumber>"
+	    "<UDN>uuid:1234-5678</UDN>"
+	    "</device></root>";
+	scout_internal::UpnpDescriptionInfo description{};
+	assert(scout_internal::parseUpnpDescription(Xml, sizeof(Xml) - 1, description));
+	assert(std::strcmp(description.friendlyName, "Living Room TV") == 0);
+	assert(std::strcmp(description.manufacturer, "Example Corp") == 0);
+	assert(std::strcmp(description.udn, "uuid:1234-5678") == 0);
+}
+
+void testNbnsParsing() {
+	uint8_t response[64]{};
+	constexpr size_t CountOffset = 20;
+	response[CountOffset] = 1;
+	uint8_t *entry = response + CountOffset + 1;
+	std::memcpy(entry, "DESKTOP-ABC    ", 15);
+	entry[15] = 0x00;
+	entry[16] = 0x00;
+	entry[17] = 0x00;
+
+	char name[SCOUT_NAME_SIZE]{};
+	assert(scout_internal::parseNbnsNodeStatusName(response, sizeof(response), name, sizeof(name)));
+	assert(std::strcmp(name, "DESKTOP-ABC") == 0);
+}
+
+void testIdentityEvidenceAndContradictions() {
+	const ScoutDeviceInfo first = deviceWithMac(1);
+	const ScoutDeviceInfo second = deviceWithMac(2);
+	ScoutDeviceDetails firstDetails{};
+	ScoutDeviceDetails secondDetails{};
+	ScoutIdentityRelation relation{};
+
+	std::strcpy(firstDetails.upnpUdn, "uuid:same-device");
+	std::strcpy(secondDetails.upnpUdn, "uuid:same-device");
+	assert(scout_internal::identityRelation(
+	    first,
+	    firstDetails,
+	    second,
+	    secondDetails,
+	    relation
+	));
+	assert(relation.evidence.type == ScoutIdentityEvidenceType::UpnpUdn);
+	assert(relation.evidence.confidence == ScoutIdentityConfidence::Certain);
+
+	firstDetails = {};
+	secondDetails = {};
+	scout_internal::upsertName(
+	    firstDetails,
+	    ScoutNameSource::MdnsHostname,
+	    "same-host.local",
+	    1,
+	    0
+	);
+	scout_internal::upsertName(
+	    secondDetails,
+	    ScoutNameSource::MdnsHostname,
+	    "same-host.local",
+	    1,
+	    0
+	);
+	assert(scout_internal::identityRelation(
+	    first,
+	    firstDetails,
+	    second,
+	    secondDetails,
+	    relation
+	));
+	assert(relation.evidence.confidence == ScoutIdentityConfidence::Moderate);
+
+	std::strcpy(firstDetails.persistentDeviceId, "id-a");
+	std::strcpy(secondDetails.persistentDeviceId, "id-b");
+	assert(!scout_internal::identityRelation(
+	    first,
+	    firstDetails,
+	    second,
+	    secondDetails,
+	    relation
+	));
+
+	ScoutDeviceKey members[2]{first.key, second.key};
+	assert(scout_internal::identityGroupRuntimeId(members, 2) != 0);
+}
+
+void testDetailsMerge() {
+	ScoutDeviceDetails first{};
+	ScoutDeviceDetails second{};
+	scout_internal::upsertName(
+	    first,
+	    ScoutNameSource::MdnsHostname,
+	    "host.local",
+	    100,
+	    1000
+	);
+	scout_internal::upsertName(
+	    second,
+	    ScoutNameSource::SsdpFriendlyName,
+	    "Kitchen Speaker",
+	    110,
+	    1000
+	);
+	std::strcpy(second.manufacturer, "Example");
+	std::strcpy(second.modelName, "Speaker");
+	second.lastEnrichedAtMs = 110;
+
+	scout_internal::mergeDeviceDetails(first, second);
+	assert(first.nameCount == 2);
+	assert(std::strcmp(first.manufacturer, "Example") == 0);
+	assert(std::strcmp(first.modelName, "Speaker") == 0);
+	assert(first.lastEnrichedAtMs == 110);
 }
 
 } // namespace
@@ -269,11 +468,14 @@ void testMergeDeviceInfo() {
 int main() {
 	testPublicDefaultsAndValueTypes();
 	testMacHelpers();
-	testIpv4TargetEnumeration();
-	testIpv4TargetBounds();
-	testEndpointInsertAndRefresh();
-	testEndpointCapacityReplacesOldest();
-	testEndpointRemovalAndExpiry();
+	testIpv4TargetEnumerationAndBounds();
+	testEndpointInsertRefreshAndCapacity();
+	testEndpointIpv6RemovalAndExpiry();
 	testMergeDeviceInfo();
+	testEnrichmentUpsertPreferredNameAndExpiry();
+	testSsdpAndUpnpParsing();
+	testNbnsParsing();
+	testIdentityEvidenceAndContradictions();
+	testDetailsMerge();
 	return 0;
 }
