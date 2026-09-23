@@ -18,6 +18,7 @@ enum class ScoutStatus : uint8_t {
 	NoMemory,
 	TaskCreateFailed,
 	Busy,
+	Cancelled,
 	Timeout,
 	NetworkUnavailable,
 	DeviceLimitReached,
@@ -144,6 +145,7 @@ enum class ScoutEventType : uint8_t {
 	DeviceDiscovered,
 	DeviceObserved,
 	DeviceChanged,
+	DeviceExpired,
 	CoverageLost,
 	CoverageRestored,
 	Error,
@@ -180,6 +182,7 @@ struct ScoutConfig {
 	};
 
 	uint32_t scanIntervalMs = 60U * 1000U;
+	uint64_t deviceMaxAgeMs = 5ULL * 60ULL * 1000ULL;
 	uint32_t arpResponseWaitMs = 150;
 	uint32_t interBatchDelayMs = 10;
 
@@ -210,6 +213,9 @@ struct ScoutDiagnostics {
 	uint64_t arpCacheHits = 0;
 	uint64_t arpProbeDiscoveries = 0;
 	uint64_t deviceLimitDrops = 0;
+	uint64_t expiredDeviceCount = 0;
+	uint64_t deduplicatedDeviceCount = 0;
+	uint64_t endpointReassignmentCount = 0;
 	uint64_t lastScanDurationMs = 0;
 
 	Strata::Placement allocationPlacement = Strata::Placement::PreferExternal;
