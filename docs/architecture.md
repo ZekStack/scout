@@ -46,7 +46,7 @@ The public identity enum already reserves ProvisionalIpv4 for future mechanisms 
 
 Scout treats scanner visibility as first-class state.
 
-If no up, link-up, ARP-capable IPv4 interface exists, Scout emits CoverageLost. When such an interface becomes available again, it emits CoverageRestored.
+Scout emits CoverageLost when no up, link-up, ARP-capable IPv4 interface exists or when any eligible interface's scan is skipped or fails. It emits CoverageRestored after every eligible interface completes a scan successfully. Coverage is conservative across multiple interfaces so a presence layer does not infer absence on an unscanned network.
 
 A higher-level presence implementation should suppress offline inference while coverage is unavailable and revalidate devices after coverage returns.
 
