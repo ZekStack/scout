@@ -458,7 +458,7 @@ struct ScoutConfig {
 	size_t arpBatchSize = 4;
 	size_t maxIdentityRelations = 512;
 
-	uint32_t taskStackBytes = 16U * 1024U;
+	uint32_t taskStackBytes = 24U * 1024U;
 	UBaseType_t taskPriority = 2;
 	BaseType_t taskCore = tskNO_AFFINITY;
 
