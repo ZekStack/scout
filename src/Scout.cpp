@@ -1516,19 +1516,64 @@ struct ScoutImpl {
 			}
 		}
 
-		uint64_t nextScanAt = scanRequested.load() ? nowMs() : nowMs() + config.scanIntervalMs;
+		const uint64_t startedAt = nowMs();
+		uint64_t nextScanAt =
+		    scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs;
+		uint64_t nextIcmpAt = config.providers.icmp.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextMdnsAt = config.providers.mdns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextSsdpAt = config.providers.ssdp.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextNbnsAt = config.providers.nbns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextReverseDnsAt =
+		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
 
 		while (!stopRequested.load()) {
 			const uint64_t current = nowMs();
 			const bool requested = scanRequested.exchange(false);
 			if (requested || current >= nextScanAt) {
 				performScan();
+				expireEnrichmentRecords();
+				performOuiProvider();
 				nextScanAt = nowMs() + config.scanIntervalMs;
 				continue;
 			}
 
-			const uint64_t remaining = nextScanAt - current;
-			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
+			if (config.providers.icmp.enabled && current >= nextIcmpAt) {
+				performIcmpProvider();
+				nextIcmpAt = nowMs() + config.providers.icmp.intervalMs;
+				continue;
+			}
+			if (config.providers.mdns.enabled && current >= nextMdnsAt) {
+				performMdnsProvider();
+				nextMdnsAt = nowMs() + config.providers.mdns.intervalMs;
+				continue;
+			}
+			if (config.providers.ssdp.enabled && current >= nextSsdpAt) {
+				performSsdpProvider();
+				nextSsdpAt = nowMs() + config.providers.ssdp.intervalMs;
+				continue;
+			}
+			if (config.providers.nbns.enabled && current >= nextNbnsAt) {
+				performNbnsProvider();
+				nextNbnsAt = nowMs() + config.providers.nbns.intervalMs;
+				continue;
+			}
+			if (config.providers.reverseDns.enabled && current >= nextReverseDnsAt) {
+				performReverseDnsProvider();
+				nextReverseDnsAt = nowMs() + config.providers.reverseDns.intervalMs;
+				continue;
+			}
+
+			const uint64_t nextWorkAt = std::min(
+			    {nextScanAt,
+			     nextIcmpAt,
+			     nextMdnsAt,
+			     nextSsdpAt,
+			     nextNbnsAt,
+			     nextReverseDnsAt}
+			);
+			const uint64_t remaining = nextWorkAt > current ? nextWorkAt - current : 1;
+			const uint32_t waitMs =
+			    static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
 			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(waitMs, 1)));
 		}
 
@@ -1554,12 +1599,39 @@ struct ScoutImpl {
 		if (!mutex || !stopped) {
 			return ScoutResult::failure(ScoutStatus::NoMemory, "failed to create synchronization");
 		}
+		const bool invalidProviderSchedule =
+		    (incoming.providers.icmp.enabled &&
+		     (incoming.providers.icmp.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.icmp.timeoutMs == 0 ||
+		      incoming.providers.icmp.maxTargetsPerRun == 0)) ||
+		    (incoming.providers.mdns.enabled &&
+		     (incoming.providers.mdns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.mdns.queryTimeoutMs == 0 ||
+		      incoming.providers.mdns.maxResults == 0 ||
+		      incoming.providers.mdns.maxServiceQueriesPerRun == 0)) ||
+		    (incoming.providers.ssdp.enabled &&
+		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.ssdp.responseWindowMs == 0 ||
+		      incoming.providers.ssdp.maxDescriptionFetchesPerRun == 0)) ||
+		    (incoming.providers.nbns.enabled &&
+		     (incoming.providers.nbns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.nbns.responseWindowMs == 0 ||
+		      incoming.providers.nbns.maxTargetsPerRun == 0)) ||
+		    (incoming.providers.reverseDns.enabled &&
+		     (incoming.providers.reverseDns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.reverseDns.maxTargetsPerRun == 0));
+
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
 		    !Strata::validPlacement(incoming.memory.taskStack) ||
 		    incoming.scanIntervalMs < MinScanIntervalMs || incoming.deviceMaxAgeMs == 0 ||
 		    incoming.arpResponseWaitMs == 0 || incoming.maxDevices == 0 ||
 		    incoming.maxHostsPerSubnet == 0 || incoming.arpBatchSize == 0 ||
-		    !validStackSize(incoming.taskStackBytes)) {
+		    incoming.maxIdentityRelations == 0 ||
+		    incoming.maxDevices > SIZE_MAX / SCOUT_MAX_ENDPOINTS_PER_DEVICE ||
+		    (incoming.providers.ssdp.enabled &&
+		     incoming.providers.ssdp.fetchDeviceDescription &&
+		     incoming.providers.ssdp.maxDescriptionBytes == 0) ||
+		    invalidProviderSchedule || !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
 		}
 
@@ -1599,6 +1671,11 @@ struct ScoutImpl {
 		diag.taskStackPlacement = config.memory.taskStack;
 		coverageKnown = false;
 		coverageAvailable = false;
+		identityDirty = false;
+		identityGroupCountValue = 0;
+		identityRelationCountValue = 0;
+		icmpCursor = 0;
+		reverseDnsCursor = 0;
 		nextScanId = 1;
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
@@ -1636,6 +1713,7 @@ struct ScoutImpl {
 		initialized = true;
 		diag.registryRegion = Strata::regionOf(devices);
 		diag.targetBufferRegion = Strata::regionOf(targets);
+		diag.enrichmentRegion = Strata::regionOf(providerTargets);
 		diag.taskStackRegion = task.stackRegion();
 		startReady.store(true, std::memory_order_release);
 		return ScoutResult::success("Scout initialized");
@@ -1699,6 +1777,7 @@ struct ScoutImpl {
 		diag.deviceCount = 0;
 		diag.registryRegion = Strata::Region::Unknown;
 		diag.targetBufferRegion = Strata::Region::Unknown;
+		diag.enrichmentRegion = Strata::Region::Unknown;
 		diag.taskStackRegion = Strata::Region::Unknown;
 		return ScoutResult::success("Scout deinitialized");
 	}
