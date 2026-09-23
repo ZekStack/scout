@@ -19,9 +19,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check whitespace
-        run: git diff --check HEAD
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${BASE_SHA}" == "0000000000000000000000000000000000000000" || -z "${BASE_SHA}" ]]; then
+            git show --check --format= HEAD
+          else
+            git diff --check "${BASE_SHA}" "${HEAD_SHA}"
+          fi
+
+  formatting:
+    runs-on: [self-hosted, zekstack-ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: python3 -m pip install --user clang-format==19.1.7
+
+      - name: Check C++ formatting
+        run: |
+          python3 -m clang_format --dry-run --Werror \
+            src/Scout.cpp src/Scout.h src/internal/ScoutLogic.cpp \
+            src/internal/ScoutLogic.h src/internal/ScoutNetwork.cpp \
+            src/internal/ScoutNetwork.h
 
   metadata:
     runs-on: [self-hosted, zekstack-ci]

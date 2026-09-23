@@ -22,6 +22,7 @@ enum class ScoutStatus : uint8_t {
 	NetworkUnavailable,
 	DeviceLimitReached,
 	InternalError,
+	NotFound,
 };
 
 enum class ScoutState : uint8_t {

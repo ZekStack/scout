@@ -1,3 +1,5 @@
+// This sketch expects the application to start an eligible network interface first.
+// See WiFiDiscovery for a standalone Wi-Fi setup example.
 #include <Arduino.h>
 #include <Scout.h>
 
