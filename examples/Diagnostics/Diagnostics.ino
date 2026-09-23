@@ -36,6 +36,13 @@ void printDiagnostics() {
 	);
 
 	Serial.printf(
+	    "registry expired=%llu deduplicated=%llu endpointReassignments=%llu\n",
+	    static_cast<unsigned long long>(diag.expiredDeviceCount),
+	    static_cast<unsigned long long>(diag.deduplicatedDeviceCount),
+	    static_cast<unsigned long long>(diag.endpointReassignmentCount)
+	);
+
+	Serial.printf(
 	    "allocation requested=%s registry=%s targets=%s\n",
 	    Strata::toString(diag.allocationPlacement),
 	    Strata::toString(diag.registryRegion),
