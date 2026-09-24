@@ -2185,11 +2185,16 @@ struct ScoutImpl {
 		);
 	}
 
-	ScoutResult processWork(uint32_t requestedBudgetMs) {
-		if (processingActive.exchange(true, std::memory_order_acq_rel)) {
-			return ScoutResult::failure(ScoutStatus::Busy, "Scout processing is already active");
+	ScoutResult processWork(uint32_t requestedBudgetMs, bool processingClaimed = false) {
+		if (!processingClaimed) {
+			if (processingActive.exchange(true, std::memory_order_acq_rel)) {
+				return ScoutResult::failure(
+				    ScoutStatus::Busy,
+				    "Scout processing is already active"
+				);
+			}
+			processingOwner.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
 		}
-		processingOwner.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
 
 		const uint32_t budgetMs =
 		    requestedBudgetMs == 0 ? config.execution.workBudgetMs : requestedBudgetMs;
@@ -2882,8 +2887,12 @@ ScoutResult Scout::process(uint32_t budgetMs) {
 		if (_impl->state != ScoutState::Running) {
 			return ScoutResult::failure(ScoutStatus::Busy, "Scout is not running");
 		}
+		if (_impl->processingActive.exchange(true, std::memory_order_acq_rel)) {
+			return ScoutResult::failure(ScoutStatus::Busy, "Scout processing is already active");
+		}
+		_impl->processingOwner.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
 	}
-	return _impl->processWork(budgetMs);
+	return _impl->processWork(budgetMs, true);
 }
 
 uint32_t Scout::timeUntilNextWork() const {
