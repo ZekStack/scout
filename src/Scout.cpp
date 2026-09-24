@@ -89,6 +89,29 @@ class ScoutLock {
 	}
 }
 
+int enrichmentSourcePriority(ScoutObservationSource source) {
+	switch (source) {
+	case ScoutObservationSource::Ssdp:
+		return 400;
+	case ScoutObservationSource::Mdns:
+		return 300;
+	case ScoutObservationSource::Nbns:
+		return 200;
+	case ScoutObservationSource::ReverseDns:
+		return 100;
+	default:
+		return 0;
+	}
+}
+
+bool shouldAcceptEnrichmentSource(
+    ScoutObservationSource current,
+    ScoutObservationSource incoming
+) {
+	return current == ScoutObservationSource::None || current == incoming ||
+	       enrichmentSourcePriority(incoming) > enrichmentSourcePriority(current);
+}
+
 template <typename T> void resetInPlace(T &value) {
 	std::destroy_at(&value);
 	std::construct_at(&value);
@@ -383,6 +406,17 @@ struct ScoutImpl {
 			    scout_internal::macIsMulticast(devices[index].info.mac);
 		}
 		return devices[index].details.get();
+	}
+
+	void snapshotDetailsLocked(size_t index, ScoutDeviceDetails &out) const {
+		if (devices[index].details) {
+			out = *devices[index].details;
+			return;
+		}
+		resetInPlace(out);
+		out.locallyAdministeredMac =
+		    scout_internal::macIsLocallyAdministered(devices[index].info.mac);
+		out.multicastMac = scout_internal::macIsMulticast(devices[index].info.mac);
 	}
 
 	size_t findEndpointOwner(uint8_t interfaceIndex, uint32_t ipv4, size_t excludedIndex) const {
@@ -1014,12 +1048,18 @@ struct ScoutImpl {
 					                      ScoutObservationSource &fieldSource,
 					                      uint64_t &expiresAtMs,
 					                      ScoutDeviceChange change) {
-						if (source == nullptr || source[0] == '\0') {
+						if (source == nullptr || source[0] == '\0' ||
+						    (destination[0] != '\0' &&
+						     !shouldAcceptEnrichmentSource(fieldSource, observation.source))) {
 							return;
 						}
-						const bool changed = std::strncmp(destination, source, capacity) != 0;
-						if (changed) {
+						const bool valueChanged =
+						    std::strncmp(destination, source, capacity) != 0;
+						const bool sourceChanged = fieldSource != observation.source;
+						if (valueChanged) {
 							scout_internal::copyText(destination, capacity, source);
+						}
+						if (valueChanged || sourceChanged) {
 							changes |= change;
 						}
 						fieldSource = observation.source;
@@ -2250,11 +2290,7 @@ ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const 
 	if (index >= _impl->deviceCount) {
 		return ScoutResult::failure(ScoutStatus::NotFound, "device index is out of range");
 	}
-	if (_impl->devices[index].details) {
-		out = *_impl->devices[index].details;
-	} else {
-		resetInPlace(out);
-	}
+	_impl->snapshotDetailsLocked(index, out);
 	return ScoutResult::success();
 }
 
@@ -2276,11 +2312,7 @@ ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetai
 	if (index == SIZE_MAX) {
 		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
 	}
-	if (_impl->devices[index].details) {
-		out = *_impl->devices[index].details;
-	} else {
-		resetInPlace(out);
-	}
+	_impl->snapshotDetailsLocked(index, out);
 	return ScoutResult::success();
 }
 

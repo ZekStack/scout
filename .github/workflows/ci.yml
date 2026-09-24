@@ -190,6 +190,7 @@ jobs:
                 --board ${{ matrix.board }} \
                 --lib="." \
                 --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+                --project-option "framework=arduino" \
                 --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
                 --project-option "build_unflags=-std=gnu++11" \
                 --project-option "build_flags=-std=gnu++20"

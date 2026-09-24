@@ -69,6 +69,26 @@ uint64_t expiryFromTtl(uint64_t now, uint32_t ttlSeconds, uint64_t fallbackMs) {
 	return now + static_cast<uint64_t>(ttlSeconds) * 1000ULL;
 }
 
+uint64_t mdnsRetentionFloorMs(
+    const ScoutMdnsConfig &config,
+    size_t serviceTypeCount,
+    size_t serviceQueryCount
+) {
+	if (serviceQueryCount == 0 || config.intervalMs == 0 || config.fallbackMaxAgeMs == 0) {
+		return 0;
+	}
+	const uint64_t rotationRuns =
+	    (serviceTypeCount + serviceQueryCount - 1U) / serviceQueryCount;
+	const uint64_t retentionRuns = rotationRuns + 1U;
+	if (retentionRuns > config.fallbackMaxAgeMs / config.intervalMs) {
+		return config.fallbackMaxAgeMs;
+	}
+	return std::min<uint64_t>(
+	    config.fallbackMaxAgeMs,
+	    static_cast<uint64_t>(config.intervalMs) * retentionRuns
+	);
+}
+
 esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
 	auto *context = static_cast<LocalInterfaceCollectContext *>(rawContext);
 	if (context == nullptr || context->out == nullptr || context->capacity == 0) {
@@ -268,7 +288,7 @@ void appendMetadata(
     uint64_t now,
     uint64_t expiresAt
 ) {
-	if (key == nullptr || key[0] == '\0' ||
+	if (key == nullptr || key[0] == '\0' || value == nullptr || value[0] == '\0' ||
 	    observation.metadataCount >= ProviderObservationMetadataCapacity) {
 		return;
 	}
@@ -409,12 +429,16 @@ void emitMdnsResult(
     const ProviderTarget *targets,
     size_t targetCount,
     const ScoutMdnsConfig &config,
+    uint64_t retentionFloorMs,
     EnrichmentSink sink,
     void *context,
     ProviderRunStats &stats
 ) {
 	const uint64_t now = providerNowMs();
-	const uint64_t expiresAt = expiryFromTtl(now, result.ttl, config.fallbackMaxAgeMs);
+	const uint64_t ttlExpiresAt = expiryFromTtl(now, result.ttl, config.fallbackMaxAgeMs);
+	const uint64_t floorExpiresAt =
+	    retentionFloorMs > UINT64_MAX - now ? UINT64_MAX : now + retentionFloorMs;
+	const uint64_t expiresAt = std::max(ttlExpiresAt, floorExpiresAt);
 	const char *interfaceKey =
 	    result.esp_netif != nullptr ? esp_netif_get_ifkey(result.esp_netif) : nullptr;
 
@@ -1023,6 +1047,7 @@ ProviderRunStats runMdnsProvider(
 	                                 ? config.queryTimeoutMs - enumerationTimeout
 	                                 : config.queryTimeoutMs;
 	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
+	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
 	const uint32_t perQueryTimeout = std::max<uint32_t>(
 	    20,
 	    queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 20
@@ -1047,7 +1072,16 @@ ProviderRunStats runMdnsProvider(
 			continue;
 		}
 		for (mdns_result_t *result = results; result != nullptr; result = result->next) {
-			emitMdnsResult(*result, targets, targetCount, config, sink, context, stats);
+			emitMdnsResult(
+			    *result,
+			    targets,
+			    targetCount,
+			    config,
+			    retentionFloorMs,
+			    sink,
+			    context,
+			    stats
+			);
 		}
 		mdns_query_results_free(results);
 	}
@@ -1162,7 +1196,7 @@ ProviderRunStats runSsdpProvider(
 
 			SsdpResponseInfo parsed{};
 			if (!parseSsdpResponse(response, static_cast<size_t>(received), parsed)) {
-				stats.errors++;
+				stats.malformedResponses++;
 				continue;
 			}
 			const uint64_t now = providerNowMs();

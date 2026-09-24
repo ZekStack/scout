@@ -22,6 +22,14 @@ Providers have independent schedules. Bounded providers use persistent cursors s
 budgets rotate across targets/service types instead of permanently favoring the first entries. A
 large registry therefore does not imply that all network protocols are run during every ARP sweep.
 
+For scalar details that multiple providers can report, Scout uses deterministic source precedence
+instead of last-writer-wins updates. SSDP/UPnP outranks mDNS for manufacturer/model-style fields,
+while observations from the same source continue to refresh or update their own values. mDNS
+record retention also covers a complete bounded service-query rotation (with one scheduling
+interval of headroom, bounded by `fallbackMaxAgeMs`) so short DNS-SD TTLs do not make names and
+services flap merely because Scout intentionally rotates service types. This retention is metadata
+only and never keeps a MAC identity online.
+
 ## PSRAM-first bounds
 
 Scout deliberately exposes generous bounded snapshot capacities so a NetworkDeviceManager can

@@ -60,7 +60,7 @@ void testPublicDefaultsAndValueTypes() {
 	assert(config.maxDevices == 128);
 	assert(config.maxHostsPerSubnet == 512);
 	assert(config.maxIdentityRelations == 512);
-	assert(config.taskStackBytes == 24U * 1024U);
+	assert(config.taskStackBytes == 32U * 1024U);
 	assert(config.providers.icmp.enabled);
 	assert(config.providers.mdns.enabled);
 	assert(config.providers.ssdp.enabled);

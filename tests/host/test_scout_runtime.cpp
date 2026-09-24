@@ -302,7 +302,7 @@ void testLazyDetailsAllocation() {
 	interfaceSnapshot.index = 1;
 	std::strcpy(interfaceSnapshot.name, "test");
 	std::strcpy(interfaceSnapshot.key, "TEST_1");
-	const uint8_t deviceMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x77};
+	const uint8_t deviceMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x77};
 	const uint32_t address = lwip_htonl(0xC0A80120U);
 
 	runtime.observe(
@@ -315,6 +315,10 @@ void testLazyDetailsAllocation() {
 	);
 	assert(runtime.deviceCount == 1);
 	assert(!runtime.devices[0].details);
+	ScoutDeviceDetails derivedDetails{};
+	runtime.snapshotDetailsLocked(0, derivedDetails);
+	assert(derivedDetails.locallyAdministeredMac);
+	assert(!derivedDetails.multicastMac);
 
 	scout_internal::EnrichmentObservation confirmation{};
 	confirmation.source = ScoutObservationSource::Icmp;
@@ -336,6 +340,60 @@ void testLazyDetailsAllocation() {
 	runtime.applyEnrichmentObservation(runtime.devices[0].info.mac, reverseDns);
 	assert(runtime.devices[0].details);
 	assert(runtime.devices[0].details->nameCount == 1);
+	assert(runtime.devices[0].details->locallyAdministeredMac);
+
+	runtime.releaseBuffers();
+}
+
+void testScalarEnrichmentSourcePrecedence() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+	const uint8_t deviceMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x88};
+	const uint32_t address = lwip_htonl(0xC0A80130U);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    deviceMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	const ScoutMacAddress mac = runtime.devices[0].info.mac;
+
+	scout_internal::EnrichmentObservation ssdp{};
+	ssdp.source = ScoutObservationSource::Ssdp;
+	ssdp.ipv4.value = address;
+	ssdp.interfaceIndex = 1;
+	std::strcpy(ssdp.interfaceKey, "TEST_1");
+	ssdp.identityExpiresAtMs = nowMs() + 60000;
+	std::strcpy(ssdp.manufacturer, "IceWhale Technology");
+	std::strcpy(ssdp.modelName, "ZimaCube");
+	runtime.applyEnrichmentObservation(mac, ssdp);
+	assert(runtime.devices[0].details);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
+
+	scout_internal::EnrichmentObservation mdns{};
+	mdns.source = ScoutObservationSource::Mdns;
+	mdns.ipv4.value = address;
+	mdns.interfaceIndex = 1;
+	std::strcpy(mdns.interfaceKey, "TEST_1");
+	mdns.identityExpiresAtMs = nowMs() + 60000;
+	std::strcpy(mdns.modelName, "TimeCapsule6,106");
+	runtime.applyEnrichmentObservation(mac, mdns);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
+
+	std::strcpy(ssdp.modelName, "ZimaCube Pro");
+	runtime.applyEnrichmentObservation(mac, ssdp);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube Pro") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
 
 	runtime.releaseBuffers();
 }
@@ -668,6 +726,7 @@ int main() {
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
 	testLazyDetailsAllocation();
+	testScalarEnrichmentSourcePrecedence();
 	testStaleProviderObservationAndDiagnostics();
 	testFormattingHelpers();
 	testInvalidSsdpHttpTimeout();
