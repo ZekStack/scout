@@ -141,7 +141,14 @@ Scout distinguishes two ARP observation sources:
 
 Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
 
-After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names, IPv6 aliases, and OUI vendor information without changing higher-level presence policy. Bounded providers rotate through targets/service types across runs instead of repeatedly starting from entry zero. Reverse DNS uses Scout's bounded UDP PTR client against the DNS server configured on the endpoint's ESP-NETIF; it does not rely on blocking `getnameinfo()`.
+After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP
+confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names,
+IPv6 aliases, and OUI vendor information without changing higher-level presence policy. Provider
+results are discarded if their captured `(interface, IPv4)` endpoint has since moved to another
+MAC, and IP-only enrichment does not extend registry `lastSeenAtMs`. Bounded providers rotate
+through targets/service types across runs instead of repeatedly starting from entry zero. Reverse
+DNS uses Scout's bounded UDP PTR client against the DNS server configured on the endpoint's
+ESP-NETIF; it does not rely on blocking `getnameinfo()`.
 
 ### Registry retention and deduplication
 
@@ -176,7 +183,12 @@ A presence layer built on Scout should suppress offline inference while coverage
 
 ## API overview
 
-`ScoutIpv4Address::value` uses lwIP network byte order. Convert it with `lwip_ntohl()` before extracting address octets. Observation timestamps (`*AtMs`) are monotonic milliseconds since boot from `esp_timer_get_time()`, not Unix timestamps; zero means no active confirmation where applicable. A valid MAC absent from the registry returns `ScoutStatus::NotFound`.
+`ScoutIpv4Address::value` uses lwIP network byte order. Public zero-allocation
+`scoutFormatIpv4()`, `scoutFormatIpv6()`, and `scoutFormatMac()` helpers format Scout address
+types into caller-owned buffers without Arduino `String` allocation. Observation timestamps
+(`*AtMs`) are monotonic milliseconds since boot from `esp_timer_get_time()`, not Unix timestamps;
+zero means no active confirmation where applicable. A valid MAC absent from the registry returns
+`ScoutStatus::NotFound`.
 
 ```cpp
 ScoutConfig config;
