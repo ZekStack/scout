@@ -34,7 +34,7 @@ namespace scout_internal {
 namespace {
 
 constexpr size_t MaxLocalInterfaces = 8;
-constexpr size_t MaxMdnsServiceTypes = 32;
+constexpr size_t MaxMdnsServiceTypes = 64;
 constexpr size_t MaxProviderTargetsPerRun = 32;
 constexpr size_t MaxSsdpDescriptionFetches = 16;
 constexpr uint32_t SocketPollMs = 50;
@@ -409,6 +409,7 @@ void emitMdnsResult(
 		observation.source = ScoutObservationSource::Mdns;
 		observation.ipv4.value = ipv4;
 		observation.interfaceIndex = target->interfaceIndex;
+		observation.identityExpiresAtMs = expiresAt;
 		addName(observation, ScoutNameSource::MdnsHostname, result.hostname, now, expiresAt);
 		addName(observation, ScoutNameSource::MdnsInstance, result.instance_name, now, expiresAt);
 
@@ -843,6 +844,28 @@ ProviderRunStats runSsdpProvider(
 	inet_pton(AF_INET, "239.255.255.250", &destination.sin_addr);
 
 	size_t descriptionFetches = 0;
+	char fetchedLocations[MaxSsdpDescriptionFetches][256]{};
+	size_t fetchedLocationCount = 0;
+	auto rememberLocation = [&](const char *location) {
+		if (location == nullptr || location[0] == '\0') {
+			return false;
+		}
+		for (size_t i = 0; i < fetchedLocationCount; ++i) {
+			if (textEqualsIgnoreCase(fetchedLocations[i], location)) {
+				return false;
+			}
+		}
+		if (fetchedLocationCount >= MaxSsdpDescriptionFetches) {
+			return false;
+		}
+		copyText(
+		    fetchedLocations[fetchedLocationCount],
+		    sizeof(fetchedLocations[fetchedLocationCount]),
+		    location
+		);
+		fetchedLocationCount++;
+		return true;
+	};
 	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, SocketPollMs);
@@ -898,6 +921,7 @@ ProviderRunStats runSsdpProvider(
 			observation.source = ScoutObservationSource::Ssdp;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
+			observation.identityExpiresAtMs = expiresAt;
 			appendMetadata(
 			    observation,
 			    ScoutObservationSource::Ssdp,
@@ -932,10 +956,13 @@ ProviderRunStats runSsdpProvider(
 			);
 			extractUpnpUdn(parsed.usn, observation.upnpUdn, sizeof(observation.upnpUdn));
 
-			if (config.fetchDeviceDescription && parsed.location[0] != '\0' &&
+			const size_t descriptionBudget =
+			    std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun);
+			const bool newDescriptionLocation =
+			    parsed.location[0] != '\0' && rememberLocation(parsed.location);
+			if (config.fetchDeviceDescription && newDescriptionLocation &&
 			    httpScratch != nullptr && httpScratchCapacity > 1 &&
-			    descriptionFetches <
-			        std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
+			    descriptionFetches < descriptionBudget) {
 				const size_t bodyLength = fetchHttpBody(
 				    parsed.location,
 				    config.httpTimeoutMs,
@@ -992,8 +1019,8 @@ ProviderRunStats runSsdpProvider(
 				} else {
 					stats.timeouts++;
 				}
-			} else if (descriptionFetches >=
-			           std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun)) {
+			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
+			           descriptionFetches >= descriptionBudget) {
 				stats.dropped++;
 			}
 
