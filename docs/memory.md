@@ -19,11 +19,16 @@ The runtime object itself is also created with PreferExternal.
 
 The allocation policy is used for Scout-owned movable storage:
 
-- device registry;
+- compact device registry;
+- lazily allocated rich `ScoutDeviceDetails` records;
+- provider target and identity tables;
+- UPnP HTTP scratch storage;
 - subnet target buffer;
 - ARP lookup scratch buffers.
 
-These buffers are allocated once during init and reused by subsequent scans.
+The compact registry and shared scratch/table buffers are allocated during init and reused by
+subsequent scans. Large rich-detail records are allocated only when a device first receives
+enrichment data, so `maxDevices` does not reserve the worst-case rich payload for every slot.
 
 ## taskStack
 
@@ -46,4 +51,8 @@ ScoutDiagnostics separates requested placement from observed region:
 - registryRegion;
 - targetBufferRegion;
 - taskStackRegion;
-- taskStackHighWaterMarkBytes.
+- taskStackHighWaterMarkBytes;
+- enrichmentAllocationFailures.
+
+A rich-details allocation failure does not invalidate the MAC registry. Scout keeps the compact
+network record and reports the failed enrichment allocation through diagnostics.
