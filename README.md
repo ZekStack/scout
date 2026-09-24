@@ -111,7 +111,7 @@ calls `process()` from the task that should own discovery work:
 ```cpp
 ScoutConfig config;
 config.execution.mode = ScoutExecutionMode::CallerDriven;
-config.execution.workBudgetMs = 25;
+config.execution.workBudgetMs = 1000;
 
 Scout scout;
 scout.init(config);
@@ -136,9 +136,12 @@ execution owner performs it. Active ARP sweeps are incremental, and provider run
 cooperative cancellation/deadline context so `process()` can yield between bounded pieces of
 work and shutdown does not have to wait for complete provider rotations.
 
-`workBudgetMs` is a scheduler budget, not a hard real-time guarantee for third-party/network
-APIs. Scout bounds its own loops and deadlines against the budget, but the underlying ESP-IDF
-operation may occasionally return slightly after the requested boundary.
+`workBudgetMs` is a caller-driven scheduler budget, not a hard real-time guarantee for
+third-party/network APIs. The default is 1000 ms so the default SSDP response window can complete
+in one call. Smaller budgets improve responsiveness, but synchronous ESP-IDF operations and
+provider response windows may be sliced or shortened, so applications using very small budgets
+should validate the discovery coverage they require. BackgroundTask mode preserves full configured
+provider runs while still honoring shutdown cancellation.
 
 Execution mode is fixed for one initialization lifetime. To switch modes, call `deinit()`, update
 the config, and call `init()` again.
