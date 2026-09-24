@@ -2,6 +2,7 @@
 
 #include "../Scout.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -55,10 +56,19 @@ struct ProviderRunStats {
 	uint64_t malformedResponses = 0;
 	uint64_t serverErrors = 0;
 	uint64_t dropped = 0;
+	size_t plannedUnits = 0;
+	size_t workUnits = 0;
+	bool budgetYielded = false;
+	bool cancelled = false;
 };
 
 using EnrichmentSink =
     void (*)(const ScoutMacAddress &mac, const EnrichmentObservation &observation, void *context);
+
+struct ProviderRunControl {
+	const std::atomic<bool> *stopRequested = nullptr;
+	uint64_t deadlineMs = UINT64_MAX;
+};
 
 ProviderRunStats runIcmpProvider(
     const ProviderTarget *targets,
@@ -66,7 +76,8 @@ ProviderRunStats runIcmpProvider(
     size_t &cursor,
     const ScoutIcmpConfig &config,
     EnrichmentSink sink,
-    void *context
+    void *context,
+    const ProviderRunControl *control = nullptr
 );
 
 ProviderRunStats runMdnsProvider(
@@ -75,7 +86,8 @@ ProviderRunStats runMdnsProvider(
     size_t &serviceCursor,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
-    void *context
+    void *context,
+    const ProviderRunControl *control = nullptr
 );
 
 ProviderRunStats runSsdpProvider(
@@ -85,7 +97,8 @@ ProviderRunStats runSsdpProvider(
     char *httpScratch,
     size_t httpScratchCapacity,
     EnrichmentSink sink,
-    void *context
+    void *context,
+    const ProviderRunControl *control = nullptr
 );
 
 ProviderRunStats runNbnsProvider(
@@ -94,7 +107,8 @@ ProviderRunStats runNbnsProvider(
     size_t &cursor,
     const ScoutNbnsConfig &config,
     EnrichmentSink sink,
-    void *context
+    void *context,
+    const ProviderRunControl *control = nullptr
 );
 
 ProviderRunStats runReverseDnsProvider(
@@ -103,7 +117,8 @@ ProviderRunStats runReverseDnsProvider(
     size_t &cursor,
     const ScoutReverseDnsConfig &config,
     EnrichmentSink sink,
-    void *context
+    void *context,
+    const ProviderRunControl *control = nullptr
 );
 
 } // namespace scout_internal

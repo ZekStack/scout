@@ -10,7 +10,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC
 
 ## Why use Scout?
 
-* **Continuous discovery** - periodically scans eligible local IPv4 interfaces from a background FreeRTOS task.
+* **Flexible execution** - run Scout from its own background FreeRTOS task or drive the same scheduler from an application-owned task.
 * **Public lwIP path** - active ARP requests and lookups run through ESP-NETIF's TCP/IP-context bridge instead of touching private lwIP ARP structures.
 * **MAC-first identity** - devices are keyed by MAC address while IPv4/IPv6 aliases are tracked as per-interface endpoints.
 * **Rich enrichment** - learns friendly names, hostnames, services, manufacturer/model data and stable protocol identifiers.
@@ -42,7 +42,7 @@ framework = arduino
 
 lib_deps =
   https://github.com/ZekStack/scout.git#v0.1.0
-  https://github.com/ZekStack/strata.git#fix-esp32-platform-detection
+  https://github.com/ZekStack/strata.git#v0.1.3
 
 build_flags =
   -std=gnu++20
@@ -50,7 +50,7 @@ build_unflags =
   -std=gnu++11
 ```
 
-Scout's `library.json` temporarily pins the Strata `v0.1.3` compatibility branch while that release is validated; it will be replaced with the `v0.1.3` tag before the Scout release.
+Scout pins Strata `v0.1.3` for the ESP-IDF/ESP32-P4 platform-detection compatibility fix.
 
 ### Arduino IDE
 
@@ -97,6 +97,55 @@ void loop() {
 }
 ```
 
+## Execution model
+
+Scout supports two execution modes.
+
+`ScoutExecutionMode::BackgroundTask` is the default and preserves the original behavior: Scout
+creates its own Strata-owned FreeRTOS task, schedules scans/providers, and invokes event callbacks
+from that task.
+
+`ScoutExecutionMode::CallerDriven` creates no Scout scheduler task. The application periodically
+calls `process()` from the task that should own discovery work:
+
+```cpp
+ScoutConfig config;
+config.execution.mode = ScoutExecutionMode::CallerDriven;
+config.execution.workBudgetMs = 1000;
+
+Scout scout;
+scout.init(config);
+
+void networkLoop() {
+	for (;;) {
+		scout.process();
+
+		const uint32_t waitMs = scout.timeUntilNextWork();
+		if (waitMs == UINT32_MAX) {
+			vTaskDelay(pdMS_TO_TICKS(100));
+		} else if (waitMs > 0) {
+			vTaskDelay(pdMS_TO_TICKS(waitMs));
+		}
+	}
+}
+```
+
+In caller-driven mode, callbacks execute synchronously in the task that calls `process()`.
+`scanNow()` remains non-blocking in both modes: it queues an immediate scan, and the selected
+execution owner performs it. Active ARP sweeps are incremental, and provider runs receive a
+cooperative cancellation/deadline context so `process()` can yield between bounded pieces of
+work and shutdown does not have to wait for complete provider rotations.
+
+`workBudgetMs` is a caller-driven scheduler budget, not a hard real-time guarantee for
+third-party/network APIs. The default is 1000 ms so the default SSDP response window can complete
+in one call. Smaller budgets improve responsiveness, but synchronous ESP-IDF operations and
+provider response windows may be sliced or shortened, so applications using very small budgets
+should validate the discovery coverage they require. BackgroundTask mode preserves full configured
+provider runs while still honoring shutdown cancellation.
+
+Execution mode is fixed for one initialization lifetime. To switch modes, call `deinit()`, update
+the config, and call `init()` again.
+
 ## Memory model
 
 Scout uses the shared ZekStack Strata memory-policy shape:
@@ -113,9 +162,9 @@ config.memory.taskStack = Strata::Placement::PreferExternal;
 lazy rich-detail allocations, provider target tables, identity tables, UPnP scratch storage,
 subnet target buffer, and ARP scratch buffers.
 
-`memory.taskStack` controls the Scout background task stack.
+`memory.taskStack` controls the Scout background task stack and is ignored by CallerDriven mode.
 
-The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. The shared deferred-cleanup task used for callback-safe destruction also has an external-preferred stack. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
+The Scout runtime object itself is also created with `Strata::Placement::PreferExternal`. The shared deferred-cleanup task used for callback-safe destruction is created lazily only if that edge case occurs and has an external-preferred stack. `PreferExternal` uses external RAM when possible and falls back to internal memory according to Strata's placement contract. Safety-critical FreeRTOS control blocks remain internal when Strata requires it.
 
 Diagnostics report both requested placement and observed regions:
 
@@ -172,7 +221,7 @@ A presence layer built on Scout should suppress offline inference while coverage
 > Scout reports network observations, not application-level online/offline state.
 
 * `scanNow()` schedules an immediate scan and returns; it does not block until the subnet sweep completes.
-* Event callbacks run from the Scout task. Keep them short. Explicit `deinit()` from a callback returns `Busy`; destroying the `Scout` object from its callback is supported through deferred cleanup on a separate Strata-owned task.
+* In BackgroundTask mode, event callbacks run from the Scout task. In CallerDriven mode, they run from the task calling `process()`. Keep them short. Explicit `deinit()` from the active callback context returns `Busy`; destroying the `Scout` object from its callback is supported through lazy deferred cleanup on a separate Strata-owned task.
 * Scout never retains lwIP `struct netif` or ARP-table pointers outside the TCP/IP-context callback.
 * Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
 * A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
@@ -224,6 +273,7 @@ scout.deinit();
 | `Events` | Observe scan, device, coverage, and error events. |
 | `Registry` | Enumerate the device registry, inspect endpoints, and look up a device by MAC address. |
 | `ManualScan` | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`. |
+| `CallerDriven` | Run Scout from an application-owned task without creating the normal Scout scheduler task. |
 | `Diagnostics` | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics. |
 | `MultiInterface` | Inspect devices observed through multiple eligible ESP-NETIF interfaces. |
 | `EnrichedDiscovery` | Inspect preferred names, vendor/manufacturer/model data and discovered services. |
