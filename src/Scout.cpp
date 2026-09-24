@@ -1838,7 +1838,7 @@ struct ScoutImpl {
 		if (scanProgress.active) {
 			return true;
 		}
-		scanProgress = {};
+		scanProgress = IncrementalScanState{};
 		scanProgress.active = true;
 		scanProgress.scanId = nextScanId++;
 		scanProgress.startedAt = nowMs();
@@ -2427,7 +2427,7 @@ struct ScoutImpl {
 		nbnsCursor = 0;
 		mdnsServiceCursor = 0;
 		nextScanId = 1;
-		scanProgress = {};
+		scanProgress = IncrementalScanState{};
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
 		if (!allocateBuffers(incoming)) {
