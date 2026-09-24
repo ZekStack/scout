@@ -1430,8 +1430,7 @@ struct ScoutImpl {
 		} else {
 			icmpRunRemaining -= stats.workUnits;
 		}
-		const bool continueRun =
-		    stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
 		if (!continueRun) {
 			icmpRunRemaining = 0;
 		}
@@ -1464,8 +1463,7 @@ struct ScoutImpl {
 		} else {
 			mdnsRunRemaining -= stats.workUnits;
 		}
-		const bool continueRun =
-		    stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
 		if (!continueRun) {
 			mdnsRunRemaining = 0;
 		}
