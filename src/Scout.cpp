@@ -1378,36 +1378,41 @@ struct ScoutImpl {
 		}
 	}
 
-	void performIcmpProvider() {
+	void performIcmpProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runIcmpProvider(
 		    providerTargets,
 		    count,
 		    icmpCursor,
 		    config.providers.icmp,
 		    &ScoutImpl::providerSink,
-		    this
+		    this,
+		    &control
 		);
 		accumulateProviderStats(diag.icmp, stats);
 		flushIdentityIfDirty();
 	}
 
-	void performMdnsProvider() {
+	void performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runMdnsProvider(
 		    providerTargets,
 		    count,
 		    mdnsServiceCursor,
 		    config.providers.mdns,
 		    &ScoutImpl::providerSink,
-		    this
+		    this,
+		    &control
 		);
 		accumulateProviderStats(diag.mdns, stats);
 		flushIdentityIfDirty();
 	}
 
-	void performSsdpProvider() {
+	void performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runSsdpProvider(
 		    providerTargets,
 		    count,
@@ -1415,35 +1420,40 @@ struct ScoutImpl {
 		    httpScratch,
 		    httpScratchCapacity,
 		    &ScoutImpl::providerSink,
-		    this
+		    this,
+		    &control
 		);
 		accumulateProviderStats(diag.ssdp, stats);
 		flushIdentityIfDirty();
 	}
 
-	void performNbnsProvider() {
+	void performNbnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runNbnsProvider(
 		    providerTargets,
 		    count,
 		    nbnsCursor,
 		    config.providers.nbns,
 		    &ScoutImpl::providerSink,
-		    this
+		    this,
+		    &control
 		);
 		accumulateProviderStats(diag.nbns, stats);
 		flushIdentityIfDirty();
 	}
 
-	void performReverseDnsProvider() {
+	void performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runReverseDnsProvider(
 		    providerTargets,
 		    count,
 		    reverseDnsCursor,
 		    config.providers.reverseDns,
 		    &ScoutImpl::providerSink,
-		    this
+		    this,
+		    &control
 		);
 		accumulateProviderStats(diag.reverseDns, stats);
 		flushIdentityIfDirty();
@@ -1887,31 +1897,31 @@ struct ScoutImpl {
 
 			if (config.providers.icmp.enabled &&
 			    current >= nextIcmpAt.load(std::memory_order_acquire)) {
-				performIcmpProvider();
+				performIcmpProvider(deadlineAt);
 				nextIcmpAt.store(nowMs() + config.providers.icmp.intervalMs, std::memory_order_release);
 				continue;
 			}
 			if (config.providers.mdns.enabled &&
 			    current >= nextMdnsAt.load(std::memory_order_acquire)) {
-				performMdnsProvider();
+				performMdnsProvider(deadlineAt);
 				nextMdnsAt.store(nowMs() + config.providers.mdns.intervalMs, std::memory_order_release);
 				continue;
 			}
 			if (config.providers.ssdp.enabled &&
 			    current >= nextSsdpAt.load(std::memory_order_acquire)) {
-				performSsdpProvider();
+				performSsdpProvider(deadlineAt);
 				nextSsdpAt.store(nowMs() + config.providers.ssdp.intervalMs, std::memory_order_release);
 				continue;
 			}
 			if (config.providers.nbns.enabled &&
 			    current >= nextNbnsAt.load(std::memory_order_acquire)) {
-				performNbnsProvider();
+				performNbnsProvider(deadlineAt);
 				nextNbnsAt.store(nowMs() + config.providers.nbns.intervalMs, std::memory_order_release);
 				continue;
 			}
 			if (config.providers.reverseDns.enabled &&
 			    current >= nextReverseDnsAt.load(std::memory_order_acquire)) {
-				performReverseDnsProvider();
+				performReverseDnsProvider(deadlineAt);
 				nextReverseDnsAt.store(
 				    nowMs() + config.providers.reverseDns.intervalMs,
 				    std::memory_order_release
