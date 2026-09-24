@@ -308,17 +308,24 @@ void testIdentityGroupingKeepsModerateRelationsSeparate() {
 	runtime.deviceCount = 3;
 	runtime.diag.deviceCount = 3;
 
-	std::strcpy(runtime.devices[0].details.upnpUdn, "uuid:physical-device");
-	std::strcpy(runtime.devices[1].details.upnpUdn, "uuid:physical-device");
+	assert(!runtime.devices[0].details);
+	assert(!runtime.devices[1].details);
+	assert(!runtime.devices[2].details);
+	auto *firstDetails = runtime.ensureDetailsLocked(0);
+	auto *secondDetails = runtime.ensureDetailsLocked(1);
+	auto *thirdDetails = runtime.ensureDetailsLocked(2);
+	assert(firstDetails != nullptr && secondDetails != nullptr && thirdDetails != nullptr);
+	std::strcpy(firstDetails->upnpUdn, "uuid:physical-device");
+	std::strcpy(secondDetails->upnpUdn, "uuid:physical-device");
 	scout_internal::upsertName(
-	    runtime.devices[1].details,
+	    *secondDetails,
 	    ScoutNameSource::MdnsHostname,
 	    "shared-host.local",
 	    100,
 	    0
 	);
 	scout_internal::upsertName(
-	    runtime.devices[2].details,
+	    *thirdDetails,
 	    ScoutNameSource::MdnsHostname,
 	    "shared-host.local",
 	    100,
@@ -408,6 +415,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *,
     size_t,
+    size_t &,
     const ScoutMdnsConfig &,
     EnrichmentSink,
     void *
@@ -430,6 +438,7 @@ ProviderRunStats runSsdpProvider(
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *,
     size_t,
+    size_t &,
     const ScoutNbnsConfig &,
     EnrichmentSink,
     void *
