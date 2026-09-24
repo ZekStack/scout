@@ -10,6 +10,13 @@
 #include <thread>
 #include <vector>
 
+namespace scout_internal {
+std::atomic<int> testSsdpRuns{0};
+std::atomic<int> testNbnsRuns{0};
+std::atomic<bool> testSsdpYieldNext{false};
+std::atomic<bool> testNbnsYieldNext{false};
+} // namespace scout_internal
+
 namespace {
 struct Gate {
 	std::mutex mutex;
@@ -795,6 +802,47 @@ void testCallerDrivenExecution() {
 	assert(scout.deinit().status == ScoutStatus::Ok);
 }
 
+void testProviderBudgetContinuation() {
+	networkMode.store(NetworkMode::None);
+	scout_internal::testSsdpRuns.store(0);
+	scout_internal::testNbnsRuns.store(0);
+	scout_internal::testSsdpYieldNext.store(true);
+	scout_internal::testNbnsYieldNext.store(true);
+
+	Scout scout;
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.execution.workBudgetMs = 25;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = true;
+	config.providers.nbns.enabled = true;
+	config.providers.reverseDns.enabled = false;
+
+	assert(scout.init(config).status == ScoutStatus::Ok);
+
+	assert(scout.process(25).status == ScoutStatus::Ok);
+	assert(scout_internal::testSsdpRuns.load() == 1);
+	assert(scout_internal::testNbnsRuns.load() == 0);
+	assert(scout.timeUntilNextWork() == 0);
+
+	assert(scout.process(25).status == ScoutStatus::Ok);
+	assert(scout_internal::testSsdpRuns.load() == 2);
+	assert(scout_internal::testNbnsRuns.load() == 1);
+	assert(scout.timeUntilNextWork() == 0);
+
+	assert(scout.process(25).status == ScoutStatus::Ok);
+	assert(scout_internal::testNbnsRuns.load() == 2);
+	assert(scout.timeUntilNextWork() > 0);
+
+	const ScoutDiagnostics diagnostics = scout.diagnostics();
+	assert(diagnostics.ssdp.budgetYields == 1);
+	assert(diagnostics.nbns.budgetYields == 1);
+	assert(diagnostics.processBudgetYields >= 2);
+	assert(scout.deinit().status == ScoutStatus::Ok);
+}
+
 void testCallerDrivenDeinitCompletesActiveScan() {
 	networkMode.store(NetworkMode::SmallSubnet);
 	Scout scout;
@@ -959,6 +1007,7 @@ ProviderRunStats runMdnsProvider(
 ProviderRunStats runSsdpProvider(
     const ProviderTarget *,
     size_t,
+    SsdpProviderState &state,
     const ScoutSsdpConfig &,
     char *,
     size_t,
@@ -966,19 +1015,42 @@ ProviderRunStats runSsdpProvider(
     void *,
     const ProviderRunControl *
 ) {
-	return {};
+	ProviderRunStats stats{};
+	testSsdpRuns.fetch_add(1);
+	stats.plannedUnits = 2;
+	stats.workUnits = 1;
+	if (testSsdpYieldNext.exchange(false)) {
+		stats.budgetYielded = true;
+		state.interfaceCursor = 1;
+		state.remainingInterfaces = 1;
+	} else {
+		state.remainingInterfaces = 0;
+	}
+	return stats;
 }
 
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *,
     size_t,
-    size_t &,
+    NbnsProviderState &state,
     const ScoutNbnsConfig &,
     EnrichmentSink,
     void *,
     const ProviderRunControl *
 ) {
-	return {};
+	ProviderRunStats stats{};
+	testNbnsRuns.fetch_add(1);
+	stats.plannedUnits = 2;
+	stats.workUnits = 1;
+	if (testNbnsYieldNext.exchange(false)) {
+		stats.budgetYielded = true;
+		state.active = true;
+		state.targetLimit = 2;
+		state.targetOffset = 1;
+	} else {
+		state = {};
+	}
+	return stats;
 }
 
 ProviderRunStats runReverseDnsProvider(
@@ -1035,6 +1107,7 @@ int main() {
 	testIdentityRelationCapacityDoesNotCreateUnbackedGroups();
 	testIdentityGroupMemberLimitIsExplicit();
 	testCallerDrivenExecution();
+	testProviderBudgetContinuation();
 	testCallerDrivenDeinitCompletesActiveScan();
 	testProcessRejectsBackgroundMode();
 	testCallerDrivenDestructionFromCallback();
