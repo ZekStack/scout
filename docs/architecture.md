@@ -60,12 +60,10 @@ A higher-level presence implementation should suppress offline inference while c
 
 ## Bounded resources
 
-The v0.1 foundation uses fixed-capacity Strata-backed buffers allocated during init:
-
-- device registry;
-- subnet target buffer;
-- ARP-before scratch buffer;
-- ARP-after scratch buffer.
+The v0.1 foundation uses bounded Strata-backed storage. The compact device registry, subnet
+targets, provider/identity tables and ARP scratch buffers are allocated during init. Large
+`ScoutDeviceDetails` records are allocated lazily per enriched device, which keeps the configured
+MAC capacity independent from worst-case metadata storage.
 
 A subnet larger than maxHostsPerSubnet is skipped instead of allowing an accidental /16 or /8 sweep.
 
@@ -73,6 +71,15 @@ Device records are also time-bounded. `deviceMaxAgeMs` removes records that have
 
 ## Enrichment and identity
 
-Heavy names, services and metadata live beside the compact event snapshot in `ScoutDeviceDetails`. Providers run on independent schedules and feed normalized observations back through Scout's synchronized registry path. Strong identifiers such as a shared UPnP UDN can create a `ScoutIdentityGroup`; moderate evidence such as a matching mDNS hostname is retained only as a relation. MAC records are never merged solely to make a friendlier physical-device view.
+Heavy names, services and metadata live outside the compact event snapshot in lazily created
+`ScoutDeviceDetails`. Providers run on independent schedules and feed normalized observations
+back through Scout's synchronized registry path. Bounded providers rotate persistent cursors
+across their work sets so a per-run budget cannot permanently starve later targets.
+
+Strong identifiers such as a shared UPnP UDN can create a `ScoutIdentityGroup`; moderate
+evidence such as a matching mDNS hostname is retained only as a relation. Provider-derived
+identity fields retain their source lifetime, and expiry rebuilds the identity graph so stale
+evidence cannot preserve a physical-device group. MAC records are never merged solely to make a
+friendlier physical-device view.
 
 See [`enrichment.md`](enrichment.md) and [`identity.md`](identity.md) for the detailed contracts.
