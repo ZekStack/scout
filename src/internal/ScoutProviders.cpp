@@ -998,8 +998,7 @@ ProviderRunStats runIcmpProvider(
 		return stats;
 	}
 #if SCOUT_HAS_PING
-	const size_t limit =
-	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
+	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
 	stats.plannedUnits = limit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
@@ -1671,8 +1670,7 @@ ProviderRunStats runReverseDnsProvider(
 		return stats;
 	}
 
-	const size_t limit =
-	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
+	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
 	stats.plannedUnits = limit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
