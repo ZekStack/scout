@@ -257,12 +257,7 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		result.status = DnsParseStatus::Malformed;
 		return result;
 	}
-	return parsePtrResponse(
-	    response,
-	    static_cast<size_t>(received),
-	    transactionId,
-	    ipv4Bytes
-	);
+	return parsePtrResponse(response, static_cast<size_t>(received), transactionId, ipv4Bytes);
 }
 
 void appendMetadata(
@@ -608,8 +603,7 @@ bool completeContentLengthBody(const char *data, size_t length) {
 	body += 4;
 	const size_t headerLength = static_cast<size_t>(body - data);
 	for (size_t i = 0; i + 15 < headerLength; ++i) {
-		if ((i == 0 || data[i - 1] == '\n') &&
-		    strncasecmp(data + i, "Content-Length:", 15) == 0) {
+		if ((i == 0 || data[i - 1] == '\n') && strncasecmp(data + i, "Content-Length:", 15) == 0) {
 			const char *value = data + i + 15;
 			while (value < data + headerLength && (*value == ' ' || *value == '\t')) {
 				value++;
@@ -632,11 +626,7 @@ bool completeContentLengthBody(const char *data, size_t length) {
 }
 
 HttpFetchResult fetchHttpBody(
-    const char *url,
-    uint32_t localIpv4,
-    uint32_t timeoutMs,
-    char *scratch,
-    size_t capacity
+    const char *url, uint32_t localIpv4, uint32_t timeoutMs, char *scratch, size_t capacity
 ) {
 	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2) {
@@ -817,7 +807,7 @@ HttpFetchResult fetchHttpBody(
 	if (hasContentLength) {
 		if (declaredLength > bodyLength) {
 			result.status = declaredLength >= capacity ? HttpFetchStatus::TooLarge
-			                                          : HttpFetchStatus::InvalidResponse;
+			                                           : HttpFetchStatus::InvalidResponse;
 			return result;
 		}
 		std::memmove(scratch, body, declaredLength);
@@ -933,7 +923,11 @@ ProviderRunStats runIcmpProvider(
 			observation.source = ScoutObservationSource::Icmp;
 			observation.ipv4 = target.ipv4;
 			observation.interfaceIndex = target.interfaceIndex;
-			copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target.interfaceKey);
+			copyText(
+			    observation.interfaceKey,
+			    sizeof(observation.interfaceKey),
+			    target.interfaceKey
+			);
 			observation.confirmed = true;
 			sink(target.mac, observation, context);
 			stats.observations++;
@@ -1218,8 +1212,7 @@ ProviderRunStats runSsdpProvider(
 			const size_t descriptionBudget =
 			    std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun);
 			const bool newDescriptionLocation =
-			    parsed.location[0] != '\0' &&
-			    rememberLocation(interfaceInfo.key, parsed.location);
+			    parsed.location[0] != '\0' && rememberLocation(interfaceInfo.key, parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
 			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
 				const HttpFetchResult fetch = fetchHttpBody(
@@ -1436,7 +1429,11 @@ ProviderRunStats runReverseDnsProvider(
 			observation.source = ScoutObservationSource::ReverseDns;
 			observation.ipv4 = target.ipv4;
 			observation.interfaceIndex = target.interfaceIndex;
-			copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target.interfaceKey);
+			copyText(
+			    observation.interfaceKey,
+			    sizeof(observation.interfaceKey),
+			    target.interfaceKey
+			);
 			const uint64_t expiresAt = expiryFromTtl(now, answer.ttlSeconds, config.maxAgeMs);
 			addName(observation, ScoutNameSource::ReverseDns, answer.hostname, now, expiresAt);
 			sink(target.mac, observation, context);
