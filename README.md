@@ -24,7 +24,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC
 
 ## Install
 
-Scout `0.1.0` requires Strata `v0.1.2`, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
+Scout `0.1.0` requires the Strata `v0.1.3` compatibility fix, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
 
 ### PlatformIO
 
@@ -42,7 +42,7 @@ framework = arduino
 
 lib_deps =
   https://github.com/ZekStack/scout.git#v0.1.0
-  https://github.com/ZekStack/strata.git#v0.1.2
+  https://github.com/ZekStack/strata.git#fix-esp32-platform-detection
 
 build_flags =
   -std=gnu++20
@@ -50,7 +50,7 @@ build_unflags =
   -std=gnu++11
 ```
 
-Scout's `library.json` pins Strata `v0.1.2`, so PIOArduino can also resolve Strata transitively.
+Scout's `library.json` temporarily pins the Strata `v0.1.3` compatibility branch while that release is validated; it will be replaced with the `v0.1.3` tag before the Scout release.
 
 ### Arduino IDE
 
@@ -269,7 +269,7 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 | Language | C++20 |
 | Network layer | ESP-NETIF and public lwIP ARP APIs |
 | Memory policy | `PreferExternal` by default for Scout-owned movable storage and task stack |
-| Dependencies | Strata `v0.1.2` |
+| Dependencies | Strata `v0.1.3` compatibility fix |
 | Exceptions | Not used for Scout public error handling |
 | Status | `0.1.0` |
 
