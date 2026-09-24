@@ -384,14 +384,35 @@ void testDnsPtrCodec() {
 	response[offset++] = 0;
 
 	const auto parsed =
-	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	    scout_internal::parsePtrResponse(response, offset, transactionId, address);
 	assert(parsed.status == scout_internal::DnsParseStatus::Ok);
 	assert(std::strcmp(parsed.hostname, "device.local") == 0);
 	assert(parsed.ttlSeconds == 120);
 
+	uint8_t shortRdata[256]{};
+	std::memcpy(shortRdata, response, offset);
+	shortRdata[queryLength + 10] = 0;
+	shortRdata[queryLength + 11] = 1;
+	const auto shortRdataResult =
+	    scout_internal::parsePtrResponse(shortRdata, offset, transactionId, address);
+	assert(shortRdataResult.status == scout_internal::DnsParseStatus::Malformed);
+
+	uint8_t wrongQuestion[256]{};
+	std::memcpy(wrongQuestion, response, offset);
+	wrongQuestion[queryLength - 4] = 0;
+	wrongQuestion[queryLength - 3] = 1;
+	const auto wrongQuestionResult =
+	    scout_internal::parsePtrResponse(wrongQuestion, offset, transactionId, address);
+	assert(wrongQuestionResult.status == scout_internal::DnsParseStatus::Malformed);
+
+	const uint8_t differentAddress[4] = {192, 168, 1, 43};
+	const auto mismatchedQuestion =
+	    scout_internal::parsePtrResponse(response, offset, transactionId, differentAddress);
+	assert(mismatchedQuestion.status == scout_internal::DnsParseStatus::Malformed);
+
 	response[3] = 0x83;
 	const auto noRecord =
-	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	    scout_internal::parsePtrResponse(response, offset, transactionId, address);
 	assert(noRecord.status == scout_internal::DnsParseStatus::NoRecord);
 
 	response[3] = 0x80;
@@ -403,7 +424,7 @@ void testDnsPtrCodec() {
 	    static_cast<uint8_t>(0xC0U | ((pointerOffset >> 8U) & 0x3FU));
 	response[offset++] = static_cast<uint8_t>(pointerOffset & 0xFFU);
 	const auto malformed =
-	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	    scout_internal::parsePtrResponse(response, offset, transactionId, address);
 	assert(malformed.status == scout_internal::DnsParseStatus::Malformed);
 }
 
@@ -441,17 +462,56 @@ void testSsdpAndUpnpParsing() {
 
 void testNbnsParsing() {
 	uint8_t response[64]{};
-	constexpr size_t CountOffset = 20;
-	response[CountOffset] = 1;
-	uint8_t *entry = response + CountOffset + 1;
+	constexpr uint16_t TransactionId = 0x4321;
+	response[0] = 0x43;
+	response[1] = 0x21;
+	response[2] = 0x85;
+	response[3] = 0x00;
+	response[6] = 0;
+	response[7] = 1;
+
+	size_t offset = 12;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 0x21;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	offset += 4;
+	response[offset++] = 0;
+	response[offset++] = 19;
+	response[offset++] = 1;
+	uint8_t *entry = response + offset;
 	std::memcpy(entry, "DESKTOP-ABC    ", 15);
 	entry[15] = 0x00;
 	entry[16] = 0x00;
 	entry[17] = 0x00;
+	offset += 18;
 
 	char name[SCOUT_NAME_SIZE]{};
-	assert(scout_internal::parseNbnsNodeStatusName(response, sizeof(response), name, sizeof(name)));
+	assert(scout_internal::parseNbnsNodeStatusName(
+	    response,
+	    offset,
+	    TransactionId,
+	    name,
+	    sizeof(name)
+	));
 	assert(std::strcmp(name, "DESKTOP-ABC") == 0);
+	assert(!scout_internal::parseNbnsNodeStatusName(
+	    response,
+	    offset,
+	    static_cast<uint16_t>(TransactionId + 1),
+	    name,
+	    sizeof(name)
+	));
+
+	response[2] = 0;
+	assert(!scout_internal::parseNbnsNodeStatusName(
+	    response,
+	    offset,
+	    TransactionId,
+	    name,
+	    sizeof(name)
+	));
 }
 
 void testIdentityEvidenceAndContradictions() {
@@ -498,6 +558,8 @@ void testIdentityEvidenceAndContradictions() {
 	));
 	assert(relation.evidence.confidence == ScoutIdentityConfidence::Moderate);
 
+	std::strcpy(firstDetails.persistentDeviceNamespace, "_hap._tcp");
+	std::strcpy(secondDetails.persistentDeviceNamespace, "_hap._tcp");
 	std::strcpy(firstDetails.persistentDeviceId, "id-a");
 	std::strcpy(secondDetails.persistentDeviceId, "id-b");
 	assert(!scout_internal::identityRelation(
@@ -507,6 +569,17 @@ void testIdentityEvidenceAndContradictions() {
 	    secondDetails,
 	    relation
 	));
+
+	std::strcpy(secondDetails.persistentDeviceNamespace, "_googlecast._tcp");
+	std::strcpy(secondDetails.persistentDeviceId, "id-a");
+	assert(scout_internal::identityRelation(
+	    first,
+	    firstDetails,
+	    second,
+	    secondDetails,
+	    relation
+	));
+	assert(relation.evidence.confidence == ScoutIdentityConfidence::Moderate);
 
 	ScoutDeviceKey members[2]{first.key, second.key};
 	assert(scout_internal::identityGroupRuntimeId(members, 2) != 0);
@@ -531,12 +604,18 @@ void testDetailsMerge() {
 	);
 	std::strcpy(second.manufacturer, "Example");
 	std::strcpy(second.modelName, "Speaker");
+	std::strcpy(second.persistentDeviceId, "device-42");
+	std::strcpy(second.persistentDeviceNamespace, "_hap._tcp");
+	second.persistentDeviceIdSource = ScoutObservationSource::Mdns;
+	second.persistentDeviceIdExpiresAtMs = 900;
 	second.lastEnrichedAtMs = 110;
 
 	scout_internal::mergeDeviceDetails(first, second);
 	assert(first.nameCount == 2);
 	assert(std::strcmp(first.manufacturer, "Example") == 0);
 	assert(std::strcmp(first.modelName, "Speaker") == 0);
+	assert(std::strcmp(first.persistentDeviceId, "device-42") == 0);
+	assert(std::strcmp(first.persistentDeviceNamespace, "_hap._tcp") == 0);
 	assert(first.lastEnrichedAtMs == 110);
 }
 
