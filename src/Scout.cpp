@@ -915,8 +915,7 @@ struct ScoutImpl {
 						continue;
 					}
 					const bool retained = storeIdentityRelation(relation);
-					const auto confidence =
-					    static_cast<uint8_t>(relation.evidence.confidence);
+					const auto confidence = static_cast<uint8_t>(relation.evidence.confidence);
 					const auto strongConfidence =
 					    static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
 					if (!retained || confidence < strongConfidence) {
