@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   format:
-    runs-on: [self-hosted, zekstack-ci]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
