@@ -2129,12 +2129,16 @@ struct ScoutImpl {
 				scanProgress.batchPending = false;
 				scanProgress.batchCount = 0;
 				scanProgress.batchReadyAt = 0;
-				scanProgress.nextBatchAt =
-				    config.interBatchDelayMs > 0 ? nowMs() + config.interBatchDelayMs : 0;
-				incrementalScanWakeAt.store(
-				    scanProgress.nextBatchAt > 0 ? scanProgress.nextBatchAt : nowMs(),
-				    std::memory_order_release
-				);
+				if (config.interBatchDelayMs > 0) {
+					scanProgress.nextBatchAt = nowMs() + config.interBatchDelayMs;
+				} else {
+					scanProgress.nextBatchAt = 0;
+				}
+				uint64_t wakeAt = scanProgress.nextBatchAt;
+				if (wakeAt == 0) {
+					wakeAt = nowMs();
+				}
+				incrementalScanWakeAt.store(wakeAt, std::memory_order_release);
 				return false;
 			}
 
