@@ -252,7 +252,8 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		                    : DnsParseStatus::NetworkError;
 		return result;
 	}
-	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr) {
+	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr ||
+	    sender.sin_port != destination.sin_port) {
 		result.status = DnsParseStatus::Malformed;
 		return result;
 	}
@@ -300,14 +301,36 @@ void addName(
 	name.expiresAtMs = expiresAt;
 }
 
+bool persistentTxtIdHasStrongSemantics(const char *service, const char *key) {
+	if (service == nullptr || key == nullptr) {
+		return false;
+	}
+	const bool idKey = textEqualsIgnoreCase(key, "id");
+	if (!idKey) {
+		return false;
+	}
+	return textEqualsIgnoreCase(service, "_googlecast") || textEqualsIgnoreCase(service, "_hap");
+}
+
 void maybeSetPersistentField(
-    EnrichmentObservation &observation, const char *key, const char *value
+    EnrichmentObservation &observation,
+    const char *service,
+    const char *proto,
+    const char *key,
+    const char *value
 ) {
 	if (key == nullptr || value == nullptr || value[0] == '\0') {
 		return;
 	}
-	if (textEqualsIgnoreCase(key, "deviceid") || textEqualsIgnoreCase(key, "device_id")) {
+	if (persistentTxtIdHasStrongSemantics(service, key)) {
 		copyText(observation.persistentDeviceId, sizeof(observation.persistentDeviceId), value);
+		std::snprintf(
+		    observation.persistentDeviceNamespace,
+		    sizeof(observation.persistentDeviceNamespace),
+		    "%s.%s",
+		    service,
+		    proto != nullptr ? proto : ""
+		);
 	} else if (textEqualsIgnoreCase(key, "serial") || textEqualsIgnoreCase(key, "serialnumber")) {
 		copyText(observation.serialNumber, sizeof(observation.serialNumber), value);
 	} else if (textEqualsIgnoreCase(key, "manufacturer") || textEqualsIgnoreCase(key, "vendor")) {
@@ -448,7 +471,13 @@ void emitMdnsResult(
 			metadata.firstSeenAtMs = now;
 			metadata.lastSeenAtMs = now;
 			metadata.expiresAtMs = expiresAt;
-			maybeSetPersistentField(observation, metadata.key, metadata.value);
+			maybeSetPersistentField(
+			    observation,
+			    result.service_type,
+			    result.proto,
+			    metadata.key,
+			    metadata.value
+			);
 		}
 		if (result.txt_count > ProviderObservationMetadataCapacity) {
 			stats.dropped += result.txt_count - ProviderObservationMetadataCapacity;
@@ -529,7 +558,80 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	return out.host[0] != '\0';
 }
 
-HttpFetchResult fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t capacity) {
+bool sendAll(int fd, const char *data, size_t length) {
+	size_t sent = 0;
+	while (sent < length) {
+		const int count = send(fd, data + sent, length - sent, 0);
+		if (count <= 0) {
+			return false;
+		}
+		sent += static_cast<size_t>(count);
+	}
+	return true;
+}
+
+bool hasChunkedTransferEncoding(const char *data, size_t length) {
+	const char *body = std::strstr(data, "\r\n\r\n");
+	if (body == nullptr || body >= data + length) {
+		return false;
+	}
+	const size_t headerLength = static_cast<size_t>(body - data) + 4;
+	for (size_t i = 0; i + 18 < headerLength; ++i) {
+		if ((i == 0 || data[i - 1] == '\n') &&
+		    strncasecmp(data + i, "Transfer-Encoding:", 18) == 0) {
+			const char *value = data + i + 18;
+			const char *lineEnd = std::strstr(value, "\r\n");
+			if (lineEnd == nullptr || lineEnd > data + headerLength) {
+				return false;
+			}
+			for (const char *p = value; p + 7 <= lineEnd; ++p) {
+				if (strncasecmp(p, "chunked", 7) == 0) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool completeContentLengthBody(const char *data, size_t length) {
+	const char *body = std::strstr(data, "\r\n\r\n");
+	if (body == nullptr || body >= data + length) {
+		return false;
+	}
+	body += 4;
+	const size_t headerLength = static_cast<size_t>(body - data);
+	for (size_t i = 0; i + 15 < headerLength; ++i) {
+		if ((i == 0 || data[i - 1] == '\n') &&
+		    strncasecmp(data + i, "Content-Length:", 15) == 0) {
+			const char *value = data + i + 15;
+			while (value < data + headerLength && (*value == ' ' || *value == '\t')) {
+				value++;
+			}
+			size_t declared = 0;
+			bool hasDigit = false;
+			while (value < data + headerLength && *value >= '0' && *value <= '9') {
+				const size_t digit = static_cast<size_t>(*value - '0');
+				if (declared > (SIZE_MAX - digit) / 10U) {
+					return false;
+				}
+				hasDigit = true;
+				declared = declared * 10U + digit;
+				value++;
+			}
+			return hasDigit && length - headerLength >= declared;
+		}
+	}
+	return false;
+}
+
+HttpFetchResult fetchHttpBody(
+    const char *url,
+    uint32_t localIpv4,
+    uint32_t timeoutMs,
+    char *scratch,
+    size_t capacity
+) {
 	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2) {
 		return result;
@@ -557,6 +659,17 @@ HttpFetchResult fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch
 		return result;
 	}
 	setSocketTimeout(fd, timeoutMs);
+	sockaddr_in local{};
+	local.sin_family = AF_INET;
+	local.sin_port = 0;
+	local.sin_addr.s_addr = localIpv4;
+	if (localIpv4 == 0 ||
+	    bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) != 0) {
+		close(fd);
+		freeaddrinfo(resolved);
+		result.status = HttpFetchStatus::NetworkError;
+		return result;
+	}
 	if (connect(fd, resolved->ai_addr, resolved->ai_addrlen) != 0) {
 		const int socketError = errno;
 		close(fd);
@@ -580,7 +693,7 @@ HttpFetchResult fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch
 	    static_cast<unsigned>(parsed.port)
 	);
 	if (requestLength <= 0 || static_cast<size_t>(requestLength) >= sizeof(request) ||
-	    send(fd, request, static_cast<size_t>(requestLength), 0) < 0) {
+	    !sendAll(fd, request, static_cast<size_t>(requestLength))) {
 		close(fd);
 		result.status = HttpFetchStatus::NetworkError;
 		return result;
@@ -604,6 +717,16 @@ HttpFetchResult fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch
 			return result;
 		}
 		received += static_cast<size_t>(count);
+		scratch[received] = '\0';
+		if (hasChunkedTransferEncoding(scratch, received)) {
+			close(fd);
+			result.status = HttpFetchStatus::UnsupportedEncoding;
+			return result;
+		}
+		if (completeContentLengthBody(scratch, received)) {
+			peerClosed = true;
+			break;
+		}
 	}
 	close(fd);
 	scratch[received] = '\0';
@@ -826,6 +949,7 @@ ProviderRunStats runMdnsProvider(
 
 	MdnsServiceType types[MaxMdnsServiceTypes]{};
 	size_t typeCount = 0;
+	const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
 	constexpr struct {
 		const char *service;
 		const char *proto;
@@ -842,7 +966,7 @@ ProviderRunStats runMdnsProvider(
 	    {"_esphomelib", "_tcp"},
 	};
 	for (const auto &service : CommonServices) {
-		addServiceType(types, typeCount, MaxMdnsServiceTypes, service.service, service.proto);
+		addServiceType(types, typeCount, serviceTypeCapacity, service.service, service.proto);
 	}
 
 	mdns_result_t *serviceTypes = nullptr;
@@ -851,7 +975,7 @@ ProviderRunStats runMdnsProvider(
 	        "_services._dns-sd",
 	        "_udp",
 	        enumerationTimeout,
-	        std::min(config.maxServiceTypes, MaxMdnsServiceTypes),
+	        serviceTypeCapacity,
 	        &serviceTypes
 	    ) == ESP_OK) {
 		for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
@@ -866,8 +990,8 @@ ProviderRunStats runMdnsProvider(
 			        proto,
 			        sizeof(proto)
 			    )) {
-				if (!addServiceType(types, typeCount, MaxMdnsServiceTypes, service, proto) &&
-				    typeCount >= MaxMdnsServiceTypes) {
+				if (!addServiceType(types, typeCount, serviceTypeCapacity, service, proto) &&
+				    typeCount >= serviceTypeCapacity) {
 					stats.dropped++;
 				}
 			}
@@ -946,13 +1070,15 @@ ProviderRunStats runSsdpProvider(
 
 	size_t descriptionFetches = 0;
 	char fetchedLocations[MaxSsdpDescriptionFetches][256]{};
+	char fetchedLocationInterfaces[MaxSsdpDescriptionFetches][SCOUT_INTERFACE_KEY_SIZE]{};
 	size_t fetchedLocationCount = 0;
-	auto rememberLocation = [&](const char *location) {
+	auto rememberLocation = [&](const char *interfaceKey, const char *location) {
 		if (location == nullptr || location[0] == '\0') {
 			return false;
 		}
 		for (size_t i = 0; i < fetchedLocationCount; ++i) {
-			if (textEqualsIgnoreCase(fetchedLocations[i], location)) {
+			if (textEqualsIgnoreCase(fetchedLocations[i], location) &&
+			    textEqualsIgnoreCase(fetchedLocationInterfaces[i], interfaceKey)) {
 				return false;
 			}
 		}
@@ -963,6 +1089,11 @@ ProviderRunStats runSsdpProvider(
 		    fetchedLocations[fetchedLocationCount],
 		    sizeof(fetchedLocations[fetchedLocationCount]),
 		    location
+		);
+		copyText(
+		    fetchedLocationInterfaces[fetchedLocationCount],
+		    sizeof(fetchedLocationInterfaces[fetchedLocationCount]),
+		    interfaceKey
 		);
 		fetchedLocationCount++;
 		return true;
@@ -1060,11 +1191,13 @@ ProviderRunStats runSsdpProvider(
 			const size_t descriptionBudget =
 			    std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun);
 			const bool newDescriptionLocation =
-			    parsed.location[0] != '\0' && rememberLocation(parsed.location);
+			    parsed.location[0] != '\0' &&
+			    rememberLocation(interfaceInfo.key, parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
 			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
 				const HttpFetchResult fetch = fetchHttpBody(
 				    parsed.location,
+				    interfaceInfo.ipv4,
 				    config.httpTimeoutMs,
 				    httpScratch,
 				    httpScratchCapacity
