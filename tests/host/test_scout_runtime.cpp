@@ -340,6 +340,131 @@ void testLazyDetailsAllocation() {
 	runtime.releaseBuffers();
 }
 
+void testStaleProviderObservationAndDiagnostics() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+
+	const uint8_t firstMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x10};
+	const uint8_t secondMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x20};
+	const uint32_t address = lwip_htonl(0xC0A8012AU);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    firstMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	const size_t firstIndex = runtime.findDeviceByMac(firstMac);
+	assert(firstIndex != SIZE_MAX);
+	const uint64_t firstSeen = runtime.devices[firstIndex].info.lastSeenAtMs;
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    secondMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    2
+	);
+	assert(runtime.devices[firstIndex].info.endpointCount == 0);
+
+	scout_internal::EnrichmentObservation stale{};
+	stale.source = ScoutObservationSource::ReverseDns;
+	stale.ipv4.value = address;
+	stale.interfaceIndex = 1;
+	stale.nameCount = 1;
+	stale.names[0].source = ScoutNameSource::ReverseDns;
+	std::strcpy(stale.names[0].value, "stale.example");
+	stale.names[0].lastSeenAtMs = nowMs();
+	stale.names[0].expiresAtMs = nowMs() + 1000;
+	runtime.applyEnrichmentObservation(runtime.devices[firstIndex].info.mac, stale);
+	assert(runtime.diag.staleProviderObservations == 1);
+	assert(runtime.devices[firstIndex].info.lastSeenAtMs == firstSeen);
+	assert(!runtime.devices[firstIndex].details);
+
+	const size_t secondIndex = runtime.findDeviceByMac(secondMac);
+	assert(secondIndex != SIZE_MAX);
+	runtime.devices[secondIndex].info.lastSeenAtMs = 123;
+	runtime.devices[secondIndex].info.endpoints[0].lastSeenAtMs = 123;
+	scout_internal::EnrichmentObservation confirmation{};
+	confirmation.source = ScoutObservationSource::Icmp;
+	confirmation.ipv4.value = address;
+	confirmation.interfaceIndex = 1;
+	confirmation.confirmed = true;
+	runtime.applyEnrichmentObservation(runtime.devices[secondIndex].info.mac, confirmation);
+	assert(runtime.devices[secondIndex].info.lastSeenAtMs == 123);
+	assert(runtime.devices[secondIndex].info.endpoints[0].lastSeenAtMs == 123);
+	assert(runtime.devices[secondIndex].info.lastConfirmedAtMs >= 123);
+
+	scout_internal::ProviderRunStats stats{};
+	stats.observations = 1;
+	stats.errors = 2;
+	stats.timeouts = 3;
+	stats.noRecords = 4;
+	stats.malformedResponses = 5;
+	stats.serverErrors = 6;
+	stats.dropped = 7;
+	ScoutProviderDiagnostics diagnostics{};
+	runtime.accumulateProviderStats(diagnostics, stats);
+	assert(diagnostics.runs == 1);
+	assert(diagnostics.observations == 1);
+	assert(diagnostics.errors == 2);
+	assert(diagnostics.timeouts == 3);
+	assert(diagnostics.noRecords == 4);
+	assert(diagnostics.malformedResponses == 5);
+	assert(diagnostics.serverErrors == 6);
+	assert(diagnostics.droppedObservations == 7);
+
+	runtime.releaseBuffers();
+}
+
+void testFormattingHelpers() {
+	char buffer[64]{};
+
+	ScoutIpv4Address ipv4Address{};
+	ipv4Address.value = lwip_htonl(0xC0A8012AU);
+	assert(scoutFormatIpv4(ipv4Address, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "192.168.1.42") == 0);
+
+	ScoutMacAddress mac{{0x00, 0x11, 0x22, 0xAA, 0xBB, 0xCC}};
+	assert(scoutFormatMac(mac, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "00:11:22:AA:BB:CC") == 0);
+
+	ScoutIpv6Address ipv6{};
+	const uint8_t bytes[16] = {
+	    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+	};
+	std::memcpy(ipv6.bytes, bytes, sizeof(bytes));
+	assert(scoutFormatIpv6(ipv6, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "2001:db8::1") == 0);
+
+	ScoutIpv6Address zero{};
+	assert(scoutFormatIpv6(zero, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "::") == 0);
+
+	char tiny[4]{};
+	assert(!scoutFormatMac(mac, tiny, sizeof(tiny)));
+	assert(tiny[0] == '\0');
+}
+
+void testInvalidSsdpHttpTimeout() {
+	Scout scout;
+	ScoutConfig config;
+	config.scanOnInit = false;
+	config.providers.ssdp.enabled = true;
+	config.providers.ssdp.fetchDeviceDescription = true;
+	config.providers.ssdp.httpTimeoutMs = 0;
+	const ScoutResult result = scout.init(config);
+	assert(result.status == ScoutStatus::InvalidConfig);
+}
+
 void testIdentityGroupingKeepsModerateRelationsSeparate() {
 	ScoutImpl runtime;
 	assert(runtime.allocateBuffers(runtime.config));
@@ -543,6 +668,9 @@ int main() {
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
 	testLazyDetailsAllocation();
+	testStaleProviderObservationAndDiagnostics();
+	testFormattingHelpers();
+	testInvalidSsdpHttpTimeout();
 	testIdentityGroupingKeepsModerateRelationsSeparate();
 	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
