@@ -48,7 +48,10 @@ Registry maintenance preserves three invariants:
 - no duplicate endpoint inside one device;
 - one current MAC owner for each `(interface, IPv4)` endpoint across the registry.
 
-If an endpoint is later observed on another MAC, ownership moves to the new observation but the older device record remains until its retention age expires.
+If an endpoint is later observed on another MAC, ownership moves to the new observation but the
+older device record remains until its retention age expires. Enrichment providers operate from
+snapshots of these endpoints and revalidate ownership before applying a delayed result, so an
+IP-only response cannot attach metadata to a MAC that no longer owns the address.
 
 ## Coverage
 
@@ -78,8 +81,9 @@ across their work sets so a per-run budget cannot permanently starve later targe
 
 Strong identifiers such as a shared UPnP UDN can create a `ScoutIdentityGroup`; moderate
 evidence such as a matching mDNS hostname is retained only as a relation. Provider-derived
-identity fields retain their source lifetime, and expiry rebuilds the identity graph so stale
-evidence cannot preserve a physical-device group. MAC records are never merged solely to make a
-friendlier physical-device view.
+identity fields retain their source lifetime, and expiry runs independently from the ARP scan
+cadence before rebuilding the identity graph so stale evidence cannot preserve a physical-device
+group. Strong mDNS identifiers are service-namespaced; generic TXT coincidences remain metadata or
+moderate evidence. MAC records are never merged solely to make a friendlier physical-device view.
 
 See [`enrichment.md`](enrichment.md) and [`identity.md`](identity.md) for the detailed contracts.
