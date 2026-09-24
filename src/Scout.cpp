@@ -1996,12 +1996,12 @@ bool scoutFormatMac(const ScoutMacAddress &address, char *out, size_t capacity) 
 	    out,
 	    capacity,
 	    "%02X:%02X:%02X:%02X:%02X:%02X",
-	    address.bytes[0],
-	    address.bytes[1],
-	    address.bytes[2],
-	    address.bytes[3],
-	    address.bytes[4],
-	    address.bytes[5]
+	    static_cast<unsigned>(address.bytes[0]),
+	    static_cast<unsigned>(address.bytes[1]),
+	    static_cast<unsigned>(address.bytes[2]),
+	    static_cast<unsigned>(address.bytes[3]),
+	    static_cast<unsigned>(address.bytes[4]),
+	    static_cast<unsigned>(address.bytes[5])
 	);
 	if (written < 0 || static_cast<size_t>(written) >= capacity) {
 		out[0] = '\0';
