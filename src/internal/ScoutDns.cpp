@@ -79,8 +79,7 @@ bool decodeName(
 		if (label == 0) {
 			break;
 		}
-		if (label > 63 || cursor + label > length ||
-		    (!jumped && cursor + label > encodedEnd)) {
+		if (label > 63 || cursor + label > length || (!jumped && cursor + label > encodedEnd)) {
 			return false;
 		}
 		if (output != 0) {
@@ -136,10 +135,7 @@ size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out
 }
 
 DnsPtrAnswer parsePtrResponse(
-    const uint8_t *data,
-    size_t length,
-    uint16_t transactionId,
-    const uint8_t expectedIpv4[4]
+    const uint8_t *data, size_t length, uint16_t transactionId, const uint8_t expectedIpv4[4]
 ) {
 	DnsPtrAnswer result{};
 	if (data == nullptr || length < 12 || read16(data) != transactionId) {
@@ -171,15 +167,7 @@ DnsPtrAnswer parsePtrResponse(
 	size_t offset = 12;
 	char scratch[256] = {};
 	size_t questionConsumed = 0;
-	if (!decodeName(
-	        data,
-	        length,
-	        offset,
-	        scratch,
-	        sizeof(scratch),
-	        questionConsumed,
-	        length
-	    ) ||
+	if (!decodeName(data, length, offset, scratch, sizeof(scratch), questionConsumed, length) ||
 	    offset + questionConsumed + 4 > length) {
 		return result;
 	}
