@@ -2,6 +2,7 @@
 
 #include "ScoutDns.h"
 #include "ScoutEnrichment.h"
+#include "ScoutNetwork.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +13,6 @@
 #include <strings.h>
 
 #include <esp_netif.h>
-#include <esp_netif_net_stack.h>
 #include <esp_timer.h>
 #include <lwip/inet.h>
 #include <lwip/netdb.h>
@@ -36,23 +36,10 @@
 namespace scout_internal {
 namespace {
 
-constexpr size_t MaxLocalInterfaces = 8;
 constexpr size_t MaxMdnsServiceTypes = 64;
 constexpr size_t MaxProviderTargetsPerRun = 32;
 constexpr size_t MaxSsdpDescriptionFetches = 16;
 constexpr uint32_t SocketPollMs = 50;
-
-struct LocalInterface {
-	uint32_t ipv4 = 0;
-	uint32_t netmask = 0;
-	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
-};
-
-struct LocalInterfaceCollectContext {
-	LocalInterface *out = nullptr;
-	size_t capacity = 0;
-	size_t count = 0;
-};
 
 struct MdnsServiceType {
 	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
@@ -85,45 +72,6 @@ uint64_t mdnsRetentionFloorMs(
 	    config.fallbackMaxAgeMs,
 	    static_cast<uint64_t>(config.intervalMs) * retentionRuns
 	);
-}
-
-esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
-	auto *context = static_cast<LocalInterfaceCollectContext *>(rawContext);
-	if (context == nullptr || context->out == nullptr || context->capacity == 0) {
-		return ESP_ERR_INVALID_ARG;
-	}
-
-	context->count = 0;
-	esp_netif_t *netif = nullptr;
-	while ((netif = esp_netif_next_unsafe(netif)) != nullptr && context->count < context->capacity
-	) {
-		esp_netif_ip_info_t info{};
-		if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0 ||
-		    info.netmask.addr == 0) {
-			continue;
-		}
-		auto &item = context->out[context->count++];
-		item = {};
-		item.ipv4 = info.ip.addr;
-		item.netmask = info.netmask.addr;
-		const char *key = esp_netif_get_ifkey(netif);
-		copyText(item.key, sizeof(item.key), key != nullptr ? key : "");
-	}
-	return ESP_OK;
-}
-
-size_t collectLocalInterfaces(LocalInterface *out, size_t capacity) {
-	if (out == nullptr || capacity == 0) {
-		return 0;
-	}
-	LocalInterfaceCollectContext context{
-	    .out = out,
-	    .capacity = capacity,
-	};
-	if (esp_netif_tcpip_exec(collectLocalInterfacesTcpip, &context) != ESP_OK) {
-		return 0;
-	}
-	return context.count;
 }
 
 bool targetMatchesInterface(const ProviderTarget &target, const char *interfaceKey) {
@@ -1221,8 +1169,13 @@ ProviderRunStats runSsdpProvider(
 		return stats;
 	}
 
-	LocalInterface interfaces[MaxLocalInterfaces]{};
-	const size_t interfaceCount = collectLocalInterfaces(interfaces, MaxLocalInterfaces);
+	InterfaceSnapshot interfaces[MaxInterfaces]{};
+	size_t interfaceCount = 0;
+	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
+		stats.errors++;
+		stats.transportErrors++;
+		return stats;
+	}
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
 	                          "MAN: \"ssdp:discover\"\r\n"
@@ -1474,8 +1427,12 @@ ProviderRunStats runNbnsProvider(
 		return stats;
 	}
 
-	LocalInterface interfaces[MaxLocalInterfaces]{};
-	const size_t interfaceCount = collectLocalInterfaces(interfaces, MaxLocalInterfaces);
+	InterfaceSnapshot interfaces[MaxInterfaces]{};
+	size_t interfaceCount = 0;
+	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
+		stats.errors++;
+		return stats;
+	}
 	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, SocketPollMs);
