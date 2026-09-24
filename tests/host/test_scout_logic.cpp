@@ -1,3 +1,4 @@
+#include "internal/ScoutDns.h"
 #include "internal/ScoutEnrichment.h"
 #include "internal/ScoutLogic.h"
 
@@ -323,12 +324,85 @@ void testEnrichmentUpsertPreferredNameAndExpiry() {
 	assert(details.metadataCount == 0);
 	assert(details.nameCount == 2);
 
+	std::strcpy(details.upnpUdn, "uuid:ttl-device");
+	details.upnpUdnSource = ScoutObservationSource::Ssdp;
+	details.upnpUdnExpiresAtMs = 1250;
+	std::strcpy(details.serialNumber, "SERIAL-TTL");
+	details.serialNumberSource = ScoutObservationSource::Ssdp;
+	details.serialNumberExpiresAtMs = 1250;
+
 	const auto secondExpiry = scout_internal::expireEnrichment(details, 1300);
 	assert(
 	    (scoutDeviceChangeMask(secondExpiry) &
 	     scoutDeviceChangeMask(ScoutDeviceChange::Name)) != 0
 	);
+	assert(
+	    (scoutDeviceChangeMask(secondExpiry) &
+	     scoutDeviceChangeMask(ScoutDeviceChange::Identity)) != 0
+	);
 	assert(details.nameCount == 0);
+	assert(details.upnpUdn[0] == '\0');
+	assert(details.serialNumber[0] == '\0');
+}
+
+
+void testDnsPtrCodec() {
+	const uint8_t address[4] = {192, 168, 1, 42};
+	uint8_t query[128]{};
+	const uint16_t transactionId = 0x1234;
+	const size_t queryLength =
+	    scout_internal::buildPtrQuery(transactionId, address, query, sizeof(query));
+	assert(queryLength > 20);
+	assert(query[0] == 0x12 && query[1] == 0x34);
+	assert(query[12] == 2 && query[13] == '4' && query[14] == '2');
+
+	uint8_t response[256]{};
+	std::memcpy(response, query, queryLength);
+	response[2] = 0x81;
+	response[3] = 0x80;
+	response[6] = 0;
+	response[7] = 1;
+	size_t offset = queryLength;
+	response[offset++] = 0xC0;
+	response[offset++] = 0x0C;
+	response[offset++] = 0;
+	response[offset++] = 12;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 120;
+	response[offset++] = 0;
+	response[offset++] = 14;
+	response[offset++] = 6;
+	std::memcpy(response + offset, "device", 6);
+	offset += 6;
+	response[offset++] = 5;
+	std::memcpy(response + offset, "local", 5);
+	offset += 5;
+	response[offset++] = 0;
+
+	const auto parsed =
+	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	assert(parsed.status == scout_internal::DnsParseStatus::Ok);
+	assert(std::strcmp(parsed.hostname, "device.local") == 0);
+	assert(parsed.ttlSeconds == 120);
+
+	response[3] = 0x83;
+	const auto noRecord =
+	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	assert(noRecord.status == scout_internal::DnsParseStatus::NoRecord);
+
+	response[3] = 0x80;
+	response[6] = 0;
+	response[7] = 1;
+	offset = queryLength;
+	response[offset++] = 0xC0;
+	response[offset++] = static_cast<uint8_t>(offset - 1);
+	const auto malformed =
+	    scout_internal::parsePtrResponse(response, offset, transactionId);
+	assert(malformed.status == scout_internal::DnsParseStatus::Malformed);
 }
 
 void testSsdpAndUpnpParsing() {
@@ -474,6 +548,7 @@ int main() {
 	testEndpointIpv6RemovalAndExpiry();
 	testMergeDeviceInfo();
 	testEnrichmentUpsertPreferredNameAndExpiry();
+	testDnsPtrCodec();
 	testSsdpAndUpnpParsing();
 	testNbnsParsing();
 	testIdentityEvidenceAndContradictions();
