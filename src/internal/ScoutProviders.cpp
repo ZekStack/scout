@@ -69,9 +69,7 @@ uint32_t providerRemainingMs(const ProviderRunControl *control, uint32_t fallbac
 	if (now >= control->deadlineMs) {
 		return 0;
 	}
-	return static_cast<uint32_t>(
-	    std::min<uint64_t>(fallbackMs, control->deadlineMs - now)
-	);
+	return static_cast<uint32_t>(std::min<uint64_t>(fallbackMs, control->deadlineMs - now));
 }
 
 uint64_t expiryFromTtl(uint64_t now, uint32_t ttlSeconds, uint64_t fallbackMs) {
@@ -985,10 +983,9 @@ ProviderRunStats runIcmpProvider(
 #if SCOUT_HAS_PING
 	const size_t configuredLimit =
 	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
-	const size_t limit =
-	    control != nullptr && control->deadlineMs != UINT64_MAX
-	        ? std::min<size_t>(configuredLimit, 1)
-	        : configuredLimit;
+	const size_t limit = control != nullptr && control->deadlineMs != UINT64_MAX
+	                         ? std::min<size_t>(configuredLimit, 1)
+	                         : configuredLimit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
 		if (providerShouldStop(control)) {
@@ -1155,14 +1152,12 @@ ProviderRunStats runMdnsProvider(
 	                                 ? config.queryTimeoutMs - enumerationTimeout
 	                                 : config.queryTimeoutMs;
 	const size_t configuredQueryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
-	const size_t queryCount =
-	    control != nullptr && control->deadlineMs != UINT64_MAX
-	        ? std::min<size_t>(configuredQueryCount, 1)
-	        : configuredQueryCount;
+	const size_t queryCount = control != nullptr && control->deadlineMs != UINT64_MAX
+	                              ? std::min<size_t>(configuredQueryCount, 1)
+	                              : configuredQueryCount;
 	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
 	uint32_t perQueryTimeout = std::max<uint32_t>(
-	    1,
-	    queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 1
+	    1, queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 1
 	);
 	perQueryTimeout = providerRemainingMs(control, perQueryTimeout);
 
@@ -1387,8 +1382,7 @@ ProviderRunStats runSsdpProvider(
 			    parsed.location[0] != '\0' && rememberLocation(interfaceInfo.key, parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
 			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
-				const uint32_t httpTimeout =
-				    providerRemainingMs(control, config.httpTimeoutMs);
+				const uint32_t httpTimeout = providerRemainingMs(control, config.httpTimeoutMs);
 				if (httpTimeout == 0) {
 					break;
 				}
@@ -1522,10 +1516,9 @@ ProviderRunStats runNbnsProvider(
 		}
 
 		const size_t configuredTargetLimit = std::min(targetCount, config.maxTargetsPerRun);
-		const size_t targetLimit =
-		    control != nullptr && control->deadlineMs != UINT64_MAX
-		        ? std::min<size_t>(configuredTargetLimit, 1)
-		        : configuredTargetLimit;
+		const size_t targetLimit = control != nullptr && control->deadlineMs != UINT64_MAX
+		                               ? std::min<size_t>(configuredTargetLimit, 1)
+		                               : configuredTargetLimit;
 		for (size_t processed = 0; processed < targetLimit; ++processed) {
 			if (providerShouldStop(control)) {
 				break;
@@ -1630,10 +1623,9 @@ ProviderRunStats runReverseDnsProvider(
 
 	const size_t configuredLimit =
 	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
-	const size_t limit =
-	    control != nullptr && control->deadlineMs != UINT64_MAX
-	        ? std::min<size_t>(configuredLimit, 1)
-	        : configuredLimit;
+	const size_t limit = control != nullptr && control->deadlineMs != UINT64_MAX
+	                         ? std::min<size_t>(configuredLimit, 1)
+	                         : configuredLimit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
 		if (providerShouldStop(control)) {
