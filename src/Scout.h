@@ -29,6 +29,7 @@ constexpr size_t SCOUT_MANUFACTURER_SIZE = 96;
 constexpr size_t SCOUT_MODEL_SIZE = 96;
 constexpr size_t SCOUT_SERIAL_SIZE = 96;
 constexpr size_t SCOUT_PERSISTENT_ID_SIZE = 128;
+constexpr size_t SCOUT_PERSISTENT_NAMESPACE_SIZE = 64;
 constexpr size_t SCOUT_UPNP_UDN_SIZE = 128;
 
 enum class ScoutStatus : uint8_t {
@@ -217,6 +218,10 @@ struct ScoutMacAddress {
 	}
 };
 
+bool scoutFormatIpv4(const ScoutIpv4Address &address, char *out, size_t capacity);
+bool scoutFormatIpv6(const ScoutIpv6Address &address, char *out, size_t capacity);
+bool scoutFormatMac(const ScoutMacAddress &address, char *out, size_t capacity);
+
 struct ScoutDeviceKey {
 	ScoutIdentityKind kind = ScoutIdentityKind::Mac;
 	ScoutMacAddress mac{};
@@ -321,6 +326,7 @@ struct ScoutDeviceDetails {
 	char modelNumber[SCOUT_MODEL_SIZE] = {};
 	char serialNumber[SCOUT_SERIAL_SIZE] = {};
 	char persistentDeviceId[SCOUT_PERSISTENT_ID_SIZE] = {};
+	char persistentDeviceNamespace[SCOUT_PERSISTENT_NAMESPACE_SIZE] = {};
 	char upnpUdn[SCOUT_UPNP_UDN_SIZE] = {};
 
 	ScoutObservationSource manufacturerSource = ScoutObservationSource::None;
@@ -523,6 +529,7 @@ struct ScoutDiagnostics {
 	uint64_t identityRelationDrops = 0;
 	uint64_t identityGroupChanges = 0;
 	uint64_t enrichmentAllocationFailures = 0;
+	uint64_t staleProviderObservations = 0;
 	uint64_t lastScanDurationMs = 0;
 
 	ScoutProviderDiagnostics icmp{};
