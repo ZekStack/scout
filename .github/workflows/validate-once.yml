@@ -1,4 +1,4 @@
-name: Validate once # board-smoke
+name: Validate once # board-smoke-retry
 
 on:
   push:
