@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <strings.h>
 
 namespace scout_internal {
 namespace {
@@ -33,9 +34,11 @@ bool decodeName(
     size_t start,
     char *out,
     size_t outCapacity,
-    size_t &consumed
+    size_t &consumed,
+    size_t encodedEnd
 ) {
-	if (data == nullptr || out == nullptr || outCapacity == 0 || start >= length) {
+	if (data == nullptr || out == nullptr || outCapacity == 0 || start >= length ||
+	    encodedEnd > length || start >= encodedEnd) {
 		return false;
 	}
 	out[0] = '\0';
@@ -46,12 +49,12 @@ bool decodeName(
 	size_t jumps = 0;
 
 	for (;;) {
-		if (cursor >= length || jumps > 16) {
+		if (cursor >= length || (!jumped && cursor >= encodedEnd) || jumps > 16) {
 			return false;
 		}
 		const uint8_t label = data[cursor];
 		if ((label & 0xC0U) == 0xC0U) {
-			if (cursor + 1 >= length) {
+			if (cursor + 1 >= length || (!jumped && cursor + 1 >= encodedEnd)) {
 				return false;
 			}
 			const size_t pointer = (static_cast<size_t>(label & 0x3FU) << 8U) | data[cursor + 1];
@@ -76,7 +79,8 @@ bool decodeName(
 		if (label == 0) {
 			break;
 		}
-		if (label > 63 || cursor + label > length) {
+		if (label > 63 || cursor + label > length ||
+		    (!jumped && cursor + label > encodedEnd)) {
 			return false;
 		}
 		if (output != 0) {
@@ -131,13 +135,21 @@ size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out
 	return offset;
 }
 
-DnsPtrAnswer parsePtrResponse(const uint8_t *data, size_t length, uint16_t transactionId) {
+DnsPtrAnswer parsePtrResponse(
+    const uint8_t *data,
+    size_t length,
+    uint16_t transactionId,
+    const uint8_t expectedIpv4[4]
+) {
 	DnsPtrAnswer result{};
 	if (data == nullptr || length < 12 || read16(data) != transactionId) {
 		return result;
 	}
 	const uint16_t flags = read16(data + 2);
 	if ((flags & 0x8000U) == 0) {
+		return result;
+	}
+	if ((flags & 0x7800U) != 0 || (flags & 0x0200U) != 0) {
 		return result;
 	}
 	const uint8_t rcode = static_cast<uint8_t>(flags & 0x0FU);
@@ -152,20 +164,50 @@ DnsPtrAnswer parsePtrResponse(const uint8_t *data, size_t length, uint16_t trans
 
 	const uint16_t questions = read16(data + 4);
 	const uint16_t answers = read16(data + 6);
+	if (questions != 1) {
+		return result;
+	}
+
 	size_t offset = 12;
 	char scratch[256] = {};
-	for (uint16_t i = 0; i < questions; ++i) {
-		size_t consumed = 0;
-		if (!decodeName(data, length, offset, scratch, sizeof(scratch), consumed) ||
-		    offset + consumed + 4 > length) {
+	size_t questionConsumed = 0;
+	if (!decodeName(
+	        data,
+	        length,
+	        offset,
+	        scratch,
+	        sizeof(scratch),
+	        questionConsumed,
+	        length
+	    ) ||
+	    offset + questionConsumed + 4 > length) {
+		return result;
+	}
+	const uint16_t questionType = read16(data + offset + questionConsumed);
+	const uint16_t questionClass = read16(data + offset + questionConsumed + 2);
+	if (questionType != 12 || questionClass != 1) {
+		return result;
+	}
+	if (expectedIpv4 != nullptr) {
+		char expected[64]{};
+		std::snprintf(
+		    expected,
+		    sizeof(expected),
+		    "%u.%u.%u.%u.in-addr.arpa",
+		    static_cast<unsigned>(expectedIpv4[3]),
+		    static_cast<unsigned>(expectedIpv4[2]),
+		    static_cast<unsigned>(expectedIpv4[1]),
+		    static_cast<unsigned>(expectedIpv4[0])
+		);
+		if (strcasecmp(scratch, expected) != 0) {
 			return result;
 		}
-		offset += consumed + 4;
 	}
+	offset += questionConsumed + 4;
 
 	for (uint16_t i = 0; i < answers; ++i) {
 		size_t consumed = 0;
-		if (!decodeName(data, length, offset, scratch, sizeof(scratch), consumed) ||
+		if (!decodeName(data, length, offset, scratch, sizeof(scratch), consumed, length) ||
 		    offset + consumed + 10 > length) {
 			return result;
 		}
@@ -186,8 +228,10 @@ DnsPtrAnswer parsePtrResponse(const uint8_t *data, size_t length, uint16_t trans
 			        offset,
 			        result.hostname,
 			        sizeof(result.hostname),
-			        ignored
-			    )) {
+			        ignored,
+			        offset + rdLength
+			    ) ||
+			    ignored > rdLength || result.hostname[0] == '\0') {
 				return DnsPtrAnswer{};
 			}
 			result.status = DnsParseStatus::Ok;
