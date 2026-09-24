@@ -768,12 +768,28 @@ void testCallerDrivenExecution() {
 	assert(scout.timeUntilNextWork() == 0);
 	assert(events.empty());
 
-	const ScoutResult processResult = scout.process(25);
-	assert(processResult.status == ScoutStatus::Ok);
+	while (true) {
+		const ScoutResult processResult = scout.process(25);
+		assert(processResult.status == ScoutStatus::Ok);
+		bool completed = false;
+		for (const auto &event : events) {
+			if (event.type == ScoutEventType::ScanCompleted) {
+				completed = true;
+				break;
+			}
+		}
+		if (completed) {
+			break;
+		}
+		const uint32_t waitMs = scout.timeUntilNextWork();
+		if (waitMs != UINT32_MAX && waitMs > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+		}
+	}
 	assertTerminalScanPair(events);
 
 	const ScoutDiagnostics after = scout.diagnostics();
-	assert(after.processCalls == 1);
+	assert(after.processCalls > 1);
 	assert(after.scanCount == 1);
 	assert(after.taskStackRegion == Strata::Region::Unknown);
 	assert(scout.deinit().status == ScoutStatus::Ok);
