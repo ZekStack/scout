@@ -1,7 +1,7 @@
 #include "ScoutProviders.h"
 
-#include "ScoutEnrichment.h"
 #include "ScoutDns.h"
+#include "ScoutEnrichment.h"
 
 #include <algorithm>
 #include <atomic>
@@ -75,8 +75,8 @@ esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
 
 	context->count = 0;
 	esp_netif_t *netif = nullptr;
-	while ((netif = esp_netif_next_unsafe(netif)) != nullptr &&
-	    context->count < context->capacity) {
+	while ((netif = esp_netif_next_unsafe(netif)) != nullptr && context->count < context->capacity
+	) {
 		esp_netif_ip_info_t info{};
 		if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0 ||
 		    info.netmask.addr == 0) {
@@ -205,8 +205,7 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 	uint8_t request[128]{};
 	uint8_t ipv4Bytes[4]{};
 	std::memcpy(ipv4Bytes, &target.ipv4.value, sizeof(ipv4Bytes));
-	const size_t requestLength =
-	    buildPtrQuery(transactionId, ipv4Bytes, request, sizeof(request));
+	const size_t requestLength = buildPtrQuery(transactionId, ipv4Bytes, request, sizeof(request));
 	if (requestLength == 0) {
 		close(fd);
 		result.status = DnsParseStatus::Malformed;
@@ -246,10 +245,9 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 	close(fd);
 
 	if (received <= 0) {
-		result.status =
-		    socketError == EAGAIN || socketError == EWOULDBLOCK
-		        ? DnsParseStatus::Timeout
-		        : DnsParseStatus::NetworkError;
+		result.status = socketError == EAGAIN || socketError == EWOULDBLOCK
+		                    ? DnsParseStatus::Timeout
+		                    : DnsParseStatus::NetworkError;
 		return result;
 	}
 	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr) {
@@ -960,9 +958,8 @@ ProviderRunStats runSsdpProvider(
 			    std::min(MaxSsdpDescriptionFetches, config.maxDescriptionFetchesPerRun);
 			const bool newDescriptionLocation =
 			    parsed.location[0] != '\0' && rememberLocation(parsed.location);
-			if (config.fetchDeviceDescription && newDescriptionLocation &&
-			    httpScratch != nullptr && httpScratchCapacity > 1 &&
-			    descriptionFetches < descriptionBudget) {
+			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
+			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
 				const size_t bodyLength = fetchHttpBody(
 				    parsed.location,
 				    config.httpTimeoutMs,
@@ -1154,15 +1151,8 @@ ProviderRunStats runReverseDnsProvider(
 			observation.source = ScoutObservationSource::ReverseDns;
 			observation.ipv4 = target.ipv4;
 			observation.interfaceIndex = target.interfaceIndex;
-			const uint64_t expiresAt =
-			    expiryFromTtl(now, answer.ttlSeconds, config.maxAgeMs);
-			addName(
-			    observation,
-			    ScoutNameSource::ReverseDns,
-			    answer.hostname,
-			    now,
-			    expiresAt
-			);
+			const uint64_t expiresAt = expiryFromTtl(now, answer.ttlSeconds, config.maxAgeMs);
+			addName(observation, ScoutNameSource::ReverseDns, answer.hostname, now, expiresAt);
 			sink(target.mac, observation, context);
 			stats.observations++;
 			break;

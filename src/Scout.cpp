@@ -379,7 +379,6 @@ struct ScoutImpl {
 		return devices[index].details.get();
 	}
 
-
 	size_t findEndpointOwner(uint8_t interfaceIndex, uint32_t ipv4, size_t excludedIndex) const {
 		for (size_t i = 0; i < deviceCount; ++i) {
 			if (i == excludedIndex) {
@@ -1049,13 +1048,11 @@ struct ScoutImpl {
 			    observation.manufacturer[0] != '\0' &&
 			    (!details.vendor.known || details.vendor.source == ScoutVendorSource::Oui ||
 			     details.vendor.source == ScoutVendorSource::Ssdp)) {
-				const bool vendorChanged =
-				    !details.vendor.known ||
-				    std::strncmp(
-				        details.vendor.name,
-				        observation.manufacturer,
-				        sizeof(details.vendor.name)
-				    ) != 0;
+				const bool vendorChanged = !details.vendor.known || std::strncmp(
+				                                                        details.vendor.name,
+				                                                        observation.manufacturer,
+				                                                        sizeof(details.vendor.name)
+				                                                    ) != 0;
 				details.vendor.known = true;
 				details.vendor.source = ScoutVendorSource::Ssdp;
 				details.vendor.observationSource = ScoutObservationSource::Ssdp;
@@ -1256,8 +1253,7 @@ struct ScoutImpl {
 				const auto &record = devices[index];
 				mac = record.info.mac;
 				const bool knownVendor = record.details && record.details->vendor.known;
-				shouldLookup = !knownVendor &&
-				               !scout_internal::macIsLocallyAdministered(mac) &&
+				shouldLookup = !knownVendor && !scout_internal::macIsLocallyAdministered(mac) &&
 				               !scout_internal::macIsMulticast(mac);
 			}
 			if (!shouldLookup) {

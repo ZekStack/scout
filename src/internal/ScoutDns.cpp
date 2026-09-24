@@ -12,10 +12,8 @@ uint16_t read16(const uint8_t *p) {
 }
 
 uint32_t read32(const uint8_t *p) {
-	return (static_cast<uint32_t>(p[0]) << 24U) |
-	       (static_cast<uint32_t>(p[1]) << 16U) |
-	       (static_cast<uint32_t>(p[2]) << 8U) |
-	       static_cast<uint32_t>(p[3]);
+	return (static_cast<uint32_t>(p[0]) << 24U) | (static_cast<uint32_t>(p[1]) << 16U) |
+	       (static_cast<uint32_t>(p[2]) << 8U) | static_cast<uint32_t>(p[3]);
 }
 
 bool appendLabel(uint8_t *out, size_t capacity, size_t &offset, const char *label) {
@@ -56,8 +54,7 @@ bool decodeName(
 			if (cursor + 1 >= length) {
 				return false;
 			}
-			const size_t pointer =
-			    (static_cast<size_t>(label & 0x3FU) << 8U) | data[cursor + 1];
+			const size_t pointer = (static_cast<size_t>(label & 0x3FU) << 8U) | data[cursor + 1];
 			if (pointer >= length || pointer == cursor) {
 				return false;
 			}
@@ -104,12 +101,7 @@ bool decodeName(
 
 } // namespace
 
-size_t buildPtrQuery(
-    uint16_t transactionId,
-    const uint8_t ipv4[4],
-    uint8_t *out,
-    size_t capacity
-) {
+size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity) {
 	if (ipv4 == nullptr || out == nullptr || capacity < 32) {
 		return 0;
 	}
@@ -139,11 +131,7 @@ size_t buildPtrQuery(
 	return offset;
 }
 
-DnsPtrAnswer parsePtrResponse(
-    const uint8_t *data,
-    size_t length,
-    uint16_t transactionId
-) {
+DnsPtrAnswer parsePtrResponse(const uint8_t *data, size_t length, uint16_t transactionId) {
 	DnsPtrAnswer result{};
 	if (data == nullptr || length < 12 || read16(data) != transactionId) {
 		return result;

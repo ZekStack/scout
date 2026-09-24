@@ -20,17 +20,8 @@ struct DnsPtrAnswer {
 	uint32_t ttlSeconds = 0;
 };
 
-size_t buildPtrQuery(
-    uint16_t transactionId,
-    const uint8_t ipv4[4],
-    uint8_t *out,
-    size_t capacity
-);
+size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity);
 
-DnsPtrAnswer parsePtrResponse(
-    const uint8_t *data,
-    size_t length,
-    uint16_t transactionId
-);
+DnsPtrAnswer parsePtrResponse(const uint8_t *data, size_t length, uint16_t transactionId);
 
 } // namespace scout_internal

@@ -25,10 +25,7 @@ bool expired(uint64_t expiresAtMs, uint64_t nowMs) {
 
 template <size_t N>
 bool expireTextField(
-    char (&value)[N],
-    ScoutObservationSource &source,
-    uint64_t &expiresAtMs,
-    uint64_t nowMs
+    char (&value)[N], ScoutObservationSource &source, uint64_t &expiresAtMs, uint64_t nowMs
 ) {
 	if (value[0] == '\0' || !expired(expiresAtMs, nowMs)) {
 		return false;
@@ -412,12 +409,8 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 	    details.persistentDeviceIdExpiresAtMs,
 	    nowMs
 	);
-	const bool upnpUdnExpired = expireTextField(
-	    details.upnpUdn,
-	    details.upnpUdnSource,
-	    details.upnpUdnExpiresAtMs,
-	    nowMs
-	);
+	const bool upnpUdnExpired =
+	    expireTextField(details.upnpUdn, details.upnpUdnSource, details.upnpUdnExpiresAtMs, nowMs);
 	if (serialExpired || persistentIdExpired || upnpUdnExpired) {
 		changes |= ScoutDeviceChange::Identity;
 	}
