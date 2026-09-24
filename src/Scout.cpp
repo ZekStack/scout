@@ -404,7 +404,7 @@ struct ScoutImpl {
 			devices[index].info = devices[lastIndex].info;
 			devices[index].details = std::move(devices[lastIndex].details);
 		}
-		devices[lastIndex].info = {};
+		devices[lastIndex].info = ScoutDeviceInfo{};
 		devices[lastIndex].details.reset();
 		deviceCount--;
 		diag.deviceCount = deviceCount;
@@ -554,7 +554,7 @@ struct ScoutImpl {
 					index = deviceCount++;
 					discovered = true;
 					auto &info = devices[index].info;
-					info = {};
+					info = ScoutDeviceInfo{};
 					devices[index].details.reset();
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
@@ -2093,7 +2093,7 @@ ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const 
 	if (_impl->devices[index].details) {
 		out = *_impl->devices[index].details;
 	} else {
-		out = {};
+		out = ScoutDeviceDetails{};
 	}
 	return ScoutResult::success();
 }
@@ -2119,13 +2119,13 @@ ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetai
 	if (_impl->devices[index].details) {
 		out = *_impl->devices[index].details;
 	} else {
-		out = {};
+		out = ScoutDeviceDetails{};
 	}
 	return ScoutResult::success();
 }
 
 ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName &out) const {
-	out = {};
+	out = ScoutPreferredName{};
 	if (!mac.valid()) {
 		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
 	}
