@@ -171,6 +171,7 @@ struct ScoutImpl {
 	std::atomic<uint64_t> nextEnrichmentExpiryAt{UINT64_MAX};
 	std::atomic<bool> processingActive{false};
 	std::atomic<Strata::FreeRTOS::TaskHandle> processingOwner{nullptr};
+	std::atomic<uint64_t> incrementalScanWakeAt{UINT64_MAX};
 
 	struct IncrementalScanState {
 		bool active = false;
@@ -1844,6 +1845,7 @@ struct ScoutImpl {
 		}
 		scanProgress = IncrementalScanState{};
 		scanProgress.active = true;
+		incrementalScanWakeAt.store(nowMs(), std::memory_order_release);
 		scanProgress.scanId = nextScanId++;
 		scanProgress.startedAt = nowMs();
 
@@ -1869,6 +1871,7 @@ struct ScoutImpl {
 			    "scan cancelled"
 			);
 			scanProgress.active = false;
+			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 			return false;
 		}
 
@@ -1893,6 +1896,7 @@ struct ScoutImpl {
 			    "scan failed while enumerating network interfaces"
 			);
 			scanProgress.active = false;
+			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 			return false;
 		}
 
@@ -1917,6 +1921,7 @@ struct ScoutImpl {
 			    "scan completed without an eligible interface"
 			);
 			scanProgress.active = false;
+			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 			return false;
 		}
 		return true;
@@ -1930,6 +1935,7 @@ struct ScoutImpl {
 		while (scanProgress.active && !stopRequested.load(std::memory_order_acquire)) {
 			const uint64_t current = nowMs();
 			if (deadlineAt != UINT64_MAX && current >= deadlineAt) {
+				incrementalScanWakeAt.store(current, std::memory_order_release);
 				return false;
 			}
 			if (scanProgress.interfaceIndex >= scanProgress.interfaceCount) {
@@ -2009,6 +2015,10 @@ struct ScoutImpl {
 
 			if (scanProgress.batchPending) {
 				if (current < scanProgress.batchReadyAt) {
+					incrementalScanWakeAt.store(
+					    scanProgress.batchReadyAt,
+					    std::memory_order_release
+					);
 					return false;
 				}
 				const uint32_t *batch = targets + scanProgress.targetOffset;
@@ -2060,10 +2070,18 @@ struct ScoutImpl {
 				scanProgress.batchReadyAt = 0;
 				scanProgress.nextBatchAt =
 				    config.interBatchDelayMs > 0 ? nowMs() + config.interBatchDelayMs : 0;
+				incrementalScanWakeAt.store(
+				    scanProgress.nextBatchAt > 0 ? scanProgress.nextBatchAt : nowMs(),
+				    std::memory_order_release
+				);
 				return false;
 			}
 
 			if (scanProgress.nextBatchAt > current) {
+				incrementalScanWakeAt.store(
+				    scanProgress.nextBatchAt,
+				    std::memory_order_release
+				);
 				return false;
 			}
 
@@ -2101,6 +2119,10 @@ struct ScoutImpl {
 			scanProgress.batchPending = true;
 			scanProgress.batchCount = count;
 			scanProgress.batchReadyAt = nowMs() + config.arpResponseWaitMs;
+			incrementalScanWakeAt.store(
+			    scanProgress.batchReadyAt,
+			    std::memory_order_release
+			);
 			return false;
 		}
 
@@ -2112,6 +2134,7 @@ struct ScoutImpl {
 			    "scan cancelled"
 			);
 			scanProgress.active = false;
+			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 		}
 		return true;
 	}
@@ -2149,18 +2172,14 @@ struct ScoutImpl {
 			return UINT32_MAX;
 		}
 		const uint64_t current = nowMs();
-		if (scanProgress.active) {
-			if (scanProgress.batchPending && scanProgress.batchReadyAt > current) {
-				return static_cast<uint32_t>(
-				    std::min<uint64_t>(scanProgress.batchReadyAt - current, UINT32_MAX)
-				);
+		const uint64_t scanWakeAt = incrementalScanWakeAt.load(std::memory_order_acquire);
+		if (scanWakeAt != UINT64_MAX) {
+			if (scanWakeAt <= current) {
+				return 0;
 			}
-			if (scanProgress.nextBatchAt > current) {
-				return static_cast<uint32_t>(
-				    std::min<uint64_t>(scanProgress.nextBatchAt - current, UINT32_MAX)
-				);
-			}
-			return 0;
+			return static_cast<uint32_t>(
+			    std::min<uint64_t>(scanWakeAt - current, UINT32_MAX)
+			);
 		}
 		if (scanRequested.load(std::memory_order_acquire)) {
 			return 0;
@@ -2440,6 +2459,7 @@ struct ScoutImpl {
 		mdnsServiceCursor = 0;
 		nextScanId = 1;
 		scanProgress = IncrementalScanState{};
+		incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
 		if (!allocateBuffers(incoming)) {
@@ -2564,6 +2584,7 @@ struct ScoutImpl {
 				const uint64_t scanId = scanProgress.scanId;
 				const uint64_t startedAt = scanProgress.startedAt;
 				scanProgress.active = false;
+				incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 				finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
 			}
 		}
