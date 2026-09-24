@@ -13,6 +13,7 @@
 #include <esp_netif_net_stack.h>
 #include <esp_timer.h>
 #include <lwip/inet.h>
+#include <lwip/netdb.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
 
@@ -474,6 +475,21 @@ struct ParsedHttpUrl {
 	uint16_t port = 80;
 };
 
+enum class HttpFetchStatus : uint8_t {
+	Ok,
+	Timeout,
+	NetworkError,
+	InvalidResponse,
+	HttpError,
+	TooLarge,
+	UnsupportedEncoding,
+};
+
+struct HttpFetchResult {
+	HttpFetchStatus status = HttpFetchStatus::InvalidResponse;
+	size_t bodyLength = 0;
+};
+
 bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	out = {};
 	copyText(out.path, sizeof(out.path), "/");
@@ -512,13 +528,19 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	return out.host[0] != '\0';
 }
 
-size_t fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t capacity) {
+HttpFetchResult fetchHttpBody(
+    const char *url,
+    uint32_t timeoutMs,
+    char *scratch,
+    size_t capacity
+) {
+	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2) {
-		return 0;
+		return result;
 	}
 	ParsedHttpUrl parsed{};
 	if (!parseHttpUrl(url, parsed)) {
-		return 0;
+		return result;
 	}
 
 	addrinfo hints{};
@@ -528,19 +550,26 @@ size_t fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t 
 	std::snprintf(portText, sizeof(portText), "%u", static_cast<unsigned>(parsed.port));
 	addrinfo *resolved = nullptr;
 	if (getaddrinfo(parsed.host, portText, &hints, &resolved) != 0 || resolved == nullptr) {
-		return 0;
+		result.status = HttpFetchStatus::NetworkError;
+		return result;
 	}
 
 	const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (fd < 0) {
 		freeaddrinfo(resolved);
-		return 0;
+		result.status = HttpFetchStatus::NetworkError;
+		return result;
 	}
 	setSocketTimeout(fd, timeoutMs);
 	if (connect(fd, resolved->ai_addr, resolved->ai_addrlen) != 0) {
+		const int socketError = errno;
 		close(fd);
 		freeaddrinfo(resolved);
-		return 0;
+		result.status =
+		    socketError == EAGAIN || socketError == EWOULDBLOCK || socketError == ETIMEDOUT
+		        ? HttpFetchStatus::Timeout
+		        : HttpFetchStatus::NetworkError;
+		return result;
 	}
 	freeaddrinfo(resolved);
 
@@ -557,30 +586,108 @@ size_t fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t 
 	if (requestLength <= 0 || static_cast<size_t>(requestLength) >= sizeof(request) ||
 	    send(fd, request, static_cast<size_t>(requestLength), 0) < 0) {
 		close(fd);
-		return 0;
+		result.status = HttpFetchStatus::NetworkError;
+		return result;
 	}
 
 	size_t received = 0;
+	bool peerClosed = false;
 	while (received + 1 < capacity) {
 		const int count = recv(fd, scratch + received, capacity - received - 1, 0);
-		if (count <= 0) {
+		if (count == 0) {
+			peerClosed = true;
 			break;
+		}
+		if (count < 0) {
+			const int socketError = errno;
+			close(fd);
+			result.status =
+			    socketError == EAGAIN || socketError == EWOULDBLOCK || socketError == ETIMEDOUT
+			        ? HttpFetchStatus::Timeout
+			        : HttpFetchStatus::NetworkError;
+			return result;
 		}
 		received += static_cast<size_t>(count);
 	}
 	close(fd);
 	scratch[received] = '\0';
 
+	if (!peerClosed && received + 1 >= capacity) {
+		result.status = HttpFetchStatus::TooLarge;
+		return result;
+	}
+	if (received < 12 || std::strncmp(scratch, "HTTP/1.", 7) != 0) {
+		return result;
+	}
+	const char *statusSpace = std::strchr(scratch, ' ');
+	if (statusSpace == nullptr || statusSpace + 3 >= scratch + received ||
+	    statusSpace[1] < '0' || statusSpace[1] > '9' || statusSpace[2] < '0' ||
+	    statusSpace[2] > '9' || statusSpace[3] < '0' || statusSpace[3] > '9') {
+		return result;
+	}
+	const int statusCode =
+	    (statusSpace[1] - '0') * 100 + (statusSpace[2] - '0') * 10 + (statusSpace[3] - '0');
+	if (statusCode < 200 || statusCode >= 300) {
+		result.status = HttpFetchStatus::HttpError;
+		return result;
+	}
+
 	char *body = std::strstr(scratch, "\r\n\r\n");
 	if (body == nullptr) {
-		return 0;
+		return result;
 	}
 	body += 4;
 	const size_t headerLength = static_cast<size_t>(body - scratch);
+
+	for (size_t i = 0; i + 18 < headerLength; ++i) {
+		if ((i == 0 || scratch[i - 1] == '\n') &&
+		    strncasecmp(scratch + i, "Transfer-Encoding:", 18) == 0) {
+			const char *value = scratch + i + 18;
+			const char *lineEnd = std::strstr(value, "\r\n");
+			if (lineEnd != nullptr) {
+				for (const char *p = value; p + 7 <= lineEnd; ++p) {
+					if (strncasecmp(p, "chunked", 7) == 0) {
+						result.status = HttpFetchStatus::UnsupportedEncoding;
+						return result;
+					}
+				}
+			}
+		}
+	}
+
 	const size_t bodyLength = received >= headerLength ? received - headerLength : 0;
+	for (size_t i = 0; i + 15 < headerLength; ++i) {
+		if ((i == 0 || scratch[i - 1] == '\n') &&
+		    strncasecmp(scratch + i, "Content-Length:", 15) == 0) {
+			const char *value = scratch + i + 15;
+			while (value < scratch + headerLength && (*value == ' ' || *value == '\t')) {
+				value++;
+			}
+			size_t declared = 0;
+			bool hasDigit = false;
+			while (value < scratch + headerLength && *value >= '0' && *value <= '9') {
+				hasDigit = true;
+				declared = declared * 10U + static_cast<size_t>(*value - '0');
+				value++;
+			}
+			if (!hasDigit || declared > bodyLength) {
+				result.status = declared >= capacity ? HttpFetchStatus::TooLarge
+				                                     : HttpFetchStatus::InvalidResponse;
+				return result;
+			}
+			std::memmove(scratch, body, declared);
+			scratch[declared] = '\0';
+			result.status = HttpFetchStatus::Ok;
+			result.bodyLength = declared;
+			return result;
+		}
+	}
+
 	std::memmove(scratch, body, bodyLength);
 	scratch[bodyLength] = '\0';
-	return bodyLength;
+	result.status = HttpFetchStatus::Ok;
+	result.bodyLength = bodyLength;
+	return result;
 }
 
 void extractUpnpUdn(const char *usn, char *out, size_t capacity) {
@@ -960,16 +1067,16 @@ ProviderRunStats runSsdpProvider(
 			    parsed.location[0] != '\0' && rememberLocation(parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
 			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
-				const size_t bodyLength = fetchHttpBody(
+				const HttpFetchResult fetch = fetchHttpBody(
 				    parsed.location,
 				    config.httpTimeoutMs,
 				    httpScratch,
 				    httpScratchCapacity
 				);
 				descriptionFetches++;
-				if (bodyLength > 0) {
+				if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
 					UpnpDescriptionInfo description{};
-					if (parseUpnpDescription(httpScratch, bodyLength, description)) {
+					if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
 						addName(
 						    observation,
 						    ScoutNameSource::SsdpFriendlyName,
@@ -1014,7 +1121,24 @@ ProviderRunStats runSsdpProvider(
 						);
 					}
 				} else {
-					stats.timeouts++;
+					switch (fetch.status) {
+					case HttpFetchStatus::Timeout:
+						stats.timeouts++;
+						break;
+					case HttpFetchStatus::TooLarge:
+						stats.dropped++;
+						break;
+					case HttpFetchStatus::InvalidResponse:
+					case HttpFetchStatus::UnsupportedEncoding:
+						stats.malformedResponses++;
+						break;
+					case HttpFetchStatus::HttpError:
+					case HttpFetchStatus::NetworkError:
+						stats.errors++;
+						break;
+					case HttpFetchStatus::Ok:
+						break;
+					}
 				}
 			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
 			           descriptionFetches >= descriptionBudget) {
