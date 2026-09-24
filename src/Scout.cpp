@@ -855,7 +855,7 @@ struct ScoutImpl {
 		const auto incomingConfidence = static_cast<uint8_t>(relation.evidence.confidence);
 		const auto strongConfidence = static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
 		size_t replacement = SIZE_MAX;
-		uint8_t replacementConfidence = UINT8_MAX;
+		uint8_t replacementConfidence = static_cast<uint8_t>(0xFFU);
 		for (size_t i = 0; i < identityRelationCountValue; ++i) {
 			const auto storedConfidence =
 			    static_cast<uint8_t>(identityRelations[i].evidence.confidence);
