@@ -23,6 +23,7 @@ CXX_FLAGS=(
   "${CXX_FLAGS[@]}" \
   "${ROOT_DIR}/src/internal/ScoutLogic.cpp" \
   "${ROOT_DIR}/src/internal/ScoutEnrichment.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutDns.cpp" \
   "${ROOT_DIR}/tests/host/test_scout_logic.cpp" \
   -o "${BUILD_DIR}/scout-host-tests"
 
