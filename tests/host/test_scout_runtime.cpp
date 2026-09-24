@@ -734,6 +734,109 @@ void testIdentityGroupMemberLimitIsExplicit() {
 	runtime.releaseBuffers();
 }
 
+void testCallerDrivenExecution() {
+	networkMode.store(NetworkMode::SmallSubnet);
+	Scout scout;
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.execution.workBudgetMs = 25;
+	config.scanOnInit = false;
+	config.taskStackBytes = 1;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	config.arpResponseWaitMs = 1;
+	config.interBatchDelayMs = 0;
+
+	std::vector<ScoutEvent> events;
+	scout.onEvent([&](const ScoutEvent &event) { events.push_back(event); });
+
+	const ScoutResult initResult = scout.init(config);
+	assert(initResult.status == ScoutStatus::Ok);
+	assert(scout.executionMode() == ScoutExecutionMode::CallerDriven);
+	assert(scout.running());
+
+	const ScoutDiagnostics before = scout.diagnostics();
+	assert(before.executionMode == ScoutExecutionMode::CallerDriven);
+	assert(before.taskStackRegion == Strata::Region::Unknown);
+	assert(before.processCalls == 0);
+	assert(scout.timeUntilNextWork() > 0);
+
+	assert(scout.scanNow().status == ScoutStatus::Ok);
+	assert(scout.timeUntilNextWork() == 0);
+	assert(events.empty());
+
+	const ScoutResult processResult = scout.process(25);
+	assert(processResult.status == ScoutStatus::Ok);
+	assertTerminalScanPair(events);
+
+	const ScoutDiagnostics after = scout.diagnostics();
+	assert(after.processCalls == 1);
+	assert(after.scanCount == 1);
+	assert(after.taskStackRegion == Strata::Region::Unknown);
+	assert(scout.deinit().status == ScoutStatus::Ok);
+}
+
+void testProcessRejectsBackgroundMode() {
+	Scout scout;
+	ScoutConfig config;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	assert(scout.init(config).status == ScoutStatus::Ok);
+	assert(scout.process(10).status == ScoutStatus::WrongExecutionMode);
+	assert(std::strcmp(scout.statusToString(ScoutStatus::WrongExecutionMode), "wrong_execution_mode") == 0);
+	assert(scout.deinit().status == ScoutStatus::Ok);
+}
+
+void testCallerDrivenDestructionFromCallback() {
+	networkMode.store(NetworkMode::None);
+	std::atomic<Scout *> scout{new Scout()};
+	std::atomic<bool> destroyed{false};
+	std::atomic<int> taskResets{0};
+
+	Scout *instance = scout.load();
+	instance->onEvent([&](const ScoutEvent &event) {
+		if (event.type != ScoutEventType::CoverageLost || destroyed.load()) {
+			return;
+		}
+		Scout *doomed = scout.exchange(nullptr);
+		assert(doomed != nullptr);
+		delete doomed;
+		destroyed.store(true);
+	});
+
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.execution.workBudgetMs = 25;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	config.arpResponseWaitMs = 1;
+	config.interBatchDelayMs = 0;
+	assert(instance->init(config).status == ScoutStatus::Ok);
+	assert(instance->scanNow().status == ScoutStatus::Ok);
+
+	Strata::TestHooks::resetTask = [&] { taskResets.fetch_add(1); };
+	const ScoutResult processResult = instance->process(25);
+	assert(
+	    processResult.status == ScoutStatus::Ok ||
+	    processResult.status == ScoutStatus::Cancelled
+	);
+	waitUntil([&] { return destroyed.load(); });
+	waitUntil([&] { return taskResets.load() > 0; });
+	Strata::TestHooks::resetTask = {};
+	assert(scout.load() == nullptr);
+}
+
 void testDestructionFromCallback() {
 	networkMode.store(NetworkMode::None);
 	std::atomic<Scout *> scout{new Scout()};
@@ -786,7 +889,8 @@ ProviderRunStats runIcmpProvider(
     size_t &,
     const ScoutIcmpConfig &,
     EnrichmentSink,
-    void *
+    void *,
+    const ProviderRunControl *
 ) {
 	return {};
 }
@@ -797,7 +901,8 @@ ProviderRunStats runMdnsProvider(
     size_t &,
     const ScoutMdnsConfig &,
     EnrichmentSink,
-    void *
+    void *,
+    const ProviderRunControl *
 ) {
 	return {};
 }
@@ -809,7 +914,8 @@ ProviderRunStats runSsdpProvider(
     char *,
     size_t,
     EnrichmentSink,
-    void *
+    void *,
+    const ProviderRunControl *
 ) {
 	return {};
 }
@@ -820,7 +926,8 @@ ProviderRunStats runNbnsProvider(
     size_t &,
     const ScoutNbnsConfig &,
     EnrichmentSink,
-    void *
+    void *,
+    const ProviderRunControl *
 ) {
 	return {};
 }
@@ -831,7 +938,8 @@ ProviderRunStats runReverseDnsProvider(
     size_t &,
     const ScoutReverseDnsConfig &,
     EnrichmentSink,
-    void *
+    void *,
+    const ProviderRunControl *
 ) {
 	return {};
 }
@@ -877,6 +985,9 @@ int main() {
 	testIdentityGroupRejectsTransitiveContradiction();
 	testIdentityRelationCapacityDoesNotCreateUnbackedGroups();
 	testIdentityGroupMemberLimitIsExplicit();
+	testCallerDrivenExecution();
+	testProcessRejectsBackgroundMode();
+	testCallerDrivenDestructionFromCallback();
 	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
 }
