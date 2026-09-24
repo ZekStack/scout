@@ -622,25 +622,98 @@ bool parseUpnpDescription(const char *data, size_t length, UpnpDescriptionInfo &
 	return any;
 }
 
-bool parseNbnsNodeStatusName(const uint8_t *data, size_t length, char *out, size_t outCapacity) {
-	if (data == nullptr || length < 57 || out == nullptr || outCapacity == 0) {
+bool parseNbnsNodeStatusName(
+    const uint8_t *data,
+    size_t length,
+    uint16_t expectedTransactionId,
+    char *out,
+    size_t outCapacity
+) {
+	if (data == nullptr || length < 12 || out == nullptr || outCapacity == 0) {
 		return false;
 	}
-	// Node status responses contain an answer name followed by type/class/ttl/rdlength,
-	// then a one-byte name count and 18-byte name entries. Walk conservatively to the
-	// first plausible count byte instead of assuming a fixed compressed-name length.
-	for (size_t offset = 12; offset + 1 + 18 <= length; ++offset) {
-		const uint8_t count = data[offset];
-		if (count == 0 || count > 32 || offset + 1U + static_cast<size_t>(count) * 18U > length) {
+	auto read16 = [](const uint8_t *p) {
+		return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8U) | p[1]);
+	};
+	if (read16(data) != expectedTransactionId) {
+		return false;
+	}
+	const uint16_t flags = read16(data + 2);
+	if ((flags & 0x8000U) == 0 || (flags & 0x000FU) != 0) {
+		return false;
+	}
+
+	auto skipName = [&](size_t start, size_t &consumed) {
+		consumed = 0;
+		size_t cursor = start;
+		for (size_t labels = 0; labels < 128; ++labels) {
+			if (cursor >= length) {
+				return false;
+			}
+			const uint8_t label = data[cursor];
+			if ((label & 0xC0U) == 0xC0U) {
+				if (cursor + 1 >= length) {
+					return false;
+				}
+				consumed += 2;
+				return true;
+			}
+			if ((label & 0xC0U) != 0 || label > 63) {
+				return false;
+			}
+			cursor++;
+			consumed++;
+			if (label == 0) {
+				return true;
+			}
+			if (cursor + label > length) {
+				return false;
+			}
+			cursor += label;
+			consumed += label;
+		}
+		return false;
+	};
+
+	const uint16_t questions = read16(data + 4);
+	const uint16_t answers = read16(data + 6);
+	size_t offset = 12;
+	for (uint16_t i = 0; i < questions; ++i) {
+		size_t consumed = 0;
+		if (!skipName(offset, consumed) || offset + consumed + 4 > length) {
+			return false;
+		}
+		offset += consumed + 4;
+	}
+
+	for (uint16_t answer = 0; answer < answers; ++answer) {
+		size_t consumed = 0;
+		if (!skipName(offset, consumed) || offset + consumed + 10 > length) {
+			return false;
+		}
+		offset += consumed;
+		const uint16_t type = read16(data + offset);
+		const uint16_t klass = read16(data + offset + 2);
+		const uint16_t rdLength = read16(data + offset + 8);
+		offset += 10;
+		if (offset + rdLength > length) {
+			return false;
+		}
+		if (type != 0x21U || klass != 1U || rdLength < 1) {
+			offset += rdLength;
 			continue;
+		}
+		const uint8_t count = data[offset];
+		const size_t required = 1U + static_cast<size_t>(count) * 18U;
+		if (count == 0 || count > 32 || required > rdLength) {
+			return false;
 		}
 		for (uint8_t i = 0; i < count; ++i) {
 			const uint8_t *entry = data + offset + 1U + static_cast<size_t>(i) * 18U;
 			const uint8_t suffix = entry[15];
-			const uint16_t flags =
+			const uint16_t nameFlags =
 			    static_cast<uint16_t>(entry[16] << 8U) | static_cast<uint16_t>(entry[17]);
-			const bool group = (flags & 0x8000U) != 0;
-			if (group || suffix != 0x00U) {
+			if ((nameFlags & 0x8000U) != 0 || suffix != 0x00U) {
 				continue;
 			}
 			size_t nameLength = 15;
@@ -656,6 +729,7 @@ bool parseNbnsNodeStatusName(const uint8_t *data, size_t length, char *out, size
 				);
 			}
 		}
+		offset += rdLength;
 	}
 	return false;
 }
