@@ -2211,7 +2211,8 @@ struct ScoutImpl {
 				break;
 			}
 
-			const bool requested = scanRequested.exchange(false, std::memory_order_acq_rel);
+			const bool requested =
+			    scanProgress.active ? false : scanRequested.exchange(false, std::memory_order_acq_rel);
 			if (scanProgress.active || requested ||
 			    current >= nextScanAt.load(std::memory_order_acquire)) {
 				const bool completed = processIncrementalScan(deadlineAt);
