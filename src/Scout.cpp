@@ -2029,7 +2029,8 @@ struct ScoutImpl {
 					    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
 					const bool confirmed = !wasCached;
 					const ScoutObservationSource source =
-					    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache;
+					    confirmed ? ScoutObservationSource::ArpProbe
+					              : ScoutObservationSource::ArpCache;
 					{
 						ScoutLock lock(mutex);
 						if (lock) {
