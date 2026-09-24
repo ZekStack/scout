@@ -162,6 +162,16 @@ struct ScoutImpl {
 	size_t nbnsCursor = 0;
 	size_t mdnsServiceCursor = 0;
 
+	std::atomic<uint64_t> nextScanAt{UINT64_MAX};
+	std::atomic<uint64_t> nextIcmpAt{UINT64_MAX};
+	std::atomic<uint64_t> nextMdnsAt{UINT64_MAX};
+	std::atomic<uint64_t> nextSsdpAt{UINT64_MAX};
+	std::atomic<uint64_t> nextNbnsAt{UINT64_MAX};
+	std::atomic<uint64_t> nextReverseDnsAt{UINT64_MAX};
+	std::atomic<uint64_t> nextEnrichmentExpiryAt{UINT64_MAX};
+	std::atomic<bool> processingActive{false};
+	std::atomic<Strata::FreeRTOS::TaskHandle> processingOwner{nullptr};
+
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
 	std::atomic<bool> startReady{false};
@@ -1780,6 +1790,166 @@ struct ScoutImpl {
 		);
 	}
 
+	void initializeSchedule(uint64_t startedAt) {
+		nextScanAt.store(
+		    scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs,
+		    std::memory_order_release
+		);
+		nextIcmpAt.store(
+		    config.providers.icmp.enabled ? startedAt : UINT64_MAX,
+		    std::memory_order_release
+		);
+		nextMdnsAt.store(
+		    config.providers.mdns.enabled ? startedAt : UINT64_MAX,
+		    std::memory_order_release
+		);
+		nextSsdpAt.store(
+		    config.providers.ssdp.enabled ? startedAt : UINT64_MAX,
+		    std::memory_order_release
+		);
+		nextNbnsAt.store(
+		    config.providers.nbns.enabled ? startedAt : UINT64_MAX,
+		    std::memory_order_release
+		);
+		nextReverseDnsAt.store(
+		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX,
+		    std::memory_order_release
+		);
+		nextEnrichmentExpiryAt.store(
+		    startedAt + EnrichmentExpiryPollMs,
+		    std::memory_order_release
+		);
+	}
+
+	uint32_t timeUntilNextWorkInternal() const {
+		if (stopRequested.load(std::memory_order_acquire)) {
+			return UINT32_MAX;
+		}
+		if (scanRequested.load(std::memory_order_acquire)) {
+			return 0;
+		}
+		const uint64_t current = nowMs();
+		const uint64_t nextWorkAt = std::min(
+		    {nextScanAt.load(std::memory_order_acquire),
+		     nextIcmpAt.load(std::memory_order_acquire),
+		     nextMdnsAt.load(std::memory_order_acquire),
+		     nextSsdpAt.load(std::memory_order_acquire),
+		     nextNbnsAt.load(std::memory_order_acquire),
+		     nextReverseDnsAt.load(std::memory_order_acquire),
+		     nextEnrichmentExpiryAt.load(std::memory_order_acquire)}
+		);
+		if (nextWorkAt == UINT64_MAX) {
+			return UINT32_MAX;
+		}
+		if (nextWorkAt <= current) {
+			return 0;
+		}
+		return static_cast<uint32_t>(
+		    std::min<uint64_t>(nextWorkAt - current, static_cast<uint64_t>(UINT32_MAX))
+		);
+	}
+
+	ScoutResult processWork(uint32_t requestedBudgetMs) {
+		if (processingActive.exchange(true, std::memory_order_acq_rel)) {
+			return ScoutResult::failure(ScoutStatus::Busy, "Scout processing is already active");
+		}
+		processingOwner.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+
+		const uint32_t budgetMs =
+		    requestedBudgetMs == 0 ? config.execution.workBudgetMs : requestedBudgetMs;
+		const uint64_t startedAt = nowMs();
+		const uint64_t deadlineAt =
+		    budgetMs >= UINT32_MAX - 1U ? UINT64_MAX : startedAt + std::max<uint32_t>(budgetMs, 1U);
+		bool budgetYield = false;
+
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				diag.processCalls++;
+			}
+		}
+
+		while (!stopRequested.load(std::memory_order_acquire)) {
+			const uint64_t current = nowMs();
+			if (current >= deadlineAt) {
+				budgetYield = timeUntilNextWorkInternal() == 0;
+				break;
+			}
+
+			const bool requested = scanRequested.exchange(false, std::memory_order_acq_rel);
+			if (requested || current >= nextScanAt.load(std::memory_order_acquire)) {
+				performScan();
+				expireEnrichmentRecords();
+				performOuiProvider();
+				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
+				continue;
+			}
+
+			if (config.providers.icmp.enabled &&
+			    current >= nextIcmpAt.load(std::memory_order_acquire)) {
+				performIcmpProvider();
+				nextIcmpAt.store(nowMs() + config.providers.icmp.intervalMs, std::memory_order_release);
+				continue;
+			}
+			if (config.providers.mdns.enabled &&
+			    current >= nextMdnsAt.load(std::memory_order_acquire)) {
+				performMdnsProvider();
+				nextMdnsAt.store(nowMs() + config.providers.mdns.intervalMs, std::memory_order_release);
+				continue;
+			}
+			if (config.providers.ssdp.enabled &&
+			    current >= nextSsdpAt.load(std::memory_order_acquire)) {
+				performSsdpProvider();
+				nextSsdpAt.store(nowMs() + config.providers.ssdp.intervalMs, std::memory_order_release);
+				continue;
+			}
+			if (config.providers.nbns.enabled &&
+			    current >= nextNbnsAt.load(std::memory_order_acquire)) {
+				performNbnsProvider();
+				nextNbnsAt.store(nowMs() + config.providers.nbns.intervalMs, std::memory_order_release);
+				continue;
+			}
+			if (config.providers.reverseDns.enabled &&
+			    current >= nextReverseDnsAt.load(std::memory_order_acquire)) {
+				performReverseDnsProvider();
+				nextReverseDnsAt.store(
+				    nowMs() + config.providers.reverseDns.intervalMs,
+				    std::memory_order_release
+				);
+				continue;
+			}
+			if (current >= nextEnrichmentExpiryAt.load(std::memory_order_acquire)) {
+				expireEnrichmentRecords();
+				nextEnrichmentExpiryAt.store(
+				    nowMs() + EnrichmentExpiryPollMs,
+				    std::memory_order_release
+				);
+				continue;
+			}
+			break;
+		}
+
+		const uint64_t duration = nowMs() - startedAt;
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				diag.lastProcessDurationMs = duration;
+				diag.maxProcessDurationMs = std::max(diag.maxProcessDurationMs, duration);
+				if (budgetYield || duration > budgetMs) {
+					diag.processBudgetYields++;
+				}
+				if (stopRequested.load(std::memory_order_acquire)) {
+					diag.cancellationYields++;
+				}
+			}
+		}
+		processingOwner.store(nullptr, std::memory_order_release);
+		processingActive.store(false, std::memory_order_release);
+		return stopRequested.load(std::memory_order_acquire)
+		           ? ScoutResult::failure(ScoutStatus::Cancelled, "Scout processing cancelled")
+		           : ScoutResult::success("Scout work processed");
+	}
+
 	void run() {
 		while (!startReady.load(std::memory_order_acquire)) {
 			vTaskDelay(1);
@@ -1793,69 +1963,15 @@ struct ScoutImpl {
 			}
 		}
 
-		const uint64_t startedAt = nowMs();
-		uint64_t nextScanAt = scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs;
-		uint64_t nextIcmpAt = config.providers.icmp.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextMdnsAt = config.providers.mdns.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextSsdpAt = config.providers.ssdp.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextNbnsAt = config.providers.nbns.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextReverseDnsAt = config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
-		uint64_t nextEnrichmentExpiryAt = startedAt + EnrichmentExpiryPollMs;
-
-		while (!stopRequested.load()) {
-			const uint64_t current = nowMs();
-			const bool requested = scanRequested.exchange(false);
-			if (requested || current >= nextScanAt) {
-				performScan();
-				expireEnrichmentRecords();
-				performOuiProvider();
-				nextScanAt = nowMs() + config.scanIntervalMs;
-				continue;
+		while (!stopRequested.load(std::memory_order_acquire)) {
+			(void)processWork(config.execution.workBudgetMs);
+			if (stopRequested.load(std::memory_order_acquire)) {
+				break;
 			}
-
-			if (config.providers.icmp.enabled && current >= nextIcmpAt) {
-				performIcmpProvider();
-				nextIcmpAt = nowMs() + config.providers.icmp.intervalMs;
-				continue;
-			}
-			if (config.providers.mdns.enabled && current >= nextMdnsAt) {
-				performMdnsProvider();
-				nextMdnsAt = nowMs() + config.providers.mdns.intervalMs;
-				continue;
-			}
-			if (config.providers.ssdp.enabled && current >= nextSsdpAt) {
-				performSsdpProvider();
-				nextSsdpAt = nowMs() + config.providers.ssdp.intervalMs;
-				continue;
-			}
-			if (config.providers.nbns.enabled && current >= nextNbnsAt) {
-				performNbnsProvider();
-				nextNbnsAt = nowMs() + config.providers.nbns.intervalMs;
-				continue;
-			}
-			if (config.providers.reverseDns.enabled && current >= nextReverseDnsAt) {
-				performReverseDnsProvider();
-				nextReverseDnsAt = nowMs() + config.providers.reverseDns.intervalMs;
-				continue;
-			}
-			if (current >= nextEnrichmentExpiryAt) {
-				expireEnrichmentRecords();
-				nextEnrichmentExpiryAt = nowMs() + EnrichmentExpiryPollMs;
-				continue;
-			}
-
-			const uint64_t nextWorkAt = std::min(
-			    {nextScanAt,
-			     nextIcmpAt,
-			     nextMdnsAt,
-			     nextSsdpAt,
-			     nextNbnsAt,
-			     nextReverseDnsAt,
-			     nextEnrichmentExpiryAt}
-			);
-			const uint64_t remaining = nextWorkAt > current ? nextWorkAt - current : 1;
-			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
-			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(waitMs, 1)));
+			const uint32_t untilNext = timeUntilNextWorkInternal();
+			const uint32_t waitMs =
+			    untilNext == UINT32_MAX ? 1000U : std::max<uint32_t>(1U, std::min<uint32_t>(untilNext, 1000U));
+			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
 		}
 
 		{
@@ -1906,8 +2022,16 @@ struct ScoutImpl {
 		      incoming.providers.reverseDns.timeoutMs == 0 ||
 		      incoming.providers.reverseDns.maxTargetsPerRun == 0));
 
-		if (!Strata::validPlacement(incoming.memory.allocation) ||
-		    !Strata::validPlacement(incoming.memory.taskStack) ||
+		const bool validExecutionMode =
+		    incoming.execution.mode == ScoutExecutionMode::BackgroundTask ||
+		    incoming.execution.mode == ScoutExecutionMode::CallerDriven;
+		const bool invalidBackgroundTaskConfig =
+		    incoming.execution.mode == ScoutExecutionMode::BackgroundTask &&
+		    (!Strata::validPlacement(incoming.memory.taskStack) ||
+		     !validStackSize(incoming.taskStackBytes));
+
+		if (!Strata::validPlacement(incoming.memory.allocation) || !validExecutionMode ||
+		    incoming.execution.workBudgetMs == 0 || invalidBackgroundTaskConfig ||
 		    incoming.scanIntervalMs < MinScanIntervalMs || incoming.deviceMaxAgeMs == 0 ||
 		    incoming.arpResponseWaitMs == 0 || incoming.maxDevices == 0 ||
 		    incoming.maxHostsPerSubnet == 0 || incoming.arpBatchSize == 0 ||
@@ -1915,22 +2039,8 @@ struct ScoutImpl {
 		    incoming.maxDevices > SIZE_MAX / SCOUT_MAX_ENDPOINTS_PER_DEVICE ||
 		    (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
 		     incoming.providers.ssdp.maxDescriptionBytes == 0) ||
-		    invalidProviderSchedule || !validStackSize(incoming.taskStackBytes)) {
+		    invalidProviderSchedule) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
-		}
-
-		auto *cleanup = cleanupService();
-		if (cleanup == nullptr) {
-			return ScoutResult::failure(
-			    ScoutStatus::NoMemory,
-			    "failed to allocate Scout cleanup service"
-			);
-		}
-		if (!cleanup->ensureStarted()) {
-			return ScoutResult::failure(
-			    ScoutStatus::TaskCreateFailed,
-			    "failed to create Scout cleanup task"
-			);
 		}
 
 		ScoutLock lock(mutex);
@@ -1953,6 +2063,7 @@ struct ScoutImpl {
 		diag.state = state;
 		diag.allocationPlacement = config.memory.allocation;
 		diag.taskStackPlacement = config.memory.taskStack;
+		diag.executionMode = config.execution.mode;
 		coverageKnown = false;
 		coverageAvailable = false;
 		identityDirty = false;
@@ -1974,6 +2085,21 @@ struct ScoutImpl {
 		stopRequested.store(false);
 		scanRequested.store(incoming.scanOnInit);
 		startReady.store(false, std::memory_order_release);
+		processingActive.store(false, std::memory_order_release);
+		processingOwner.store(nullptr, std::memory_order_release);
+		initializeSchedule(nowMs());
+
+		if (incoming.execution.mode == ScoutExecutionMode::CallerDriven) {
+			initialized = true;
+			state = ScoutState::Running;
+			diag.state = state;
+			diag.registryRegion = Strata::regionOf(devices);
+			diag.targetBufferRegion = Strata::regionOf(targets);
+			diag.enrichmentRegion = Strata::regionOf(providerTargets);
+			diag.taskStackRegion = Strata::Region::Unknown;
+			startReady.store(true, std::memory_order_release);
+			return ScoutResult::success("Scout initialized in caller-driven mode");
+		}
 
 		task = Strata::FreeRTOS::Task::create(
 		    &ScoutImpl::taskEntry,
@@ -2007,6 +2133,7 @@ struct ScoutImpl {
 
 	ScoutResult deinit(uint32_t timeoutMs) {
 		Strata::FreeRTOS::TaskHandle taskHandle = nullptr;
+		ScoutExecutionMode mode = ScoutExecutionMode::BackgroundTask;
 		{
 			ScoutLock lock(mutex);
 			if (!lock) {
@@ -2018,11 +2145,16 @@ struct ScoutImpl {
 				    "Scout is not initialized"
 				);
 			}
+			mode = config.execution.mode;
 			taskHandle = task.handle();
-			if (taskHandle == xTaskGetCurrentTaskHandle()) {
+			const auto currentTask = xTaskGetCurrentTaskHandle();
+			if ((taskHandle != nullptr && taskHandle == currentTask) ||
+			    (mode == ScoutExecutionMode::CallerDriven &&
+			     processingActive.load(std::memory_order_acquire) &&
+			     processingOwner.load(std::memory_order_acquire) == currentTask)) {
 				return ScoutResult::failure(
 				    ScoutStatus::Busy,
-				    "Scout cannot deinitialize from its own task"
+				    "Scout cannot deinitialize from its active processing context"
 				);
 			}
 			if (shutdownInProgress) {
@@ -2031,19 +2163,33 @@ struct ScoutImpl {
 			shutdownInProgress = true;
 			state = ScoutState::Stopping;
 			diag.state = state;
-			stopRequested.store(true);
+			stopRequested.store(true, std::memory_order_release);
 		}
 
 		if (taskHandle != nullptr) {
 			xTaskNotifyGive(taskHandle);
 		}
 
-		if (!stopped.take(timeoutTicks(timeoutMs))) {
-			ScoutLock lock(mutex);
-			if (lock) {
-				shutdownInProgress = false;
+		if (mode == ScoutExecutionMode::BackgroundTask) {
+			if (!stopped.take(timeoutTicks(timeoutMs))) {
+				ScoutLock lock(mutex);
+				if (lock) {
+					shutdownInProgress = false;
+				}
+				return ScoutResult::failure(ScoutStatus::Timeout, "Scout shutdown timed out");
 			}
-			return ScoutResult::failure(ScoutStatus::Timeout, "Scout shutdown timed out");
+		} else {
+			const uint64_t waitStarted = nowMs();
+			while (processingActive.load(std::memory_order_acquire)) {
+				if (timeoutMs != UINT32_MAX && nowMs() - waitStarted >= timeoutMs) {
+					ScoutLock lock(mutex);
+					if (lock) {
+						shutdownInProgress = false;
+					}
+					return ScoutResult::failure(ScoutStatus::Timeout, "Scout shutdown timed out");
+				}
+				vTaskDelay(1);
+			}
 		}
 
 		ScoutLock lock(mutex);
@@ -2065,8 +2211,11 @@ struct ScoutImpl {
 		diag.targetBufferRegion = Strata::Region::Unknown;
 		diag.enrichmentRegion = Strata::Region::Unknown;
 		diag.taskStackRegion = Strata::Region::Unknown;
+		processingOwner.store(nullptr, std::memory_order_release);
+		processingActive.store(false, std::memory_order_release);
 		return ScoutResult::success("Scout deinitialized");
 	}
+
 };
 
 namespace {
@@ -2274,8 +2423,17 @@ Scout::~Scout() {
 		return;
 	}
 
-	if (_impl->task.handle() == xTaskGetCurrentTaskHandle()) {
+	const auto currentTask = xTaskGetCurrentTaskHandle();
+	const bool activeBackgroundCallback =
+	    _impl->task.handle() != nullptr && _impl->task.handle() == currentTask;
+	const bool activeCallerDrivenCallback =
+	    _impl->config.execution.mode == ScoutExecutionMode::CallerDriven &&
+	    _impl->processingActive.load(std::memory_order_acquire) &&
+	    _impl->processingOwner.load(std::memory_order_acquire) == currentTask;
+
+	if (activeBackgroundCallback || activeCallerDrivenCallback) {
 		auto *service = cleanupService();
+		const bool cleanupReady = service != nullptr && service->ensureStarted();
 		{
 			ScoutLock lock(_impl->mutex);
 			if (lock) {
@@ -2283,11 +2441,13 @@ Scout::~Scout() {
 			}
 		}
 		ScoutImpl *deferred = _impl.release();
-		deferred->stopRequested.store(true);
-		deferred->scanRequested.store(false);
-		if (service != nullptr) {
+		deferred->stopRequested.store(true, std::memory_order_release);
+		deferred->scanRequested.store(false, std::memory_order_release);
+		if (cleanupReady) {
 			service->enqueue(deferred);
 		}
+		// If the cleanup service cannot be created, intentionally retain the runtime
+		// rather than freeing it while its callback/process frame is active.
 		return;
 	}
 
@@ -2329,6 +2489,50 @@ ScoutResult Scout::scanNow() {
 		xTaskNotifyGive(_impl->task.handle());
 	}
 	return ScoutResult::success("scan requested");
+}
+
+ScoutResult Scout::process(uint32_t budgetMs) {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	{
+		ScoutLock lock(_impl->mutex);
+		if (!lock) {
+			return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+		}
+		if (!_impl->initialized) {
+			return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+		}
+		if (_impl->config.execution.mode != ScoutExecutionMode::CallerDriven) {
+			return ScoutResult::failure(
+			    ScoutStatus::WrongExecutionMode,
+			    "process() is only available in caller-driven mode"
+			);
+		}
+		if (_impl->state != ScoutState::Running) {
+			return ScoutResult::failure(ScoutStatus::Busy, "Scout is not running");
+		}
+	}
+	return _impl->processWork(budgetMs);
+}
+
+uint32_t Scout::timeUntilNextWork() const {
+	if (!_impl) {
+		return UINT32_MAX;
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock || !_impl->initialized) {
+		return UINT32_MAX;
+	}
+	return _impl->timeUntilNextWorkInternal();
+}
+
+ScoutExecutionMode Scout::executionMode() const {
+	if (!_impl) {
+		return ScoutExecutionMode::BackgroundTask;
+	}
+	ScoutLock lock(_impl->mutex);
+	return lock ? _impl->config.execution.mode : ScoutExecutionMode::BackgroundTask;
 }
 
 bool Scout::isInitialized() const {
@@ -2545,6 +2749,7 @@ ScoutDiagnostics Scout::diagnostics() const {
 
 	ScoutDiagnostics snapshot = _impl->diag;
 	snapshot.state = _impl->state;
+	snapshot.executionMode = _impl->config.execution.mode;
 	snapshot.coverageAvailable = _impl->coverageAvailable;
 	snapshot.deviceCount = _impl->deviceCount;
 	snapshot.registryRegion = Strata::regionOf(_impl->devices);
@@ -2595,6 +2800,8 @@ const char *Scout::statusToString(ScoutStatus status) const {
 		return "task_create_failed";
 	case ScoutStatus::Busy:
 		return "busy";
+	case ScoutStatus::WrongExecutionMode:
+		return "wrong_execution_mode";
 	case ScoutStatus::Cancelled:
 		return "cancelled";
 	case ScoutStatus::Timeout:
