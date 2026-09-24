@@ -76,6 +76,9 @@ jobs:
             python3 scripts/check_version.py
           fi
 
+      - name: Test release changelog generation
+        run: python3 tests/test_release_changelog.py
+
   source-audit:
     runs-on: [self-hosted, zekstack-ci]
     steps:
