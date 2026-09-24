@@ -736,8 +736,7 @@ HttpFetchResult fetchHttpBody(
 			    address->ai_addrlen < sizeof(sockaddr_in)) {
 				continue;
 			}
-			remote.sin_addr =
-			    reinterpret_cast<const sockaddr_in *>(address->ai_addr)->sin_addr;
+			remote.sin_addr = reinterpret_cast<const sockaddr_in *>(address->ai_addr)->sin_addr;
 			resolved = true;
 			break;
 		}
@@ -1298,10 +1297,9 @@ ProviderRunStats runSsdpProvider(
 		return stats;
 	}
 	state.interfaceCursor %= interfaceCount;
-	const size_t plannedInterfaces =
-	    state.remainingInterfaces == 0
-	        ? interfaceCount
-	        : std::min(state.remainingInterfaces, interfaceCount);
+	const size_t plannedInterfaces = state.remainingInterfaces == 0
+	                                     ? interfaceCount
+	                                     : std::min(state.remainingInterfaces, interfaceCount);
 	if (state.remainingInterfaces == 0) {
 		state.remainingInterfaces = plannedInterfaces;
 	}
@@ -1353,7 +1351,8 @@ ProviderRunStats runSsdpProvider(
 			break;
 		}
 		stats.workUnits++;
-		const size_t interfaceIndex = (state.interfaceCursor + processedInterfaces) % interfaceCount;
+		const size_t interfaceIndex =
+		    (state.interfaceCursor + processedInterfaces) % interfaceCount;
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
@@ -1561,10 +1560,9 @@ ProviderRunStats runSsdpProvider(
 		recordProviderStop(stats, control);
 	}
 	state.interfaceCursor = (state.interfaceCursor + processedInterfaces) % interfaceCount;
-	state.remainingInterfaces =
-	    processedInterfaces >= state.remainingInterfaces
-	        ? 0
-	        : state.remainingInterfaces - processedInterfaces;
+	state.remainingInterfaces = processedInterfaces >= state.remainingInterfaces
+	                                ? 0
+	                                : state.remainingInterfaces - processedInterfaces;
 	if (!stats.budgetYielded || stats.cancelled) {
 		state.remainingInterfaces = 0;
 	}
