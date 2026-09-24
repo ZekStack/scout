@@ -41,16 +41,10 @@ void loop() {
 		);
 
 		for (size_t member = 0; member < group.memberCount; ++member) {
-			const auto &mac = group.members[member].mac;
-			Serial.printf(
-			    "  %02X:%02X:%02X:%02X:%02X:%02X\n",
-			    mac.bytes[0],
-			    mac.bytes[1],
-			    mac.bytes[2],
-			    mac.bytes[3],
-			    mac.bytes[4],
-			    mac.bytes[5]
-			);
+			char macText[18]{};
+			if (scoutFormatMac(group.members[member].mac, macText, sizeof(macText))) {
+				Serial.printf("  %s\n", macText);
+			}
 		}
 	}
 }
