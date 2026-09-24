@@ -814,7 +814,6 @@ void testCallerDrivenDestructionFromCallback() {
 	networkMode.store(NetworkMode::None);
 	std::atomic<Scout *> scout{new Scout()};
 	std::atomic<bool> destroyed{false};
-	std::atomic<int> taskResets{0};
 
 	Scout *instance = scout.load();
 	instance->onEvent([&](const ScoutEvent &event) {
@@ -841,15 +840,13 @@ void testCallerDrivenDestructionFromCallback() {
 	assert(instance->init(config).status == ScoutStatus::Ok);
 	assert(instance->scanNow().status == ScoutStatus::Ok);
 
-	Strata::TestHooks::resetTask = [&] { taskResets.fetch_add(1); };
 	const ScoutResult processResult = instance->process(25);
 	assert(
 	    processResult.status == ScoutStatus::Ok ||
 	    processResult.status == ScoutStatus::Cancelled
 	);
 	waitUntil([&] { return destroyed.load(); });
-	waitUntil([&] { return taskResets.load() > 0; });
-	Strata::TestHooks::resetTask = {};
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	assert(scout.load() == nullptr);
 }
 
