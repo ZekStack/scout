@@ -8,6 +8,8 @@ namespace scout_internal {
 enum class DnsParseStatus : uint8_t {
 	Ok,
 	NoRecord,
+	Timeout,
+	NetworkError,
 	Malformed,
 	ServerError,
 };
