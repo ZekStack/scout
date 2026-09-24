@@ -437,6 +437,7 @@ void emitMdnsResult(
 		observation.source = ScoutObservationSource::Mdns;
 		observation.ipv4.value = ipv4;
 		observation.interfaceIndex = target->interfaceIndex;
+		copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target->interfaceKey);
 		observation.identityExpiresAtMs = expiresAt;
 		addName(observation, ScoutNameSource::MdnsHostname, result.hostname, now, expiresAt);
 		addName(observation, ScoutNameSource::MdnsInstance, result.instance_name, now, expiresAt);
@@ -932,6 +933,7 @@ ProviderRunStats runIcmpProvider(
 			observation.source = ScoutObservationSource::Icmp;
 			observation.ipv4 = target.ipv4;
 			observation.interfaceIndex = target.interfaceIndex;
+			copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target.interfaceKey);
 			observation.confirmed = true;
 			sink(target.mac, observation, context);
 			stats.observations++;
@@ -1177,6 +1179,7 @@ ProviderRunStats runSsdpProvider(
 			observation.source = ScoutObservationSource::Ssdp;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
+		copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target->interfaceKey);
 			observation.identityExpiresAtMs = expiresAt;
 			appendMetadata(
 			    observation,
@@ -1396,6 +1399,7 @@ ProviderRunStats runNbnsProvider(
 			observation.source = ScoutObservationSource::Nbns;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
+		copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target->interfaceKey);
 			addName(observation, ScoutNameSource::Nbns, name, now, now + config.maxAgeMs);
 			sink(target->mac, observation, context);
 			stats.observations++;
@@ -1432,6 +1436,7 @@ ProviderRunStats runReverseDnsProvider(
 			observation.source = ScoutObservationSource::ReverseDns;
 			observation.ipv4 = target.ipv4;
 			observation.interfaceIndex = target.interfaceIndex;
+			copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target.interfaceKey);
 			const uint64_t expiresAt = expiryFromTtl(now, answer.ttlSeconds, config.maxAgeMs);
 			addName(observation, ScoutNameSource::ReverseDns, answer.hostname, now, expiresAt);
 			sink(target.mac, observation, context);
