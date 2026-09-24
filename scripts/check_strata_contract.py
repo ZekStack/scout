@@ -22,8 +22,8 @@ def reject_tree(needle: str, message: str) -> None:
 
 require(
     "library.json",
-    '"Strata": "https://github.com/ZekStack/strata.git#v0.1.2"',
-    "Scout must pin Strata v0.1.2",
+    '"Strata": "https://github.com/ZekStack/strata.git#fix-esp32-platform-detection"',
+    "Scout must pin the validated Strata ESP32 platform-detection fix",
 )
 require(
     "src/Scout.h",

@@ -47,15 +47,21 @@ def _resolve_previous_tag(target_ref):
     return output.strip() if ok else ""
 
 
-def _resolve_commits(range_spec, max_commits):
-    output = _require_git(
+def _resolve_commits(range_spec, max_commits=None):
+    args = [
+        "log",
+        "--no-merges",
+    ]
+    if max_commits is not None:
+        args.append(f"--max-count={max(max_commits, 1)}")
+    args.extend(
         [
-            "log",
-            "--no-merges",
-            f"--max-count={max_commits}",
             "--pretty=format:%h%x09%s",
             range_spec,
-        ],
+        ]
+    )
+    output = _require_git(
+        args,
         "[release_changelog] failed to resolve commit log",
     )
     commits = []
@@ -118,6 +124,12 @@ def _render_markdown(*, display_tag, commits):
     return "\n".join(lines)
 
 
+def _resolve_commit_limit(previous_tag, requested_max):
+    if requested_max is not None:
+        return max(requested_max, 1)
+    return 100 if previous_tag else None
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Generate release-changelog.md from git changes."
@@ -125,7 +137,15 @@ def _parse_args():
     parser.add_argument("--target-ref", default="HEAD")
     parser.add_argument("--tag-name", default="")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
-    parser.add_argument("--max-commits", type=int, default=100)
+    parser.add_argument(
+        "--max-commits",
+        type=int,
+        default=None,
+        help=(
+            "Maximum non-merge commits to include. Defaults to the complete history "
+            "for a first release and 100 commits when a previous release tag exists."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -143,7 +163,8 @@ def main():
     display_tag = args.tag_name.strip() or current_tag or target_ref
     previous_tag = _resolve_previous_tag(target_ref)
     range_spec = f"{previous_tag}..{target_ref}" if previous_tag else target_ref
-    commits = _resolve_commits(range_spec, max(args.max_commits, 1))
+    commit_limit = _resolve_commit_limit(previous_tag, args.max_commits)
+    commits = _resolve_commits(range_spec, commit_limit)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(

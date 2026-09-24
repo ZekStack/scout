@@ -1,7 +1,11 @@
 #pragma once
 
-#include <Arduino.h>
 #include <Strata.h>
+
+extern "C" {
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+}
 
 #include <cstddef>
 #include <cstdint>
