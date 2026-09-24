@@ -119,8 +119,11 @@ an acceptable public API path.
 
 ## SSDP and UPnP
 
-SSDP discovery uses a normal UDP `M-SEARCH` on each local IPv4 interface. Scout records
-`USN`, `SERVER`, `ST`, `LOCATION` and cache lifetime metadata.
+SSDP discovery uses a normal UDP `M-SEARCH` on each active Scout IPv4 interface. Provider
+interface enumeration reuses the same eligibility rules as ARP discovery: the lwIP interface must
+be up, link-up, ARP-capable and have a valid IPv4 address and netmask. This prevents inactive
+ESP-NETIF instances that retain configured addresses from producing false transport failures.
+Scout records `USN`, `SERVER`, `ST`, `LOCATION` and cache lifetime metadata.
 
 When enabled, Scout fetches a bounded number of plain-HTTP UPnP device descriptions and
 extracts only the fields useful to a user-facing device manager:
