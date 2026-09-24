@@ -422,9 +422,13 @@ struct ScoutImpl {
 
 				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
 				if (devices[j].details) {
-					auto *targetDetails = ensureDetailsLocked(i);
-					if (targetDetails != nullptr) {
-						scout_internal::mergeDeviceDetails(*targetDetails, *devices[j].details);
+					if (!devices[i].details) {
+						devices[i].details = std::move(devices[j].details);
+					} else {
+						scout_internal::mergeDeviceDetails(
+						    *devices[i].details,
+						    *devices[j].details
+						);
 					}
 				}
 				removeDeviceAtLocked(j);
