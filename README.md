@@ -134,14 +134,18 @@ In caller-driven mode, callbacks execute synchronously in the task that calls `p
 `scanNow()` remains non-blocking in both modes: it queues an immediate scan, and the selected
 execution owner performs it. Active ARP sweeps are incremental, and provider runs receive a
 cooperative cancellation/deadline context so `process()` can yield between bounded pieces of
-work and shutdown does not have to wait for complete provider rotations.
+work and shutdown does not have to wait for complete provider rotations. ICMP, mDNS, SSDP, NBNS
+and reverse-DNS runs preserve continuation state across budget yields; unfinished work is scheduled
+immediately instead of waiting for the provider's normal interval.
 
 `workBudgetMs` is a caller-driven scheduler budget, not a hard real-time guarantee for
 third-party/network APIs. The default is 1000 ms so the default SSDP response window can complete
 in one call. Smaller budgets improve responsiveness, but synchronous ESP-IDF operations and
 provider response windows may be sliced or shortened, so applications using very small budgets
-should validate the discovery coverage they require. BackgroundTask mode preserves full configured
-provider runs while still honoring shutdown cancellation.
+should validate the discovery coverage they require. Scout keeps event snapshots in runtime-owned
+storage, so caller-driven event delivery does not place multi-kilobyte `ScoutDeviceInfo` copies on
+the caller task's stack. Application callback locals still belong to that task. BackgroundTask mode
+preserves full configured provider runs while still honoring shutdown cancellation.
 
 Execution mode is fixed for one initialization lifetime. To switch modes, call `deinit()`, update
 the config, and call `init()` again.
