@@ -20,6 +20,7 @@ struct EnrichmentObservation {
 	ScoutObservationSource source = ScoutObservationSource::None;
 	ScoutIpv4Address ipv4{};
 	uint8_t interfaceIndex = 0;
+	char interfaceKey[SCOUT_INTERFACE_KEY_SIZE] = {};
 	bool confirmed = false;
 
 	ScoutDeviceName names[2]{};
