@@ -41,6 +41,22 @@ struct netif *findNetif(uint8_t index) {
 	return netif_get_by_index(index);
 }
 
+ScoutInterfaceType classifyInterface(const char *key) {
+	if (key == nullptr) {
+		return ScoutInterfaceType::Unknown;
+	}
+	if (std::strstr(key, "WIFI_STA") != nullptr) {
+		return ScoutInterfaceType::WifiStation;
+	}
+	if (std::strstr(key, "WIFI_AP") != nullptr) {
+		return ScoutInterfaceType::WifiAccessPoint;
+	}
+	if (std::strstr(key, "ETH") != nullptr) {
+		return ScoutInterfaceType::Ethernet;
+	}
+	return ScoutInterfaceType::Custom;
+}
+
 bool isEligible(struct netif *netif) {
 	if (netif == nullptr) {
 		return false;
@@ -82,6 +98,13 @@ esp_err_t collectInterfacesTcpip(void *rawContext) {
 		snapshot.index = netif_get_index(lwipNetif);
 		snapshot.ipv4 = netif_ip4_addr(lwipNetif)->addr;
 		snapshot.netmask = netif_ip4_netmask(lwipNetif)->addr;
+
+		const char *key = esp_netif_get_ifkey(espNetif);
+		if (key != nullptr) {
+			std::strncpy(snapshot.key, key, sizeof(snapshot.key) - 1);
+			snapshot.key[sizeof(snapshot.key) - 1] = '\0';
+		}
+		snapshot.type = classifyInterface(key);
 
 		char name[NETIF_NAMESIZE] = {0};
 		if (netif_index_to_name(snapshot.index, name) != nullptr) {

@@ -45,13 +45,20 @@ Expiry is deliberately not based on `lastConfirmedAtMs`: registry retention asks
 
 MAC identity is never deduplicated using IPv4 alone. A reused `(interface, IPv4)` endpoint is transferred to the most recently observed MAC so stale address ownership cannot remain duplicated in the registry.
 
-## Planned observation providers
+## Enrichment providers
 
-The registry and source mask are designed to accept additional providers without redefining application-level presence:
+After ARP updates the MAC registry, Scout runs independent bounded providers:
 
-- ICMP echo for stronger active liveness confirmation;
-- mDNS/DNS-SD for hostnames and services;
-- SSDP/UPnP discovery metadata;
-- optional NBNS enrichment.
+- ICMP actively confirms already-known IPv4 endpoints and advances confirmation timestamps on replies;
+- mDNS/DNS-SD learns hostnames, instance names, services, TXT metadata and dual-stack IPv6 aliases;
+- SSDP/UPnP learns discovery headers plus bounded friendly-name/manufacturer/model/serial/UDN description metadata;
+- optional NBNS learns legacy NetBIOS names;
+- optional reverse DNS learns resolver-provided hostnames;
+- an application-provided OUI resolver can attach vendor names to globally administered MAC addresses.
 
-Port scanning and heuristic device-type classification are not part of the initial scope.
+Provider schedules and network work budgets are separate from registry storage bounds. Provider
+results are applied only while their `(interface, IPv4)` target is still owned by the same MAC.
+IP-only enrichment never refreshes MAC registry retention; ARP remains the source of endpoint
+ownership and `lastSeenAtMs`, while ICMP may independently advance `lastConfirmedAtMs`. Provider
+failure does not invalidate ARP coverage and does not directly define Online/Offline state. Port
+scanning and heuristic device-type classification remain outside Scout's scope.

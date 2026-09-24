@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../Scout.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -8,11 +10,12 @@
 namespace scout_internal {
 
 constexpr size_t MaxInterfaces = 8;
-constexpr size_t InterfaceNameSize = 8;
 
 struct InterfaceSnapshot {
 	uint8_t index = 0;
-	char name[InterfaceNameSize] = {0};
+	char name[SCOUT_INTERFACE_NAME_SIZE] = {};
+	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
+	ScoutInterfaceType type = ScoutInterfaceType::Unknown;
 	uint32_t ipv4 = 0;
 	uint32_t netmask = 0;
 };

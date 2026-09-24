@@ -19,12 +19,20 @@ CXX_FLAGS=(
   -I"${ROOT_DIR}/src"
 )
 
-"${CXX}"   "${CXX_FLAGS[@]}"   "${ROOT_DIR}/src/internal/ScoutLogic.cpp"   "${ROOT_DIR}/tests/host/test_scout_logic.cpp"   -o "${BUILD_DIR}/scout-host-tests"
+"${CXX}" \
+  "${CXX_FLAGS[@]}" \
+  "${ROOT_DIR}/src/internal/ScoutLogic.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutEnrichment.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutDns.cpp" \
+  "${ROOT_DIR}/tests/host/test_scout_logic.cpp" \
+  -o "${BUILD_DIR}/scout-host-tests"
 
-ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1   "${BUILD_DIR}/scout-host-tests"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+  "${BUILD_DIR}/scout-host-tests"
 
 "${CXX}" -I"${ROOT_DIR}/tests/host/runtime_stubs" "${CXX_FLAGS[@]}" -pthread \
   "${ROOT_DIR}/src/internal/ScoutLogic.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutEnrichment.cpp" \
   "${ROOT_DIR}/tests/host/test_scout_runtime.cpp" \
   -o "${BUILD_DIR}/scout-runtime-tests"
 

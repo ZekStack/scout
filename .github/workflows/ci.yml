@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: scout-${{ github.ref }}
-  cancel-in-progress: false
+  group: scout-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 env:
   ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: https://espressif.github.io/arduino-esp32/package_esp32_index.json
@@ -164,16 +164,6 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Cache PIOArduino
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.platformio
-            ~/.cache/pip
-          key: ${{ runner.os }}-pioarduino-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-${{ hashFiles('**/library.json') }}
-          restore-keys: |
-            ${{ runner.os }}-pioarduino-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-
-
       - name: Install PIOArduino Core
         run: python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
 
@@ -190,6 +180,7 @@ jobs:
                 --board ${{ matrix.board }} \
                 --lib="." \
                 --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+                --project-option "framework=arduino" \
                 --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
                 --project-option "build_unflags=-std=gnu++11" \
                 --project-option "build_flags=-std=gnu++20"
@@ -241,16 +232,6 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "$install_dir" arduino-cli
           echo "$install_dir" >> "$GITHUB_PATH"
           "$install_dir/arduino-cli" version
-
-      - name: Cache Arduino CLI packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.arduino15
-            ~/.cache/arduino
-          key: ${{ runner.os }}-arduino-cli-${{ env.ARDUINO_CLI_VERSION }}-esp32-${{ env.ESP32_CORE_VERSION }}
-          restore-keys: |
-            ${{ runner.os }}-arduino-cli-${{ env.ARDUINO_CLI_VERSION }}-esp32-
 
       - name: Install ESP32 core
         run: |

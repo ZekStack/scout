@@ -5,10 +5,10 @@ Scout is a low-level discovery and observation service. It is intentionally not 
 The intended application stack is:
 
 ~~~text
-Scout
-  -> raw network observations
-Presence/application layer
-  -> Unknown / Online / Offline and stateSince
+ARP / ICMP / mDNS / SSDP / optional name providers
+  -> Scout MAC registry + rich enrichment + identity evidence
+NetworkDeviceManager / presence layer
+  -> friendly presentation, persistent IDs, Unknown / Online / Offline
 Signal/event bus
   -> automation triggers
 Automation engine
@@ -38,7 +38,7 @@ Scout also re-resolves the lwIP interface by index for each TCP/IP-context opera
 
 ARP discovery uses the MAC address as the stable registry key.
 
-A device may expose several endpoints. Each endpoint contains an IPv4 address and lwIP interface index/name. This lets an ESP32 with simultaneous Ethernet and Wi-Fi observe the same MAC from more than one interface without duplicating the device record.
+A device may expose several endpoints. Each endpoint contains IPv4, optional IPv6 aliases, lwIP interface index/name, the stable ESP-NETIF key, interface type, timestamps and source masks. This lets simultaneous Ethernet/Wi-Fi observation remain attributable to the correct network path.
 
 The public identity enum already reserves ProvisionalIpv4 for future mechanisms that can discover an IP address before a MAC address is known.
 
@@ -48,7 +48,10 @@ Registry maintenance preserves three invariants:
 - no duplicate endpoint inside one device;
 - one current MAC owner for each `(interface, IPv4)` endpoint across the registry.
 
-If an endpoint is later observed on another MAC, ownership moves to the new observation but the older device record remains until its retention age expires.
+If an endpoint is later observed on another MAC, ownership moves to the new observation but the
+older device record remains until its retention age expires. Enrichment providers operate from
+snapshots of these endpoints and revalidate ownership before applying a delayed result, so an
+IP-only response cannot attach metadata to a MAC that no longer owns the address.
 
 ## Coverage
 
@@ -60,13 +63,27 @@ A higher-level presence implementation should suppress offline inference while c
 
 ## Bounded resources
 
-The v0.1 foundation uses fixed-capacity Strata-backed buffers allocated during init:
-
-- device registry;
-- subnet target buffer;
-- ARP-before scratch buffer;
-- ARP-after scratch buffer.
+The v0.1 foundation uses bounded Strata-backed storage. The compact device registry, subnet
+targets, provider/identity tables and ARP scratch buffers are allocated during init. Large
+`ScoutDeviceDetails` records are allocated lazily per enriched device, which keeps the configured
+MAC capacity independent from worst-case metadata storage.
 
 A subnet larger than maxHostsPerSubnet is skipped instead of allowing an accidental /16 or /8 sweep.
 
 Device records are also time-bounded. `deviceMaxAgeMs` removes records that have not been observed recently enough according to `lastSeenAtMs`. This is registry housekeeping only; it does not define application-level Online/Offline state.
+
+## Enrichment and identity
+
+Heavy names, services and metadata live outside the compact event snapshot in lazily created
+`ScoutDeviceDetails`. Providers run on independent schedules and feed normalized observations
+back through Scout's synchronized registry path. Bounded providers rotate persistent cursors
+across their work sets so a per-run budget cannot permanently starve later targets.
+
+Strong identifiers such as a shared UPnP UDN can create a `ScoutIdentityGroup`; moderate
+evidence such as a matching mDNS hostname is retained only as a relation. Provider-derived
+identity fields retain their source lifetime, and expiry runs independently from the ARP scan
+cadence before rebuilding the identity graph so stale evidence cannot preserve a physical-device
+group. Strong mDNS identifiers are service-namespaced; generic TXT coincidences remain metadata or
+moderate evidence. MAC records are never merged solely to make a friendlier physical-device view.
+
+See [`enrichment.md`](enrichment.md) and [`identity.md`](identity.md) for the detailed contracts.

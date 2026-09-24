@@ -1,7 +1,9 @@
 #include "Scout.h"
 
+#include "internal/ScoutEnrichment.h"
 #include "internal/ScoutLogic.h"
 #include "internal/ScoutNetwork.h"
+#include "internal/ScoutProviders.h"
 
 #include <strata/freertos/BinarySemaphore.h>
 #include <strata/freertos/Mutex.h>
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -25,6 +28,7 @@ constexpr uint32_t StopPollMs = 20;
 constexpr uint32_t MinScanIntervalMs = 1000;
 constexpr uint32_t MinTaskStackBytes = 4096;
 constexpr uint32_t CleanupTaskStackBytes = 4096;
+constexpr uint32_t EnrichmentExpiryPollMs = 1000;
 
 uint64_t nowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -85,10 +89,36 @@ class ScoutLock {
 	}
 }
 
+int enrichmentSourcePriority(ScoutObservationSource source) {
+	switch (source) {
+	case ScoutObservationSource::Ssdp:
+		return 400;
+	case ScoutObservationSource::Mdns:
+		return 300;
+	case ScoutObservationSource::Nbns:
+		return 200;
+	case ScoutObservationSource::ReverseDns:
+		return 100;
+	default:
+		return 0;
+	}
+}
+
+bool acceptsEnrichmentSource(ScoutObservationSource current, ScoutObservationSource incoming) {
+	return current == ScoutObservationSource::None || current == incoming ||
+	       enrichmentSourcePriority(incoming) > enrichmentSourcePriority(current);
+}
+
+template <typename T> void resetInPlace(T &value) {
+	std::destroy_at(&value);
+	std::construct_at(&value);
+}
+
 } // namespace
 
 struct ScoutDeviceRecord {
 	ScoutDeviceInfo info{};
+	Strata::UniquePtr<ScoutDeviceDetails> details;
 };
 
 struct ScoutImpl {
@@ -110,11 +140,27 @@ struct ScoutImpl {
 	uint32_t *targets = nullptr;
 	scout_internal::ArpMapping *beforeMappings = nullptr;
 	scout_internal::ArpMapping *afterMappings = nullptr;
+	scout_internal::ProviderTarget *providerTargets = nullptr;
+	ScoutIdentityGroup *identityGroups = nullptr;
+	ScoutIdentityRelation *identityRelations = nullptr;
+	size_t *identityParents = nullptr;
+	char *httpScratch = nullptr;
+
 	size_t deviceCapacity = 0;
 	size_t deviceCount = 0;
 	size_t mappingCapacity = 0;
+	size_t providerTargetCapacity = 0;
+	size_t identityGroupCountValue = 0;
+	size_t identityRelationCountValue = 0;
+	size_t identityRelationCapacity = 0;
+	size_t httpScratchCapacity = 0;
 
 	ScoutEventCallback callback;
+	ScoutOuiLookupCallback ouiLookup;
+	size_t icmpCursor = 0;
+	size_t reverseDnsCursor = 0;
+	size_t nbnsCursor = 0;
+	size_t mdnsServiceCursor = 0;
 
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
@@ -127,6 +173,7 @@ struct ScoutImpl {
 	bool shutdownInProgress = false;
 	bool coverageKnown = false;
 	bool coverageAvailable = false;
+	bool identityDirty = false;
 
 	uint64_t nextScanId = 1;
 	ScoutDiagnostics diag{};
@@ -145,9 +192,24 @@ struct ScoutImpl {
 		beforeMappings = nullptr;
 		Strata::free(afterMappings);
 		afterMappings = nullptr;
+		Strata::free(providerTargets);
+		providerTargets = nullptr;
+		Strata::free(identityGroups);
+		identityGroups = nullptr;
+		Strata::free(identityRelations);
+		identityRelations = nullptr;
+		Strata::free(identityParents);
+		identityParents = nullptr;
+		Strata::free(httpScratch);
+		httpScratch = nullptr;
 		deviceCapacity = 0;
 		deviceCount = 0;
 		mappingCapacity = 0;
+		providerTargetCapacity = 0;
+		identityGroupCountValue = 0;
+		identityRelationCountValue = 0;
+		identityRelationCapacity = 0;
+		httpScratchCapacity = 0;
 	}
 
 	bool allocateBuffers(const ScoutConfig &incoming) {
@@ -184,6 +246,40 @@ struct ScoutImpl {
 		if (beforeMappings == nullptr || afterMappings == nullptr) {
 			releaseBuffers();
 			return false;
+		}
+
+		providerTargetCapacity = incoming.maxDevices * SCOUT_MAX_ENDPOINTS_PER_DEVICE;
+		providerTargets = Strata::allocateArray<scout_internal::ProviderTarget>(
+		    providerTargetCapacity,
+		    incoming.memory.allocation
+		);
+		identityGroups = Strata::allocateArray<ScoutIdentityGroup>(
+		    incoming.maxDevices,
+		    incoming.memory.allocation
+		);
+		identityRelations = Strata::allocateArray<ScoutIdentityRelation>(
+		    incoming.maxIdentityRelations,
+		    incoming.memory.allocation
+		);
+		identityParents =
+		    Strata::allocateArray<size_t>(incoming.maxDevices, incoming.memory.allocation);
+		identityRelationCapacity = incoming.maxIdentityRelations;
+
+		if (providerTargets == nullptr || identityGroups == nullptr ||
+		    identityRelations == nullptr || identityParents == nullptr) {
+			releaseBuffers();
+			return false;
+		}
+
+		if (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
+		    incoming.providers.ssdp.maxDescriptionBytes > 0) {
+			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes;
+			httpScratch =
+			    Strata::allocateArray<char>(httpScratchCapacity, incoming.memory.allocation);
+			if (httpScratch == nullptr) {
+				releaseBuffers();
+				return false;
+			}
 		}
 
 		return true;
@@ -290,6 +386,36 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	ScoutDeviceDetails *ensureDetailsLocked(size_t index) {
+		if (index >= deviceCount) {
+			return nullptr;
+		}
+		if (!devices[index].details) {
+			devices[index].details =
+			    Strata::makeUnique<ScoutDeviceDetails>(config.memory.allocation);
+			if (!devices[index].details) {
+				diag.enrichmentAllocationFailures++;
+				return nullptr;
+			}
+			devices[index].details->locallyAdministeredMac =
+			    scout_internal::macIsLocallyAdministered(devices[index].info.mac);
+			devices[index].details->multicastMac =
+			    scout_internal::macIsMulticast(devices[index].info.mac);
+		}
+		return devices[index].details.get();
+	}
+
+	void snapshotDetailsLocked(size_t index, ScoutDeviceDetails &out) const {
+		if (devices[index].details) {
+			out = *devices[index].details;
+			return;
+		}
+		resetInPlace(out);
+		out.locallyAdministeredMac =
+		    scout_internal::macIsLocallyAdministered(devices[index].info.mac);
+		out.multicastMac = scout_internal::macIsMulticast(devices[index].info.mac);
+	}
+
 	size_t findEndpointOwner(uint8_t interfaceIndex, uint32_t ipv4, size_t excludedIndex) const {
 		for (size_t i = 0; i < deviceCount; ++i) {
 			if (i == excludedIndex) {
@@ -312,11 +438,14 @@ struct ScoutImpl {
 		}
 		const size_t lastIndex = deviceCount - 1;
 		if (index != lastIndex) {
-			devices[index] = devices[lastIndex];
+			devices[index].info = devices[lastIndex].info;
+			devices[index].details = std::move(devices[lastIndex].details);
 		}
-		devices[lastIndex].info = {};
+		resetInPlace(devices[lastIndex].info);
+		devices[lastIndex].details.reset();
 		deviceCount--;
 		diag.deviceCount = deviceCount;
+		identityDirty = true;
 	}
 
 	void deduplicateRegistryLocked() {
@@ -329,6 +458,16 @@ struct ScoutImpl {
 				}
 
 				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
+				if (devices[j].details) {
+					if (!devices[i].details) {
+						devices[i].details = std::move(devices[j].details);
+					} else {
+						scout_internal::mergeDeviceDetails(
+						    *devices[i].details,
+						    *devices[j].details
+						);
+					}
+				}
 				removeDeviceAtLocked(j);
 				diag.deduplicatedDeviceCount++;
 			}
@@ -416,6 +555,7 @@ struct ScoutImpl {
 			deduplicateRegistryLocked();
 		}
 		expireStaleDevices(scanId, nowMs());
+		flushIdentityIfDirty();
 	}
 
 	void observe(
@@ -451,7 +591,8 @@ struct ScoutImpl {
 					index = deviceCount++;
 					discovered = true;
 					auto &info = devices[index].info;
-					info = {};
+					resetInPlace(info);
+					devices[index].details.reset();
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
 					info.mac = info.key.mac;
@@ -460,7 +601,6 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
-
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
 				}
@@ -492,6 +632,7 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = devices[previousOwner].info;
+					event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Endpoint);
 					event.message = "device endpoint reassigned";
 				}
 
@@ -500,8 +641,12 @@ struct ScoutImpl {
 				    info,
 				    interfaceSnapshot.index,
 				    interfaceSnapshot.name,
+				    interfaceSnapshot.key,
+				    interfaceSnapshot.type,
 				    ipv4,
-				    observedAt
+				    observedAt,
+				    source,
+				    confirmed
 				);
 
 				if (discovered) {
@@ -512,6 +657,7 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = info;
+					event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Endpoint);
 					event.message = confirmed ? "device discovered by active ARP"
 					                          : "device discovered from ARP cache";
 				} else if (endpointChanged || confirmed) {
@@ -523,6 +669,9 @@ struct ScoutImpl {
 					event.source = source;
 					event.hasDevice = true;
 					event.device = info;
+					event.changes = endpointChanged
+					                    ? scoutDeviceChangeMask(ScoutDeviceChange::Endpoint)
+					                    : scoutDeviceChangeMask(ScoutDeviceChange::Confirmation);
 					event.message =
 					    endpointChanged ? "device endpoint changed" : "device actively observed";
 				}
@@ -535,6 +684,718 @@ struct ScoutImpl {
 				break;
 			}
 		}
+	}
+
+	ScoutEndpoint *findObservationEndpointLocked(
+	    ScoutDeviceInfo &info, const scout_internal::EnrichmentObservation &observation
+	) {
+		for (size_t i = 0; i < info.endpointCount; ++i) {
+			auto &endpoint = info.endpoints[i];
+			if (endpoint.interfaceIndex != observation.interfaceIndex) {
+				continue;
+			}
+			if (observation.interfaceKey[0] != '\0' && std::strncmp(
+			                                               endpoint.interfaceKey,
+			                                               observation.interfaceKey,
+			                                               sizeof(endpoint.interfaceKey)
+			                                           ) != 0) {
+				continue;
+			}
+			if (observation.ipv4.valid() && endpoint.ipv4 != observation.ipv4) {
+				continue;
+			}
+			return &endpoint;
+		}
+		return nullptr;
+	}
+
+	void accumulateProviderStats(
+	    ScoutProviderDiagnostics &target, const scout_internal::ProviderRunStats &run
+	) {
+		ScoutLock lock(mutex);
+		if (!lock) {
+			return;
+		}
+		target.runs++;
+		target.observations += run.observations;
+		target.errors += run.errors;
+		target.timeouts += run.timeouts;
+		target.noRecords += run.noRecords;
+		target.malformedResponses += run.malformedResponses;
+		target.serverErrors += run.serverErrors;
+		target.droppedObservations += run.dropped;
+	}
+
+	size_t snapshotProviderTargets() {
+		ScoutLock lock(mutex);
+		if (!lock || providerTargets == nullptr) {
+			return 0;
+		}
+		size_t count = 0;
+		for (size_t deviceIndex = 0; deviceIndex < deviceCount; ++deviceIndex) {
+			const auto &info = devices[deviceIndex].info;
+			for (size_t endpointIndex = 0; endpointIndex < info.endpointCount; ++endpointIndex) {
+				if (count >= providerTargetCapacity) {
+					return count;
+				}
+				const auto &endpoint = info.endpoints[endpointIndex];
+				if (!endpoint.ipv4.valid()) {
+					continue;
+				}
+				auto &target = providerTargets[count++];
+				target = {};
+				target.mac = info.mac;
+				target.ipv4 = endpoint.ipv4;
+				target.interfaceIndex = endpoint.interfaceIndex;
+				scout_internal::copyText(
+				    target.interfaceKey,
+				    sizeof(target.interfaceKey),
+				    endpoint.interfaceKey
+				);
+			}
+		}
+		return count;
+	}
+
+	uint64_t identityStateHashLocked() const {
+		constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
+		constexpr uint64_t Prime = 1099511628211ULL;
+		uint64_t hash = OffsetBasis;
+		auto mix = [&](uint8_t byte) {
+			hash ^= byte;
+			hash *= Prime;
+		};
+		for (size_t i = 0; i < identityGroupCountValue; ++i) {
+			const auto &group = identityGroups[i];
+			for (size_t byte = 0; byte < sizeof(group.runtimeId); ++byte) {
+				mix(static_cast<uint8_t>(group.runtimeId >> (byte * 8U)));
+			}
+			mix(static_cast<uint8_t>(group.memberCount));
+			mix(static_cast<uint8_t>(group.confidence));
+		}
+		for (size_t i = 0; i < identityRelationCountValue; ++i) {
+			const auto &relation = identityRelations[i];
+			for (uint8_t byte : relation.first.mac.bytes) {
+				mix(byte);
+			}
+			for (uint8_t byte : relation.second.mac.bytes) {
+				mix(byte);
+			}
+			mix(static_cast<uint8_t>(relation.evidence.type));
+			mix(static_cast<uint8_t>(relation.evidence.confidence));
+		}
+		return hash;
+	}
+
+	size_t identityRoot(size_t index) {
+		while (identityParents[index] != index) {
+			identityParents[index] = identityParents[identityParents[index]];
+			index = identityParents[index];
+		}
+		return index;
+	}
+
+	void unionIdentity(size_t left, size_t right) {
+		const size_t leftRoot = identityRoot(left);
+		const size_t rightRoot = identityRoot(right);
+		if (leftRoot != rightRoot) {
+			identityParents[rightRoot] = leftRoot;
+		}
+	}
+
+	void rebuildIdentityState() {
+		ScoutEvent event{};
+		bool changed = false;
+		{
+			ScoutLock lock(mutex);
+			if (!lock || identityGroups == nullptr || identityRelations == nullptr ||
+			    identityParents == nullptr) {
+				return;
+			}
+			const uint64_t oldHash = identityStateHashLocked();
+			identityGroupCountValue = 0;
+			identityRelationCountValue = 0;
+			for (size_t i = 0; i < deviceCount; ++i) {
+				identityParents[i] = i;
+			}
+
+			for (size_t left = 0; left < deviceCount; ++left) {
+				if (!devices[left].details) {
+					continue;
+				}
+				for (size_t right = left + 1; right < deviceCount; ++right) {
+					if (!devices[right].details) {
+						continue;
+					}
+					ScoutIdentityRelation relation{};
+					if (!scout_internal::identityRelation(
+					        devices[left].info,
+					        *devices[left].details,
+					        devices[right].info,
+					        *devices[right].details,
+					        relation
+					    )) {
+						continue;
+					}
+					if (identityRelationCountValue < identityRelationCapacity) {
+						identityRelations[identityRelationCountValue++] = relation;
+					} else {
+						diag.identityRelationDrops++;
+					}
+					if (static_cast<uint8_t>(relation.evidence.confidence) >=
+					    static_cast<uint8_t>(ScoutIdentityConfidence::Strong)) {
+						unionIdentity(left, right);
+					}
+				}
+			}
+
+			for (size_t rootCandidate = 0; rootCandidate < deviceCount; ++rootCandidate) {
+				if (identityRoot(rootCandidate) != rootCandidate) {
+					continue;
+				}
+				ScoutIdentityGroup group{};
+				for (size_t i = 0; i < deviceCount; ++i) {
+					if (identityRoot(i) != rootCandidate) {
+						continue;
+					}
+					if (group.memberCount < SCOUT_MAX_IDENTITY_GROUP_MEMBERS) {
+						group.members[group.memberCount++] = devices[i].info.key;
+					}
+				}
+				if (group.memberCount < 2) {
+					continue;
+				}
+				std::sort(
+				    group.members,
+				    group.members + group.memberCount,
+				    [](const ScoutDeviceKey &left, const ScoutDeviceKey &right) {
+					    return std::memcmp(
+					               left.mac.bytes,
+					               right.mac.bytes,
+					               sizeof(left.mac.bytes)
+					           ) < 0;
+				    }
+				);
+				group.runtimeId =
+				    scout_internal::identityGroupRuntimeId(group.members, group.memberCount);
+				group.confidence = ScoutIdentityConfidence::Strong;
+
+				auto contains = [&](const ScoutDeviceKey &key) {
+					for (size_t i = 0; i < group.memberCount; ++i) {
+						if (group.members[i] == key) {
+							return true;
+						}
+					}
+					return false;
+				};
+				for (size_t relationIndex = 0; relationIndex < identityRelationCountValue &&
+				                               group.evidenceCount < SCOUT_MAX_IDENTITY_EVIDENCE;
+				     ++relationIndex) {
+					const auto &relation = identityRelations[relationIndex];
+					if (!contains(relation.first) || !contains(relation.second) ||
+					    static_cast<uint8_t>(relation.evidence.confidence) <
+					        static_cast<uint8_t>(ScoutIdentityConfidence::Strong)) {
+						continue;
+					}
+					group.evidence[group.evidenceCount++] = relation.evidence;
+					if (static_cast<uint8_t>(relation.evidence.confidence) >
+					    static_cast<uint8_t>(group.confidence)) {
+						group.confidence = relation.evidence.confidence;
+					}
+				}
+				identityGroups[identityGroupCountValue++] = group;
+			}
+
+			diag.identityGroupCount = identityGroupCountValue;
+			diag.identityRelationCount = identityRelationCountValue;
+			const uint64_t newHash = identityStateHashLocked();
+			changed = oldHash != newHash;
+			identityDirty = false;
+			if (changed) {
+				diag.identityGroupChanges++;
+				event.type = ScoutEventType::IdentityGroupChanged;
+				event.status = ScoutStatus::Ok;
+				event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Identity);
+				event.message = "device identity relationships changed";
+			}
+		}
+		if (changed) {
+			emit(event);
+		}
+	}
+
+	void flushIdentityIfDirty() {
+		bool dirty = false;
+		{
+			ScoutLock lock(mutex);
+			dirty = lock && identityDirty;
+		}
+		if (dirty) {
+			rebuildIdentityState();
+		}
+	}
+
+	void applyEnrichmentObservation(
+	    const ScoutMacAddress &mac, const scout_internal::EnrichmentObservation &observation
+	) {
+		ScoutEvent event{};
+		bool shouldEmit = false;
+		{
+			ScoutLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			const size_t index = findDeviceByMac(mac.bytes);
+			if (index == SIZE_MAX) {
+				return;
+			}
+
+			auto &record = devices[index];
+			auto &info = record.info;
+			ScoutEndpoint *observationEndpoint = findObservationEndpointLocked(info, observation);
+			if (observation.ipv4.valid() && observationEndpoint == nullptr) {
+				diag.staleProviderObservations++;
+				return;
+			}
+
+			const uint64_t observedAt = nowMs();
+			ScoutDeviceChange changes = ScoutDeviceChange::None;
+
+			const bool networkObservation = observation.source == ScoutObservationSource::Icmp ||
+			                                observation.source == ScoutObservationSource::Mdns ||
+			                                observation.source == ScoutObservationSource::Ssdp ||
+			                                observation.source == ScoutObservationSource::Nbns;
+			if (networkObservation) {
+				info.observationSources |= scoutObservationMask(observation.source);
+				if (info.observationCount != UINT32_MAX) {
+					info.observationCount++;
+				}
+			}
+			if (observation.confirmed) {
+				info.lastConfirmedAtMs = std::max(info.lastConfirmedAtMs, observedAt);
+				changes |= ScoutDeviceChange::Confirmation;
+			}
+
+			if (auto *endpoint = observationEndpoint; endpoint != nullptr) {
+				if (networkObservation) {
+					endpoint->observationSources |= scoutObservationMask(observation.source);
+				}
+				if (observation.confirmed) {
+					endpoint->lastConfirmedAtMs = std::max(endpoint->lastConfirmedAtMs, observedAt);
+				}
+				for (size_t i = 0; i < observation.ipv6Count; ++i) {
+					if (scout_internal::upsertIpv6(*endpoint, observation.ipv6[i])) {
+						changes |= ScoutDeviceChange::Address;
+					}
+				}
+			}
+
+			const bool hasRichData =
+			    observation.nameCount > 0 || observation.hasService ||
+			    observation.metadataCount > 0 || observation.manufacturer[0] != '\0' ||
+			    observation.modelName[0] != '\0' || observation.modelNumber[0] != '\0' ||
+			    observation.serialNumber[0] != '\0' || observation.persistentDeviceId[0] != '\0' ||
+			    observation.upnpUdn[0] != '\0';
+			if (hasRichData) {
+				auto *detailsPtr = ensureDetailsLocked(index);
+				if (detailsPtr != nullptr) {
+					auto &details = *detailsPtr;
+
+					for (size_t i = 0; i < observation.nameCount; ++i) {
+						const auto result = scout_internal::upsertName(
+						    details,
+						    observation.names[i].source,
+						    observation.names[i].value,
+						    observation.names[i].lastSeenAtMs,
+						    observation.names[i].expiresAtMs
+						);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Name;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.nameLimitDrops++;
+							}
+						}
+					}
+
+					if (observation.hasService) {
+						const auto result =
+						    scout_internal::upsertService(details, observation.service);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Service;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.serviceLimitDrops++;
+							}
+						}
+					}
+
+					for (size_t i = 0; i < observation.metadataCount; ++i) {
+						const auto result =
+						    scout_internal::upsertMetadata(details, observation.metadata[i]);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Metadata;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.metadataLimitDrops++;
+							}
+						}
+					}
+
+					auto updateText = [&](char *destination,
+					                      size_t capacity,
+					                      const char *source,
+					                      ScoutObservationSource &fieldSource,
+					                      uint64_t &expiresAtMs,
+					                      ScoutDeviceChange change) {
+						if (source == nullptr || source[0] == '\0' ||
+						    (destination[0] != '\0' &&
+						     !acceptsEnrichmentSource(fieldSource, observation.source))) {
+							return;
+						}
+						const bool valueChanged = std::strncmp(destination, source, capacity) != 0;
+						const bool sourceChanged = fieldSource != observation.source;
+						if (valueChanged) {
+							scout_internal::copyText(destination, capacity, source);
+						}
+						if (valueChanged || sourceChanged) {
+							changes |= change;
+						}
+						fieldSource = observation.source;
+						expiresAtMs = observation.identityExpiresAtMs;
+					};
+					updateText(
+					    details.manufacturer,
+					    sizeof(details.manufacturer),
+					    observation.manufacturer,
+					    details.manufacturerSource,
+					    details.manufacturerExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.modelName,
+					    sizeof(details.modelName),
+					    observation.modelName,
+					    details.modelNameSource,
+					    details.modelNameExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.modelNumber,
+					    sizeof(details.modelNumber),
+					    observation.modelNumber,
+					    details.modelNumberSource,
+					    details.modelNumberExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.serialNumber,
+					    sizeof(details.serialNumber),
+					    observation.serialNumber,
+					    details.serialNumberSource,
+					    details.serialNumberExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
+					updateText(
+					    details.persistentDeviceId,
+					    sizeof(details.persistentDeviceId),
+					    observation.persistentDeviceId,
+					    details.persistentDeviceIdSource,
+					    details.persistentDeviceIdExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
+					if (observation.persistentDeviceId[0] != '\0' &&
+					    observation.persistentDeviceNamespace[0] != '\0') {
+						const bool namespaceChanged = std::strncmp(
+						                                  details.persistentDeviceNamespace,
+						                                  observation.persistentDeviceNamespace,
+						                                  sizeof(details.persistentDeviceNamespace)
+						                              ) != 0;
+						scout_internal::copyText(
+						    details.persistentDeviceNamespace,
+						    sizeof(details.persistentDeviceNamespace),
+						    observation.persistentDeviceNamespace
+						);
+						if (namespaceChanged) {
+							changes |= ScoutDeviceChange::Identity;
+						}
+					}
+					updateText(
+					    details.upnpUdn,
+					    sizeof(details.upnpUdn),
+					    observation.upnpUdn,
+					    details.upnpUdnSource,
+					    details.upnpUdnExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
+
+					if (observation.source == ScoutObservationSource::Ssdp &&
+					    observation.manufacturer[0] != '\0' &&
+					    (!details.vendor.known || details.vendor.source == ScoutVendorSource::Oui ||
+					     details.vendor.source == ScoutVendorSource::Ssdp)) {
+						const bool vendorChanged =
+						    !details.vendor.known || std::strncmp(
+						                                 details.vendor.name,
+						                                 observation.manufacturer,
+						                                 sizeof(details.vendor.name)
+						                             ) != 0;
+						details.vendor.known = true;
+						details.vendor.source = ScoutVendorSource::Ssdp;
+						details.vendor.observationSource = ScoutObservationSource::Ssdp;
+						if (details.vendor.firstSeenAtMs == 0) {
+							details.vendor.firstSeenAtMs = observedAt;
+						}
+						details.vendor.lastSeenAtMs = observedAt;
+						details.vendor.expiresAtMs = observation.identityExpiresAtMs;
+						scout_internal::copyText(
+						    details.vendor.name,
+						    sizeof(details.vendor.name),
+						    observation.manufacturer
+						);
+						if (vendorChanged) {
+							changes |= ScoutDeviceChange::Vendor;
+						}
+					}
+
+					if (observation.source != ScoutObservationSource::None) {
+						details.lastEnrichedAtMs = observedAt;
+					}
+				}
+			}
+
+			const uint32_t changeMask = scoutDeviceChangeMask(changes);
+			const uint32_t identityRelevantMask =
+			    scoutDeviceChangeMask(ScoutDeviceChange::Name) |
+			    scoutDeviceChangeMask(ScoutDeviceChange::Service) |
+			    scoutDeviceChangeMask(ScoutDeviceChange::Metadata) |
+			    scoutDeviceChangeMask(ScoutDeviceChange::Vendor) |
+			    scoutDeviceChangeMask(ScoutDeviceChange::Identity);
+			if ((changeMask & identityRelevantMask) != 0) {
+				identityDirty = true;
+			}
+			if (changeMask != 0) {
+				event.type =
+				    observation.confirmed &&
+				            changeMask == scoutDeviceChangeMask(ScoutDeviceChange::Confirmation)
+				        ? ScoutEventType::DeviceObserved
+				        : ScoutEventType::DeviceChanged;
+				event.status = ScoutStatus::Ok;
+				event.source = observation.source;
+				event.changes = changeMask;
+				event.hasDevice = true;
+				event.device = info;
+				event.message = observation.confirmed ? "device actively confirmed"
+				                                      : "device enrichment changed";
+				shouldEmit = true;
+			}
+		}
+		if (shouldEmit) {
+			emit(event);
+		}
+	}
+
+	static void providerSink(
+	    const ScoutMacAddress &mac,
+	    const scout_internal::EnrichmentObservation &observation,
+	    void *context
+	) {
+		auto *self = static_cast<ScoutImpl *>(context);
+		if (self != nullptr) {
+			self->applyEnrichmentObservation(mac, observation);
+		}
+	}
+
+	void expireEnrichmentRecords() {
+		bool anyIdentityChange = false;
+		for (size_t index = 0;; ++index) {
+			ScoutEvent event{};
+			bool emitChange = false;
+			{
+				ScoutLock lock(mutex);
+				if (!lock || index >= deviceCount) {
+					break;
+				}
+				if (!devices[index].details) {
+					continue;
+				}
+				const ScoutDeviceChange changes =
+				    scout_internal::expireEnrichment(*devices[index].details, nowMs());
+				const uint32_t changeMask = scoutDeviceChangeMask(changes);
+				if (changeMask != 0) {
+					identityDirty = true;
+					anyIdentityChange = true;
+					event.type = ScoutEventType::DeviceChanged;
+					event.status = ScoutStatus::Ok;
+					event.changes = changeMask;
+					event.hasDevice = true;
+					event.device = devices[index].info;
+					event.message = "device enrichment expired";
+					emitChange = true;
+				}
+			}
+			if (emitChange) {
+				emit(event);
+			}
+		}
+		if (anyIdentityChange) {
+			flushIdentityIfDirty();
+		}
+	}
+
+	void performIcmpProvider() {
+		const size_t count = snapshotProviderTargets();
+		const auto stats = scout_internal::runIcmpProvider(
+		    providerTargets,
+		    count,
+		    icmpCursor,
+		    config.providers.icmp,
+		    &ScoutImpl::providerSink,
+		    this
+		);
+		accumulateProviderStats(diag.icmp, stats);
+		flushIdentityIfDirty();
+	}
+
+	void performMdnsProvider() {
+		const size_t count = snapshotProviderTargets();
+		const auto stats = scout_internal::runMdnsProvider(
+		    providerTargets,
+		    count,
+		    mdnsServiceCursor,
+		    config.providers.mdns,
+		    &ScoutImpl::providerSink,
+		    this
+		);
+		accumulateProviderStats(diag.mdns, stats);
+		flushIdentityIfDirty();
+	}
+
+	void performSsdpProvider() {
+		const size_t count = snapshotProviderTargets();
+		const auto stats = scout_internal::runSsdpProvider(
+		    providerTargets,
+		    count,
+		    config.providers.ssdp,
+		    httpScratch,
+		    httpScratchCapacity,
+		    &ScoutImpl::providerSink,
+		    this
+		);
+		accumulateProviderStats(diag.ssdp, stats);
+		flushIdentityIfDirty();
+	}
+
+	void performNbnsProvider() {
+		const size_t count = snapshotProviderTargets();
+		const auto stats = scout_internal::runNbnsProvider(
+		    providerTargets,
+		    count,
+		    nbnsCursor,
+		    config.providers.nbns,
+		    &ScoutImpl::providerSink,
+		    this
+		);
+		accumulateProviderStats(diag.nbns, stats);
+		flushIdentityIfDirty();
+	}
+
+	void performReverseDnsProvider() {
+		const size_t count = snapshotProviderTargets();
+		const auto stats = scout_internal::runReverseDnsProvider(
+		    providerTargets,
+		    count,
+		    reverseDnsCursor,
+		    config.providers.reverseDns,
+		    &ScoutImpl::providerSink,
+		    this
+		);
+		accumulateProviderStats(diag.reverseDns, stats);
+		flushIdentityIfDirty();
+	}
+
+	void performOuiProvider() {
+		if (!config.providers.oui) {
+			return;
+		}
+		ScoutOuiLookupCallback resolver;
+		{
+			ScoutLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			resolver = ouiLookup;
+		}
+		if (!resolver) {
+			return;
+		}
+
+		uint64_t observations = 0;
+		for (size_t index = 0;; ++index) {
+			ScoutMacAddress mac{};
+			bool shouldLookup = false;
+			{
+				ScoutLock lock(mutex);
+				if (!lock || index >= deviceCount) {
+					break;
+				}
+				const auto &record = devices[index];
+				mac = record.info.mac;
+				const bool knownVendor = record.details && record.details->vendor.known;
+				shouldLookup = !knownVendor && !scout_internal::macIsLocallyAdministered(mac) &&
+				               !scout_internal::macIsMulticast(mac);
+			}
+			if (!shouldLookup) {
+				continue;
+			}
+
+			ScoutVendorInfo vendor{};
+			if (!resolver(mac, vendor) || (!vendor.known && vendor.name[0] == '\0')) {
+				continue;
+			}
+			vendor.known = true;
+			vendor.source = ScoutVendorSource::Oui;
+
+			ScoutEvent event{};
+			bool emitChange = false;
+			{
+				ScoutLock lock(mutex);
+				if (!lock) {
+					continue;
+				}
+				const size_t currentIndex = findDeviceByMac(mac.bytes);
+				if (currentIndex == SIZE_MAX) {
+					continue;
+				}
+				auto *details = ensureDetailsLocked(currentIndex);
+				if (details == nullptr || details->vendor.known) {
+					continue;
+				}
+				vendor.observationSource = ScoutObservationSource::Oui;
+				vendor.firstSeenAtMs = nowMs();
+				vendor.lastSeenAtMs = vendor.firstSeenAtMs;
+				vendor.expiresAtMs = 0;
+				details->vendor = vendor;
+				details->lastEnrichedAtMs = vendor.firstSeenAtMs;
+				identityDirty = true;
+				event.type = ScoutEventType::DeviceChanged;
+				event.status = ScoutStatus::Ok;
+				event.source = ScoutObservationSource::Oui;
+				event.changes = scoutDeviceChangeMask(ScoutDeviceChange::Vendor);
+				event.hasDevice = true;
+				event.device = devices[currentIndex].info;
+				event.message = "device vendor enriched";
+				emitChange = true;
+				observations++;
+			}
+			if (emitChange) {
+				emit(event);
+			}
+		}
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				diag.oui.runs++;
+				diag.oui.observations += observations;
+			}
+		}
+		flushIdentityIfDirty();
 	}
 
 	ScoutStatus
@@ -803,18 +1664,67 @@ struct ScoutImpl {
 			}
 		}
 
-		uint64_t nextScanAt = scanRequested.load() ? nowMs() : nowMs() + config.scanIntervalMs;
+		const uint64_t startedAt = nowMs();
+		uint64_t nextScanAt = scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs;
+		uint64_t nextIcmpAt = config.providers.icmp.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextMdnsAt = config.providers.mdns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextSsdpAt = config.providers.ssdp.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextNbnsAt = config.providers.nbns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextReverseDnsAt = config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextEnrichmentExpiryAt = startedAt + EnrichmentExpiryPollMs;
 
 		while (!stopRequested.load()) {
 			const uint64_t current = nowMs();
 			const bool requested = scanRequested.exchange(false);
 			if (requested || current >= nextScanAt) {
 				performScan();
+				expireEnrichmentRecords();
+				performOuiProvider();
 				nextScanAt = nowMs() + config.scanIntervalMs;
 				continue;
 			}
 
-			const uint64_t remaining = nextScanAt - current;
+			if (config.providers.icmp.enabled && current >= nextIcmpAt) {
+				performIcmpProvider();
+				nextIcmpAt = nowMs() + config.providers.icmp.intervalMs;
+				continue;
+			}
+			if (config.providers.mdns.enabled && current >= nextMdnsAt) {
+				performMdnsProvider();
+				nextMdnsAt = nowMs() + config.providers.mdns.intervalMs;
+				continue;
+			}
+			if (config.providers.ssdp.enabled && current >= nextSsdpAt) {
+				performSsdpProvider();
+				nextSsdpAt = nowMs() + config.providers.ssdp.intervalMs;
+				continue;
+			}
+			if (config.providers.nbns.enabled && current >= nextNbnsAt) {
+				performNbnsProvider();
+				nextNbnsAt = nowMs() + config.providers.nbns.intervalMs;
+				continue;
+			}
+			if (config.providers.reverseDns.enabled && current >= nextReverseDnsAt) {
+				performReverseDnsProvider();
+				nextReverseDnsAt = nowMs() + config.providers.reverseDns.intervalMs;
+				continue;
+			}
+			if (current >= nextEnrichmentExpiryAt) {
+				expireEnrichmentRecords();
+				nextEnrichmentExpiryAt = nowMs() + EnrichmentExpiryPollMs;
+				continue;
+			}
+
+			const uint64_t nextWorkAt = std::min(
+			    {nextScanAt,
+			     nextIcmpAt,
+			     nextMdnsAt,
+			     nextSsdpAt,
+			     nextNbnsAt,
+			     nextReverseDnsAt,
+			     nextEnrichmentExpiryAt}
+			);
+			const uint64_t remaining = nextWorkAt > current ? nextWorkAt - current : 1;
 			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
 			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(waitMs, 1)));
 		}
@@ -841,12 +1751,42 @@ struct ScoutImpl {
 		if (!mutex || !stopped) {
 			return ScoutResult::failure(ScoutStatus::NoMemory, "failed to create synchronization");
 		}
+		const bool invalidProviderSchedule =
+		    (incoming.providers.icmp.enabled &&
+		     (incoming.providers.icmp.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.icmp.timeoutMs == 0 ||
+		      incoming.providers.icmp.maxTargetsPerRun == 0)) ||
+		    (incoming.providers.mdns.enabled &&
+		     (incoming.providers.mdns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.mdns.queryTimeoutMs == 0 ||
+		      incoming.providers.mdns.maxResults == 0 ||
+		      incoming.providers.mdns.maxServiceTypes == 0 ||
+		      incoming.providers.mdns.maxServiceQueriesPerRun == 0)) ||
+		    (incoming.providers.ssdp.enabled &&
+		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.ssdp.responseWindowMs == 0 ||
+		      (incoming.providers.ssdp.fetchDeviceDescription &&
+		       (incoming.providers.ssdp.httpTimeoutMs == 0 ||
+		        incoming.providers.ssdp.maxDescriptionFetchesPerRun == 0)))) ||
+		    (incoming.providers.nbns.enabled &&
+		     (incoming.providers.nbns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.nbns.responseWindowMs == 0 ||
+		      incoming.providers.nbns.maxTargetsPerRun == 0)) ||
+		    (incoming.providers.reverseDns.enabled &&
+		     (incoming.providers.reverseDns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.reverseDns.timeoutMs == 0 ||
+		      incoming.providers.reverseDns.maxTargetsPerRun == 0));
+
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
 		    !Strata::validPlacement(incoming.memory.taskStack) ||
 		    incoming.scanIntervalMs < MinScanIntervalMs || incoming.deviceMaxAgeMs == 0 ||
 		    incoming.arpResponseWaitMs == 0 || incoming.maxDevices == 0 ||
 		    incoming.maxHostsPerSubnet == 0 || incoming.arpBatchSize == 0 ||
-		    !validStackSize(incoming.taskStackBytes)) {
+		    incoming.maxIdentityRelations == 0 ||
+		    incoming.maxDevices > SIZE_MAX / SCOUT_MAX_ENDPOINTS_PER_DEVICE ||
+		    (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
+		     incoming.providers.ssdp.maxDescriptionBytes == 0) ||
+		    invalidProviderSchedule || !validStackSize(incoming.taskStackBytes)) {
 			return ScoutResult::failure(ScoutStatus::InvalidConfig, "invalid Scout configuration");
 		}
 
@@ -886,6 +1826,13 @@ struct ScoutImpl {
 		diag.taskStackPlacement = config.memory.taskStack;
 		coverageKnown = false;
 		coverageAvailable = false;
+		identityDirty = false;
+		identityGroupCountValue = 0;
+		identityRelationCountValue = 0;
+		icmpCursor = 0;
+		reverseDnsCursor = 0;
+		nbnsCursor = 0;
+		mdnsServiceCursor = 0;
 		nextScanId = 1;
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
@@ -923,6 +1870,7 @@ struct ScoutImpl {
 		initialized = true;
 		diag.registryRegion = Strata::regionOf(devices);
 		diag.targetBufferRegion = Strata::regionOf(targets);
+		diag.enrichmentRegion = Strata::regionOf(providerTargets);
 		diag.taskStackRegion = task.stackRegion();
 		startReady.store(true, std::memory_order_release);
 		return ScoutResult::success("Scout initialized");
@@ -986,6 +1934,7 @@ struct ScoutImpl {
 		diag.deviceCount = 0;
 		diag.registryRegion = Strata::Region::Unknown;
 		diag.targetBufferRegion = Strata::Region::Unknown;
+		diag.enrichmentRegion = Strata::Region::Unknown;
 		diag.taskStackRegion = Strata::Region::Unknown;
 		return ScoutResult::success("Scout deinitialized");
 	}
@@ -1068,6 +2017,117 @@ void DeferredCleanupService::taskEntry(void *context) {
 }
 
 } // namespace
+
+bool scoutFormatIpv4(const ScoutIpv4Address &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	const uint32_t host = lwip_ntohl(address.value);
+	const int written = std::snprintf(
+	    out,
+	    capacity,
+	    "%u.%u.%u.%u",
+	    static_cast<unsigned>((host >> 24U) & 0xFFU),
+	    static_cast<unsigned>((host >> 16U) & 0xFFU),
+	    static_cast<unsigned>((host >> 8U) & 0xFFU),
+	    static_cast<unsigned>(host & 0xFFU)
+	);
+	if (written < 0 || static_cast<size_t>(written) >= capacity) {
+		out[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+bool scoutFormatMac(const ScoutMacAddress &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	const int written = std::snprintf(
+	    out,
+	    capacity,
+	    "%02X:%02X:%02X:%02X:%02X:%02X",
+	    static_cast<unsigned>(address.bytes[0]),
+	    static_cast<unsigned>(address.bytes[1]),
+	    static_cast<unsigned>(address.bytes[2]),
+	    static_cast<unsigned>(address.bytes[3]),
+	    static_cast<unsigned>(address.bytes[4]),
+	    static_cast<unsigned>(address.bytes[5])
+	);
+	if (written < 0 || static_cast<size_t>(written) >= capacity) {
+		out[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+bool scoutFormatIpv6(const ScoutIpv6Address &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	uint16_t words[8]{};
+	for (size_t i = 0; i < 8; ++i) {
+		words[i] = static_cast<uint16_t>(
+		    (static_cast<uint16_t>(address.bytes[i * 2]) << 8U) | address.bytes[i * 2 + 1]
+		);
+	}
+
+	size_t bestStart = 8;
+	size_t bestLength = 0;
+	for (size_t i = 0; i < 8;) {
+		if (words[i] != 0) {
+			i++;
+			continue;
+		}
+		const size_t start = i;
+		while (i < 8 && words[i] == 0) {
+			i++;
+		}
+		const size_t length = i - start;
+		if (length >= 2 && length > bestLength) {
+			bestStart = start;
+			bestLength = length;
+		}
+	}
+
+	size_t used = 0;
+	auto append = [&](const char *text) {
+		const size_t length = std::strlen(text);
+		if (used + length + 1 > capacity) {
+			return false;
+		}
+		std::memcpy(out + used, text, length);
+		used += length;
+		out[used] = '\0';
+		return true;
+	};
+
+	for (size_t i = 0; i < 8;) {
+		if (i == bestStart) {
+			if (!append("::")) {
+				out[0] = '\0';
+				return false;
+			}
+			i += bestLength;
+			continue;
+		}
+		if (used != 0 && out[used - 1] != ':') {
+			if (!append(":")) {
+				out[0] = '\0';
+				return false;
+			}
+		}
+		char segment[5]{};
+		std::snprintf(segment, sizeof(segment), "%x", static_cast<unsigned>(words[i]));
+		if (!append(segment)) {
+			out[0] = '\0';
+			return false;
+		}
+		i++;
+	}
+	return true;
+}
 
 ScoutResult ScoutResult::success(const char *message) {
 	return {ScoutStatus::Ok, message};
@@ -1212,6 +2272,139 @@ ScoutResult Scout::findByMac(const ScoutMacAddress &mac, ScoutDeviceInfo &out) c
 	return ScoutResult::success();
 }
 
+ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->deviceCount) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device index is out of range");
+	}
+	_impl->snapshotDetailsLocked(index, out);
+	return ScoutResult::success();
+}
+
+ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetails &out) const {
+	if (!mac.valid()) {
+		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
+	}
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	const size_t index = _impl->findDeviceByMac(mac.bytes);
+	if (index == SIZE_MAX) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
+	}
+	_impl->snapshotDetailsLocked(index, out);
+	return ScoutResult::success();
+}
+
+ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName &out) const {
+	resetInPlace(out);
+	if (!mac.valid()) {
+		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
+	}
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	const size_t index = _impl->findDeviceByMac(mac.bytes);
+	if (index == SIZE_MAX) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
+	}
+	if (_impl->devices[index].details &&
+	    scout_internal::selectPreferredName(*_impl->devices[index].details, out)) {
+		return ScoutResult::success();
+	}
+	std::snprintf(
+	    out.value,
+	    sizeof(out.value),
+	    "%02X:%02X:%02X:%02X:%02X:%02X",
+	    static_cast<unsigned>(mac.bytes[0]),
+	    static_cast<unsigned>(mac.bytes[1]),
+	    static_cast<unsigned>(mac.bytes[2]),
+	    static_cast<unsigned>(mac.bytes[3]),
+	    static_cast<unsigned>(mac.bytes[4]),
+	    static_cast<unsigned>(mac.bytes[5])
+	);
+	out.source = ScoutNameSource::None;
+	return ScoutResult::success("MAC address fallback");
+}
+
+size_t Scout::identityGroupCount() const {
+	if (!_impl) {
+		return 0;
+	}
+	ScoutLock lock(_impl->mutex);
+	return lock && _impl->initialized ? _impl->identityGroupCountValue : 0;
+}
+
+ScoutResult Scout::identityGroupAt(size_t index, ScoutIdentityGroup &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->identityGroupCountValue) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "identity group index is out of range");
+	}
+	out = _impl->identityGroups[index];
+	return ScoutResult::success();
+}
+
+size_t Scout::identityRelationCount() const {
+	if (!_impl) {
+		return 0;
+	}
+	ScoutLock lock(_impl->mutex);
+	return lock && _impl->initialized ? _impl->identityRelationCountValue : 0;
+}
+
+ScoutResult Scout::identityRelationAt(size_t index, ScoutIdentityRelation &out) const {
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	if (index >= _impl->identityRelationCountValue) {
+		return ScoutResult::failure(
+		    ScoutStatus::NotFound,
+		    "identity relation index is out of range"
+		);
+	}
+	out = _impl->identityRelations[index];
+	return ScoutResult::success();
+}
+
 ScoutDiagnostics Scout::diagnostics() const {
 	if (!_impl) {
 		return {};
@@ -1227,11 +2420,24 @@ ScoutDiagnostics Scout::diagnostics() const {
 	snapshot.deviceCount = _impl->deviceCount;
 	snapshot.registryRegion = Strata::regionOf(_impl->devices);
 	snapshot.targetBufferRegion = Strata::regionOf(_impl->targets);
+	snapshot.enrichmentRegion = Strata::regionOf(_impl->providerTargets);
+	snapshot.identityGroupCount = _impl->identityGroupCountValue;
+	snapshot.identityRelationCount = _impl->identityRelationCountValue;
 	if (_impl->task) {
 		snapshot.taskStackRegion = _impl->task.stackRegion();
 		snapshot.taskStackHighWaterMarkBytes = _impl->task.stackHighWaterMarkBytes();
 	}
 	return snapshot;
+}
+
+void Scout::setOuiLookup(ScoutOuiLookupCallback callback) {
+	if (!_impl) {
+		return;
+	}
+	ScoutLock lock(_impl->mutex);
+	if (lock) {
+		_impl->ouiLookup = std::move(callback);
+	}
 }
 
 void Scout::onEvent(ScoutEventCallback callback) {
@@ -1306,6 +2512,8 @@ const char *Scout::eventTypeToString(ScoutEventType type) const {
 		return "device_changed";
 	case ScoutEventType::DeviceExpired:
 		return "device_expired";
+	case ScoutEventType::IdentityGroupChanged:
+		return "identity_group_changed";
 	case ScoutEventType::CoverageLost:
 		return "coverage_lost";
 	case ScoutEventType::CoverageRestored:

@@ -85,6 +85,11 @@ void testLifecycleSnapshots() {
 	Scout scout;
 	ScoutConfig config;
 	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
 	Gate allocationGate;
 	std::atomic<int> allocations{0};
 	Strata::TestHooks::allocation = [&] {
@@ -115,6 +120,7 @@ void testLifecycleSnapshots() {
 	assert(initResult.status == ScoutStatus::Ok);
 	assert(initializedSnapshot.registryRegion != Strata::Region::Unknown);
 	assert(initializedSnapshot.targetBufferRegion != Strata::Region::Unknown);
+	assert(initializedSnapshot.enrichmentRegion != Strata::Region::Unknown);
 
 	ScoutDeviceInfo device;
 	const ScoutMacAddress absent{{1, 2, 3, 4, 5, 6}};
@@ -148,6 +154,7 @@ void testLifecycleSnapshots() {
 	assert(stoppedSnapshot.state == ScoutState::Stopped);
 	assert(stoppedSnapshot.registryRegion == Strata::Region::Unknown);
 	assert(stoppedSnapshot.targetBufferRegion == Strata::Region::Unknown);
+	assert(stoppedSnapshot.enrichmentRegion == Strata::Region::Unknown);
 	assert(stoppedSnapshot.taskStackRegion == Strata::Region::Unknown);
 }
 
@@ -287,6 +294,304 @@ void testRegistryAgingAndDeduplication() {
 	runtime.releaseBuffers();
 }
 
+void testLazyDetailsAllocation() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+	const uint8_t deviceMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x77};
+	const uint32_t address = lwip_htonl(0xC0A80120U);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    deviceMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	assert(runtime.deviceCount == 1);
+	assert(!runtime.devices[0].details);
+	ScoutDeviceDetails derivedDetails{};
+	runtime.snapshotDetailsLocked(0, derivedDetails);
+	assert(derivedDetails.locallyAdministeredMac);
+	assert(!derivedDetails.multicastMac);
+
+	scout_internal::EnrichmentObservation confirmation{};
+	confirmation.source = ScoutObservationSource::Icmp;
+	confirmation.ipv4.value = address;
+	confirmation.interfaceIndex = 1;
+	confirmation.confirmed = true;
+	runtime.applyEnrichmentObservation(runtime.devices[0].info.mac, confirmation);
+	assert(!runtime.devices[0].details);
+
+	scout_internal::EnrichmentObservation reverseDns{};
+	reverseDns.source = ScoutObservationSource::ReverseDns;
+	reverseDns.ipv4.value = address;
+	reverseDns.interfaceIndex = 1;
+	reverseDns.nameCount = 1;
+	reverseDns.names[0].source = ScoutNameSource::ReverseDns;
+	std::strcpy(reverseDns.names[0].value, "device.example");
+	reverseDns.names[0].lastSeenAtMs = nowMs();
+	reverseDns.names[0].expiresAtMs = nowMs() + 1000;
+	runtime.applyEnrichmentObservation(runtime.devices[0].info.mac, reverseDns);
+	assert(runtime.devices[0].details);
+	assert(runtime.devices[0].details->nameCount == 1);
+	assert(runtime.devices[0].details->locallyAdministeredMac);
+
+	runtime.releaseBuffers();
+}
+
+void testScalarEnrichmentSourcePrecedence() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+	const uint8_t deviceMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x88};
+	const uint32_t address = lwip_htonl(0xC0A80130U);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    deviceMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	const ScoutMacAddress mac = runtime.devices[0].info.mac;
+
+	scout_internal::EnrichmentObservation ssdp{};
+	ssdp.source = ScoutObservationSource::Ssdp;
+	ssdp.ipv4.value = address;
+	ssdp.interfaceIndex = 1;
+	std::strcpy(ssdp.interfaceKey, "TEST_1");
+	ssdp.identityExpiresAtMs = nowMs() + 60000;
+	std::strcpy(ssdp.manufacturer, "IceWhale Technology");
+	std::strcpy(ssdp.modelName, "ZimaCube");
+	runtime.applyEnrichmentObservation(mac, ssdp);
+	assert(runtime.devices[0].details);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
+
+	scout_internal::EnrichmentObservation mdns{};
+	mdns.source = ScoutObservationSource::Mdns;
+	mdns.ipv4.value = address;
+	mdns.interfaceIndex = 1;
+	std::strcpy(mdns.interfaceKey, "TEST_1");
+	mdns.identityExpiresAtMs = nowMs() + 60000;
+	std::strcpy(mdns.modelName, "TimeCapsule6,106");
+	runtime.applyEnrichmentObservation(mac, mdns);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
+
+	std::strcpy(ssdp.modelName, "ZimaCube Pro");
+	runtime.applyEnrichmentObservation(mac, ssdp);
+	assert(std::strcmp(runtime.devices[0].details->modelName, "ZimaCube Pro") == 0);
+	assert(runtime.devices[0].details->modelNameSource == ScoutObservationSource::Ssdp);
+
+	runtime.releaseBuffers();
+}
+
+void testStaleProviderObservationAndDiagnostics() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+
+	const uint8_t firstMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x10};
+	const uint8_t secondMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x20};
+	const uint32_t address = lwip_htonl(0xC0A8012AU);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    firstMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	const size_t firstIndex = runtime.findDeviceByMac(firstMac);
+	assert(firstIndex != SIZE_MAX);
+	const uint64_t firstSeen = runtime.devices[firstIndex].info.lastSeenAtMs;
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    secondMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    2
+	);
+	assert(runtime.devices[firstIndex].info.endpointCount == 0);
+
+	scout_internal::EnrichmentObservation stale{};
+	stale.source = ScoutObservationSource::ReverseDns;
+	stale.ipv4.value = address;
+	stale.interfaceIndex = 1;
+	stale.nameCount = 1;
+	stale.names[0].source = ScoutNameSource::ReverseDns;
+	std::strcpy(stale.names[0].value, "stale.example");
+	stale.names[0].lastSeenAtMs = nowMs();
+	stale.names[0].expiresAtMs = nowMs() + 1000;
+	runtime.applyEnrichmentObservation(runtime.devices[firstIndex].info.mac, stale);
+	assert(runtime.diag.staleProviderObservations == 1);
+	assert(runtime.devices[firstIndex].info.lastSeenAtMs == firstSeen);
+	assert(!runtime.devices[firstIndex].details);
+
+	const size_t secondIndex = runtime.findDeviceByMac(secondMac);
+	assert(secondIndex != SIZE_MAX);
+	runtime.devices[secondIndex].info.lastSeenAtMs = 123;
+	runtime.devices[secondIndex].info.endpoints[0].lastSeenAtMs = 123;
+	scout_internal::EnrichmentObservation confirmation{};
+	confirmation.source = ScoutObservationSource::Icmp;
+	confirmation.ipv4.value = address;
+	confirmation.interfaceIndex = 1;
+	confirmation.confirmed = true;
+	runtime.applyEnrichmentObservation(runtime.devices[secondIndex].info.mac, confirmation);
+	assert(runtime.devices[secondIndex].info.lastSeenAtMs == 123);
+	assert(runtime.devices[secondIndex].info.endpoints[0].lastSeenAtMs == 123);
+	assert(runtime.devices[secondIndex].info.lastConfirmedAtMs >= 123);
+
+	scout_internal::ProviderRunStats stats{};
+	stats.observations = 1;
+	stats.errors = 2;
+	stats.timeouts = 3;
+	stats.noRecords = 4;
+	stats.malformedResponses = 5;
+	stats.serverErrors = 6;
+	stats.dropped = 7;
+	ScoutProviderDiagnostics diagnostics{};
+	runtime.accumulateProviderStats(diagnostics, stats);
+	assert(diagnostics.runs == 1);
+	assert(diagnostics.observations == 1);
+	assert(diagnostics.errors == 2);
+	assert(diagnostics.timeouts == 3);
+	assert(diagnostics.noRecords == 4);
+	assert(diagnostics.malformedResponses == 5);
+	assert(diagnostics.serverErrors == 6);
+	assert(diagnostics.droppedObservations == 7);
+
+	runtime.releaseBuffers();
+}
+
+void testFormattingHelpers() {
+	char buffer[64]{};
+
+	ScoutIpv4Address ipv4Address{};
+	ipv4Address.value = lwip_htonl(0xC0A8012AU);
+	assert(scoutFormatIpv4(ipv4Address, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "192.168.1.42") == 0);
+
+	ScoutMacAddress mac{{0x00, 0x11, 0x22, 0xAA, 0xBB, 0xCC}};
+	assert(scoutFormatMac(mac, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "00:11:22:AA:BB:CC") == 0);
+
+	ScoutIpv6Address ipv6{};
+	const uint8_t bytes[16] = {
+	    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+	};
+	std::memcpy(ipv6.bytes, bytes, sizeof(bytes));
+	assert(scoutFormatIpv6(ipv6, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "2001:db8::1") == 0);
+
+	ScoutIpv6Address zero{};
+	assert(scoutFormatIpv6(zero, buffer, sizeof(buffer)));
+	assert(std::strcmp(buffer, "::") == 0);
+
+	char tiny[4]{};
+	assert(!scoutFormatMac(mac, tiny, sizeof(tiny)));
+	assert(tiny[0] == '\0');
+}
+
+void testInvalidSsdpHttpTimeout() {
+	Scout scout;
+	ScoutConfig config;
+	config.scanOnInit = false;
+	config.providers.ssdp.enabled = true;
+	config.providers.ssdp.fetchDeviceDescription = true;
+	config.providers.ssdp.httpTimeoutMs = 0;
+	const ScoutResult result = scout.init(config);
+	assert(result.status == ScoutStatus::InvalidConfig);
+}
+
+void testIdentityGroupingKeepsModerateRelationsSeparate() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	for (size_t i = 0; i < 3; ++i) {
+		auto &record = runtime.devices[i];
+		record = {};
+		record.info.mac = ScoutMacAddress{{0x00, 0x11, 0x22, 0x33, 0x44, static_cast<uint8_t>(i + 1)}};
+		record.info.key.kind = ScoutIdentityKind::Mac;
+		record.info.key.mac = record.info.mac;
+	}
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
+
+	assert(!runtime.devices[0].details);
+	assert(!runtime.devices[1].details);
+	assert(!runtime.devices[2].details);
+	auto *firstDetails = runtime.ensureDetailsLocked(0);
+	auto *secondDetails = runtime.ensureDetailsLocked(1);
+	auto *thirdDetails = runtime.ensureDetailsLocked(2);
+	assert(firstDetails != nullptr && secondDetails != nullptr && thirdDetails != nullptr);
+	std::strcpy(firstDetails->upnpUdn, "uuid:physical-device");
+	std::strcpy(secondDetails->upnpUdn, "uuid:physical-device");
+	scout_internal::upsertName(
+	    *secondDetails,
+	    ScoutNameSource::MdnsHostname,
+	    "shared-host.local",
+	    100,
+	    0
+	);
+	scout_internal::upsertName(
+	    *thirdDetails,
+	    ScoutNameSource::MdnsHostname,
+	    "shared-host.local",
+	    100,
+	    0
+	);
+
+	runtime.identityDirty = true;
+	runtime.rebuildIdentityState();
+
+	assert(runtime.identityRelationCountValue == 2);
+	assert(runtime.identityGroupCountValue == 1);
+	assert(runtime.identityGroups[0].memberCount == 2);
+	assert(
+	    static_cast<uint8_t>(runtime.identityGroups[0].confidence) >=
+	    static_cast<uint8_t>(ScoutIdentityConfidence::Strong)
+	);
+
+	bool sawModerateHostname = false;
+	for (size_t i = 0; i < runtime.identityRelationCountValue; ++i) {
+		const auto &relation = runtime.identityRelations[i];
+		if (relation.evidence.type == ScoutIdentityEvidenceType::MdnsHostname &&
+		    relation.evidence.confidence == ScoutIdentityConfidence::Moderate) {
+			sawModerateHostname = true;
+		}
+	}
+	assert(sawModerateHostname);
+
+	firstDetails->upnpUdnSource = ScoutObservationSource::Ssdp;
+	secondDetails->upnpUdnSource = ScoutObservationSource::Ssdp;
+	firstDetails->upnpUdnExpiresAtMs = 1;
+	secondDetails->upnpUdnExpiresAtMs = 1;
+	runtime.expireEnrichmentRecords();
+	assert(runtime.identityGroupCountValue == 0);
+
+	runtime.releaseBuffers();
+}
+
 void testDestructionFromCallback() {
 	networkMode.store(NetworkMode::None);
 	std::atomic<Scout *> scout{new Scout()};
@@ -312,6 +617,11 @@ void testDestructionFromCallback() {
 
 	ScoutConfig config;
 	config.scanOnInit = true;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
 	config.arpResponseWaitMs = 1;
 	config.interBatchDelayMs = 0;
 	const ScoutResult initResult = instance->init(config);
@@ -328,6 +638,62 @@ void testDestructionFromCallback() {
 } // namespace
 
 namespace scout_internal {
+ProviderRunStats runIcmpProvider(
+    const ProviderTarget *,
+    size_t,
+    size_t &,
+    const ScoutIcmpConfig &,
+    EnrichmentSink,
+    void *
+) {
+	return {};
+}
+
+ProviderRunStats runMdnsProvider(
+    const ProviderTarget *,
+    size_t,
+    size_t &,
+    const ScoutMdnsConfig &,
+    EnrichmentSink,
+    void *
+) {
+	return {};
+}
+
+ProviderRunStats runSsdpProvider(
+    const ProviderTarget *,
+    size_t,
+    const ScoutSsdpConfig &,
+    char *,
+    size_t,
+    EnrichmentSink,
+    void *
+) {
+	return {};
+}
+
+ProviderRunStats runNbnsProvider(
+    const ProviderTarget *,
+    size_t,
+    size_t &,
+    const ScoutNbnsConfig &,
+    EnrichmentSink,
+    void *
+) {
+	return {};
+}
+
+ProviderRunStats runReverseDnsProvider(
+    const ProviderTarget *,
+    size_t,
+    size_t &,
+    const ScoutReverseDnsConfig &,
+    EnrichmentSink,
+    void *
+) {
+	return {};
+}
+
 esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count) {
 	const auto mode = networkMode.load();
 	if (mode == NetworkMode::InterfaceError) {
@@ -359,6 +725,12 @@ int main() {
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
+	testLazyDetailsAllocation();
+	testScalarEnrichmentSourcePrecedence();
+	testStaleProviderObservationAndDiagnostics();
+	testFormattingHelpers();
+	testInvalidSsdpHttpTimeout();
+	testIdentityGroupingKeepsModerateRelationsSeparate();
 	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
 }
