@@ -443,6 +443,32 @@ void testSsdpAndUpnpParsing() {
 	assert(std::strcmp(response.location, "http://192.168.1.20:1400/device.xml") == 0);
 	assert(std::strstr(response.usn, "uuid:1234-5678") != nullptr);
 
+	constexpr char ErrorResponse[] =
+	    "HTTP/1.1 404 Not Found\r\n"
+	    "LOCATION: http://192.168.1.20/device.xml\r\n\r\n";
+	assert(!scout_internal::parseSsdpResponse(
+	    ErrorResponse, sizeof(ErrorResponse) - 1, response
+	));
+
+	constexpr char NotifyPacket[] =
+	    "NOTIFY * HTTP/1.1\r\n"
+	    "USN: uuid:unexpected\r\n\r\n";
+	assert(!scout_internal::parseSsdpResponse(
+	    NotifyPacket, sizeof(NotifyPacket) - 1, response
+	));
+
+	constexpr char SentinelResponse[] =
+	    "HTTP/1.0 200 OK\r\n"
+	    "CACHE-CONTROL: max-age=999999999999999999999\r\n"
+	    "LOCATION: http://192.168.1.20/device.xml\r\n"
+	    "USN: uuid:sentinel\r\n"
+	    "ST: (null)\r\n\r\n";
+	assert(scout_internal::parseSsdpResponse(
+	    SentinelResponse, sizeof(SentinelResponse) - 1, response
+	));
+	assert(response.searchTarget[0] == '\0');
+	assert(response.maxAgeSeconds == 0);
+
 	constexpr char Xml[] =
 	    "<?xml version=\"1.0\"?><root><device>"
 	    "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
@@ -562,6 +588,7 @@ void testIdentityEvidenceAndContradictions() {
 	std::strcpy(secondDetails.persistentDeviceNamespace, "_hap._tcp");
 	std::strcpy(firstDetails.persistentDeviceId, "id-a");
 	std::strcpy(secondDetails.persistentDeviceId, "id-b");
+	assert(scout_internal::identityDetailsContradict(firstDetails, secondDetails));
 	assert(!scout_internal::identityRelation(
 	    first,
 	    firstDetails,
