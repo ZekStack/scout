@@ -787,8 +787,11 @@ HttpFetchResult fetchHttpBody(
 		if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength) != 0 ||
 		    socketError != 0) {
 			close(fd);
-			result.status = socketError == ETIMEDOUT ? HttpFetchStatus::Timeout
-			                                           : HttpFetchStatus::NetworkError;
+			if (socketError == ETIMEDOUT) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
 			return result;
 		}
 	}
@@ -808,12 +811,8 @@ HttpFetchResult fetchHttpBody(
 		result.status = HttpFetchStatus::InvalidResponse;
 		return result;
 	}
-	const auto sendStatus = sendAll(
-	    fd,
-	    request,
-	    static_cast<size_t>(requestLength),
-	    deadlineMs
-	);
+	const size_t requestSize = static_cast<size_t>(requestLength);
+	const auto sendStatus = sendAll(fd, request, requestSize, deadlineMs);
 	if (sendStatus != SocketIoStatus::Ok) {
 		close(fd);
 		if (sendStatus == SocketIoStatus::Timeout) {
