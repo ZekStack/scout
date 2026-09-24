@@ -409,6 +409,9 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 	    details.persistentDeviceIdExpiresAtMs,
 	    nowMs
 	);
+	if (persistentIdExpired) {
+		details.persistentDeviceNamespace[0] = '\0';
+	}
 	const bool upnpUdnExpired =
 	    expireTextField(details.upnpUdn, details.upnpUdnSource, details.upnpUdnExpiresAtMs, nowMs);
 	if (serialExpired || persistentIdExpired || upnpUdnExpired) {
@@ -489,6 +492,7 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 	    source.serialNumberSource,
 	    source.serialNumberExpiresAtMs
 	);
+	const bool hadPersistentId = target.persistentDeviceId[0] != '\0';
 	mergeText(
 	    target.persistentDeviceId,
 	    target.persistentDeviceIdSource,
@@ -497,6 +501,13 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 	    source.persistentDeviceIdSource,
 	    source.persistentDeviceIdExpiresAtMs
 	);
+	if (!hadPersistentId && target.persistentDeviceId[0] != '\0') {
+		copyText(
+		    target.persistentDeviceNamespace,
+		    sizeof(target.persistentDeviceNamespace),
+		    source.persistentDeviceNamespace
+		);
+	}
 	mergeText(
 	    target.upnpUdn,
 	    target.upnpUdnSource,
@@ -671,6 +682,10 @@ bool identityRelation(
 		return false;
 	}
 	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
+	    sameNonEmpty(
+	        leftDetails.persistentDeviceNamespace,
+	        rightDetails.persistentDeviceNamespace
+	    ) &&
 	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		return false;
 	}
@@ -688,7 +703,11 @@ bool identityRelation(
 		};
 		return true;
 	}
-	if (sameNonEmpty(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
+	if (sameNonEmpty(
+	        leftDetails.persistentDeviceNamespace,
+	        rightDetails.persistentDeviceNamespace
+	    ) &&
+	    sameNonEmpty(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		out.evidence = {
 		    .type = ScoutIdentityEvidenceType::PersistentDeviceId,
 		    .confidence = ScoutIdentityConfidence::Strong,
