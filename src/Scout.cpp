@@ -28,6 +28,7 @@ constexpr uint32_t StopPollMs = 20;
 constexpr uint32_t MinScanIntervalMs = 1000;
 constexpr uint32_t MinTaskStackBytes = 4096;
 constexpr uint32_t CleanupTaskStackBytes = 4096;
+constexpr uint32_t EnrichmentExpiryPollMs = 1000;
 
 uint64_t nowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -681,6 +682,9 @@ struct ScoutImpl {
 		target.observations += run.observations;
 		target.errors += run.errors;
 		target.timeouts += run.timeouts;
+		target.noRecords += run.noRecords;
+		target.malformedResponses += run.malformedResponses;
+		target.serverErrors += run.serverErrors;
 		target.droppedObservations += run.dropped;
 	}
 
@@ -910,15 +914,20 @@ struct ScoutImpl {
 
 			auto &record = devices[index];
 			auto &info = record.info;
+			ScoutEndpoint *observationEndpoint = findObservationEndpointLocked(info, observation);
+			if (observation.ipv4.valid() && observationEndpoint == nullptr) {
+				diag.staleProviderObservations++;
+				return;
+			}
+
 			const uint64_t observedAt = nowMs();
 			ScoutDeviceChange changes = ScoutDeviceChange::None;
 
-			const bool directObservation = observation.source == ScoutObservationSource::Icmp ||
-			                               observation.source == ScoutObservationSource::Mdns ||
-			                               observation.source == ScoutObservationSource::Ssdp ||
-			                               observation.source == ScoutObservationSource::Nbns;
-			if (directObservation) {
-				info.lastSeenAtMs = std::max(info.lastSeenAtMs, observedAt);
+			const bool networkObservation = observation.source == ScoutObservationSource::Icmp ||
+			                                observation.source == ScoutObservationSource::Mdns ||
+			                                observation.source == ScoutObservationSource::Ssdp ||
+			                                observation.source == ScoutObservationSource::Nbns;
+			if (networkObservation) {
 				info.observationSources |= scoutObservationMask(observation.source);
 				if (info.observationCount != UINT32_MAX) {
 					info.observationCount++;
@@ -929,10 +938,8 @@ struct ScoutImpl {
 				changes |= ScoutDeviceChange::Confirmation;
 			}
 
-			if (auto *endpoint = findObservationEndpointLocked(info, observation);
-			    endpoint != nullptr) {
-				if (directObservation) {
-					endpoint->lastSeenAtMs = std::max(endpoint->lastSeenAtMs, observedAt);
+			if (auto *endpoint = observationEndpoint; endpoint != nullptr) {
+				if (networkObservation) {
 					endpoint->observationSources |= scoutObservationMask(observation.source);
 				}
 				if (observation.confirmed) {
@@ -1051,6 +1058,14 @@ struct ScoutImpl {
 					    details.persistentDeviceIdExpiresAtMs,
 					    ScoutDeviceChange::Identity
 					);
+					if (observation.persistentDeviceId[0] != '\0' &&
+					    observation.persistentDeviceNamespace[0] != '\0') {
+						scout_internal::copyText(
+						    details.persistentDeviceNamespace,
+						    sizeof(details.persistentDeviceNamespace),
+						    observation.persistentDeviceNamespace
+						);
+					}
 					updateText(
 					    details.upnpUdn,
 					    sizeof(details.upnpUdn),
@@ -1605,6 +1620,7 @@ struct ScoutImpl {
 		uint64_t nextSsdpAt = config.providers.ssdp.enabled ? startedAt : UINT64_MAX;
 		uint64_t nextNbnsAt = config.providers.nbns.enabled ? startedAt : UINT64_MAX;
 		uint64_t nextReverseDnsAt = config.providers.reverseDns.enabled ? startedAt : UINT64_MAX;
+		uint64_t nextEnrichmentExpiryAt = startedAt + EnrichmentExpiryPollMs;
 
 		while (!stopRequested.load()) {
 			const uint64_t current = nowMs();
@@ -1642,9 +1658,20 @@ struct ScoutImpl {
 				nextReverseDnsAt = nowMs() + config.providers.reverseDns.intervalMs;
 				continue;
 			}
+			if (current >= nextEnrichmentExpiryAt) {
+				expireEnrichmentRecords();
+				nextEnrichmentExpiryAt = nowMs() + EnrichmentExpiryPollMs;
+				continue;
+			}
 
 			const uint64_t nextWorkAt = std::min(
-			    {nextScanAt, nextIcmpAt, nextMdnsAt, nextSsdpAt, nextNbnsAt, nextReverseDnsAt}
+			    {nextScanAt,
+			     nextIcmpAt,
+			     nextMdnsAt,
+			     nextSsdpAt,
+			     nextNbnsAt,
+			     nextReverseDnsAt,
+			     nextEnrichmentExpiryAt}
 			);
 			const uint64_t remaining = nextWorkAt > current ? nextWorkAt - current : 1;
 			const uint32_t waitMs = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1000));
@@ -1687,6 +1714,8 @@ struct ScoutImpl {
 		    (incoming.providers.ssdp.enabled &&
 		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
 		      incoming.providers.ssdp.responseWindowMs == 0 ||
+		      (incoming.providers.ssdp.fetchDeviceDescription &&
+		       incoming.providers.ssdp.httpTimeoutMs == 0) ||
 		      incoming.providers.ssdp.maxDescriptionFetchesPerRun == 0)) ||
 		    (incoming.providers.nbns.enabled &&
 		     (incoming.providers.nbns.intervalMs < MinScanIntervalMs ||
@@ -1937,6 +1966,118 @@ void DeferredCleanupService::taskEntry(void *context) {
 }
 
 } // namespace
+
+bool scoutFormatIpv4(const ScoutIpv4Address &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	const uint32_t host = lwip_ntohl(address.value);
+	const int written = std::snprintf(
+	    out,
+	    capacity,
+	    "%u.%u.%u.%u",
+	    static_cast<unsigned>((host >> 24U) & 0xFFU),
+	    static_cast<unsigned>((host >> 16U) & 0xFFU),
+	    static_cast<unsigned>((host >> 8U) & 0xFFU),
+	    static_cast<unsigned>(host & 0xFFU)
+	);
+	if (written < 0 || static_cast<size_t>(written) >= capacity) {
+		out[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+bool scoutFormatMac(const ScoutMacAddress &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	const int written = std::snprintf(
+	    out,
+	    capacity,
+	    "%02X:%02X:%02X:%02X:%02X:%02X",
+	    address.bytes[0],
+	    address.bytes[1],
+	    address.bytes[2],
+	    address.bytes[3],
+	    address.bytes[4],
+	    address.bytes[5]
+	);
+	if (written < 0 || static_cast<size_t>(written) >= capacity) {
+		out[0] = '\0';
+		return false;
+	}
+	return true;
+}
+
+bool scoutFormatIpv6(const ScoutIpv6Address &address, char *out, size_t capacity) {
+	if (out == nullptr || capacity == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	uint16_t words[8]{};
+	for (size_t i = 0; i < 8; ++i) {
+		words[i] = static_cast<uint16_t>(
+		    (static_cast<uint16_t>(address.bytes[i * 2]) << 8U) |
+		    address.bytes[i * 2 + 1]
+		);
+	}
+
+	size_t bestStart = 8;
+	size_t bestLength = 0;
+	for (size_t i = 0; i < 8;) {
+		if (words[i] != 0) {
+			i++;
+			continue;
+		}
+		const size_t start = i;
+		while (i < 8 && words[i] == 0) {
+			i++;
+		}
+		const size_t length = i - start;
+		if (length >= 2 && length > bestLength) {
+			bestStart = start;
+			bestLength = length;
+		}
+	}
+
+	size_t used = 0;
+	auto append = [&](const char *text) {
+		const size_t length = std::strlen(text);
+		if (used + length + 1 > capacity) {
+			return false;
+		}
+		std::memcpy(out + used, text, length);
+		used += length;
+		out[used] = '\0';
+		return true;
+	};
+
+	for (size_t i = 0; i < 8;) {
+		if (i == bestStart) {
+			if (!append("::")) {
+				out[0] = '\0';
+				return false;
+			}
+			i += bestLength;
+			continue;
+		}
+		if (used != 0 && out[used - 1] != ':') {
+			if (!append(":")) {
+				out[0] = '\0';
+				return false;
+			}
+		}
+		char segment[5]{};
+		std::snprintf(segment, sizeof(segment), "%x", static_cast<unsigned>(words[i]));
+		if (!append(segment)) {
+			out[0] = '\0';
+			return false;
+		}
+		i++;
+	}
+	return true;
+}
 
 ScoutResult ScoutResult::success(const char *message) {
 	return {ScoutStatus::Ok, message};
