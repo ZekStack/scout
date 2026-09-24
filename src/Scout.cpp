@@ -1477,7 +1477,7 @@ struct ScoutImpl {
 		flushIdentityIfDirty();
 	}
 
-	void performOuiProvider() {
+	void performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
 		if (!config.providers.oui) {
 			return;
 		}
@@ -1495,6 +1495,10 @@ struct ScoutImpl {
 
 		uint64_t observations = 0;
 		for (size_t index = 0;; ++index) {
+			if (stopRequested.load(std::memory_order_acquire) ||
+			    (deadlineAt != UINT64_MAX && nowMs() >= deadlineAt)) {
+				break;
+			}
 			ScoutMacAddress mac{};
 			bool shouldLookup = false;
 			{
@@ -2219,7 +2223,7 @@ struct ScoutImpl {
 					break;
 				}
 				expireEnrichmentRecords();
-				performOuiProvider();
+				performOuiProvider(deadlineAt);
 				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
 				continue;
 			}
