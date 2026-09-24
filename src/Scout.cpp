@@ -161,6 +161,9 @@ struct ScoutImpl {
 	size_t reverseDnsCursor = 0;
 	size_t nbnsCursor = 0;
 	size_t mdnsServiceCursor = 0;
+	size_t icmpRunRemaining = 0;
+	size_t mdnsRunRemaining = 0;
+	size_t reverseDnsRunRemaining = 0;
 
 	std::atomic<uint64_t> nextScanAt{UINT64_MAX};
 	std::atomic<uint64_t> nextIcmpAt{UINT64_MAX};
@@ -755,6 +758,12 @@ struct ScoutImpl {
 		target.malformedResponses += run.malformedResponses;
 		target.serverErrors += run.serverErrors;
 		target.droppedObservations += run.dropped;
+		if (run.budgetYielded) {
+			target.budgetYields++;
+		}
+		if (run.cancelled) {
+			target.cancellations++;
+		}
 	}
 
 	size_t snapshotProviderTargets() {
@@ -1397,36 +1406,66 @@ struct ScoutImpl {
 		}
 	}
 
-	void performIcmpProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performIcmpProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		ScoutIcmpConfig runConfig = config.providers.icmp;
+		if (icmpRunRemaining > 0) {
+			runConfig.maxTargetsPerRun = icmpRunRemaining;
+		}
 		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runIcmpProvider(
 		    providerTargets,
 		    count,
 		    icmpCursor,
-		    config.providers.icmp,
+		    runConfig,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
+		if (icmpRunRemaining == 0) {
+			icmpRunRemaining = stats.plannedUnits;
+		}
+		icmpRunRemaining =
+		    stats.workUnits >= icmpRunRemaining ? 0 : icmpRunRemaining - stats.workUnits;
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
+		if (!continueRun) {
+			icmpRunRemaining = 0;
+		}
 		accumulateProviderStats(diag.icmp, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
-	void performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		ScoutMdnsConfig runConfig = config.providers.mdns;
+		if (mdnsRunRemaining > 0) {
+			runConfig.maxServiceQueriesPerRun = mdnsRunRemaining;
+		}
 		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runMdnsProvider(
 		    providerTargets,
 		    count,
 		    mdnsServiceCursor,
-		    config.providers.mdns,
+		    runConfig,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
+		if (mdnsRunRemaining == 0) {
+			mdnsRunRemaining = stats.plannedUnits;
+		}
+		mdnsRunRemaining =
+		    stats.workUnits >= mdnsRunRemaining ? 0 : mdnsRunRemaining - stats.workUnits;
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
+		if (!continueRun) {
+			mdnsRunRemaining = 0;
+		}
 		accumulateProviderStats(diag.mdns, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
 	void performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
@@ -1462,20 +1501,36 @@ struct ScoutImpl {
 		flushIdentityIfDirty();
 	}
 
-	void performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
+		ScoutReverseDnsConfig runConfig = config.providers.reverseDns;
+		if (reverseDnsRunRemaining > 0) {
+			runConfig.maxTargetsPerRun = reverseDnsRunRemaining;
+		}
 		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runReverseDnsProvider(
 		    providerTargets,
 		    count,
 		    reverseDnsCursor,
-		    config.providers.reverseDns,
+		    runConfig,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
+		if (reverseDnsRunRemaining == 0) {
+			reverseDnsRunRemaining = stats.plannedUnits;
+		}
+		reverseDnsRunRemaining = stats.workUnits >= reverseDnsRunRemaining
+		                             ? 0
+		                             : reverseDnsRunRemaining - stats.workUnits;
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && reverseDnsRunRemaining > 0;
+		if (!continueRun) {
+			reverseDnsRunRemaining = 0;
+		}
 		accumulateProviderStats(diag.reverseDns, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
 	void performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
@@ -2254,20 +2309,28 @@ struct ScoutImpl {
 
 			if (config.providers.icmp.enabled &&
 			    current >= nextIcmpAt.load(std::memory_order_acquire)) {
-				performIcmpProvider(deadlineAt);
+				const bool continueProvider = performIcmpProvider(deadlineAt);
 				nextIcmpAt.store(
-				    nowMs() + config.providers.icmp.intervalMs,
+				    continueProvider ? nowMs() : nowMs() + config.providers.icmp.intervalMs,
 				    std::memory_order_release
 				);
+				if (continueProvider) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 			if (config.providers.mdns.enabled &&
 			    current >= nextMdnsAt.load(std::memory_order_acquire)) {
-				performMdnsProvider(deadlineAt);
+				const bool continueProvider = performMdnsProvider(deadlineAt);
 				nextMdnsAt.store(
-				    nowMs() + config.providers.mdns.intervalMs,
+				    continueProvider ? nowMs() : nowMs() + config.providers.mdns.intervalMs,
 				    std::memory_order_release
 				);
+				if (continueProvider) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 			if (config.providers.ssdp.enabled &&
@@ -2290,11 +2353,16 @@ struct ScoutImpl {
 			}
 			if (config.providers.reverseDns.enabled &&
 			    current >= nextReverseDnsAt.load(std::memory_order_acquire)) {
-				performReverseDnsProvider(deadlineAt);
+				const bool continueProvider = performReverseDnsProvider(deadlineAt);
 				nextReverseDnsAt.store(
-				    nowMs() + config.providers.reverseDns.intervalMs,
+				    continueProvider ? nowMs()
+				                     : nowMs() + config.providers.reverseDns.intervalMs,
 				    std::memory_order_release
 				);
+				if (continueProvider) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 			if (current >= nextEnrichmentExpiryAt.load(std::memory_order_acquire)) {
@@ -2457,6 +2525,9 @@ struct ScoutImpl {
 		reverseDnsCursor = 0;
 		nbnsCursor = 0;
 		mdnsServiceCursor = 0;
+		icmpRunRemaining = 0;
+		mdnsRunRemaining = 0;
+		reverseDnsRunRemaining = 0;
 		nextScanId = 1;
 		scanProgress = IncrementalScanState{};
 		incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
