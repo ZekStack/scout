@@ -1425,8 +1425,11 @@ struct ScoutImpl {
 		if (icmpRunRemaining == 0) {
 			icmpRunRemaining = stats.plannedUnits;
 		}
-		icmpRunRemaining =
-		    stats.workUnits >= icmpRunRemaining ? 0 : icmpRunRemaining - stats.workUnits;
+		if (stats.workUnits >= icmpRunRemaining) {
+			icmpRunRemaining = 0;
+		} else {
+			icmpRunRemaining -= stats.workUnits;
+		}
 		const bool continueRun =
 		    stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
 		if (!continueRun) {
@@ -1456,8 +1459,11 @@ struct ScoutImpl {
 		if (mdnsRunRemaining == 0) {
 			mdnsRunRemaining = stats.plannedUnits;
 		}
-		mdnsRunRemaining =
-		    stats.workUnits >= mdnsRunRemaining ? 0 : mdnsRunRemaining - stats.workUnits;
+		if (stats.workUnits >= mdnsRunRemaining) {
+			mdnsRunRemaining = 0;
+		} else {
+			mdnsRunRemaining -= stats.workUnits;
+		}
 		const bool continueRun =
 		    stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
 		if (!continueRun) {
@@ -2133,10 +2139,7 @@ struct ScoutImpl {
 			}
 
 			if (scanProgress.nextBatchAt > current) {
-				incrementalScanWakeAt.store(
-				    scanProgress.nextBatchAt,
-				    std::memory_order_release
-				);
+				incrementalScanWakeAt.store(scanProgress.nextBatchAt, std::memory_order_release);
 				return false;
 			}
 
@@ -2174,10 +2177,7 @@ struct ScoutImpl {
 			scanProgress.batchPending = true;
 			scanProgress.batchCount = count;
 			scanProgress.batchReadyAt = nowMs() + config.arpResponseWaitMs;
-			incrementalScanWakeAt.store(
-			    scanProgress.batchReadyAt,
-			    std::memory_order_release
-			);
+			incrementalScanWakeAt.store(scanProgress.batchReadyAt, std::memory_order_release);
 			return false;
 		}
 
@@ -2232,9 +2232,7 @@ struct ScoutImpl {
 			if (scanWakeAt <= current) {
 				return 0;
 			}
-			return static_cast<uint32_t>(
-			    std::min<uint64_t>(scanWakeAt - current, UINT32_MAX)
-			);
+			return static_cast<uint32_t>(std::min<uint64_t>(scanWakeAt - current, UINT32_MAX));
 		}
 		if (scanRequested.load(std::memory_order_acquire)) {
 			return 0;
@@ -2354,11 +2352,9 @@ struct ScoutImpl {
 			if (config.providers.reverseDns.enabled &&
 			    current >= nextReverseDnsAt.load(std::memory_order_acquire)) {
 				const bool continueProvider = performReverseDnsProvider(deadlineAt);
-				nextReverseDnsAt.store(
-				    continueProvider ? nowMs()
-				                     : nowMs() + config.providers.reverseDns.intervalMs,
-				    std::memory_order_release
-				);
+				const uint64_t nextRunAt =
+				    continueProvider ? nowMs() : nowMs() + config.providers.reverseDns.intervalMs;
+				nextReverseDnsAt.store(nextRunAt, std::memory_order_release);
 				if (continueProvider) {
 					budgetYield = true;
 					break;
