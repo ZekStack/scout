@@ -109,7 +109,9 @@ config.memory.allocation = Strata::Placement::PreferExternal;
 config.memory.taskStack = Strata::Placement::PreferExternal;
 ```
 
-`memory.allocation` controls movable Scout-owned storage, including the rich device registry, provider target tables, identity tables, UPnP scratch storage, subnet target buffer, and ARP scratch buffers.
+`memory.allocation` controls movable Scout-owned storage, including the compact device registry,
+lazy rich-detail allocations, provider target tables, identity tables, UPnP scratch storage,
+subnet target buffer, and ARP scratch buffers.
 
 `memory.taskStack` controls the Scout background task stack.
 
@@ -139,7 +141,7 @@ Scout distinguishes two ARP observation sources:
 
 Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
 
-After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names, IPv6 aliases, and OUI vendor information without changing higher-level presence policy.
+After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names, IPv6 aliases, and OUI vendor information without changing higher-level presence policy. Bounded providers rotate through targets/service types across runs instead of repeatedly starting from entry zero. Reverse DNS uses Scout's bounded UDP PTR client against the DNS server configured on the endpoint's ESP-NETIF; it does not rely on blocking `getnameinfo()`.
 
 ### Registry retention and deduplication
 
@@ -168,8 +170,9 @@ A presence layer built on Scout should suppress offline inference while coverage
 * Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
 * A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
 * Scout performs no persistence, port scanning, or heuristic device-type classification. OUI lookup is supported through an application-provided resolver so Scout does not ship a stale vendor database.
-* Rich `ScoutDeviceDetails` snapshots are intentionally large; keep reusable buffers in PSRAM rather than on a small task stack.
-* `PreferExternal` is deliberately different from `RequireExternal`; systems without usable PSRAM can still operate using Strata's fallback behavior.
+* Rich `ScoutDeviceDetails` snapshots are intentionally large; Scout allocates them lazily per enriched device, and applications should keep reusable snapshot buffers in PSRAM rather than on a small task stack.
+* Failure to allocate a rich detail record does not discard the compact MAC registry entry; `enrichmentAllocationFailures` reports that pressure.
+* `PreferExternal` is deliberately different from `RequireExternal`; smaller/non-PSRAM systems can still use the compact registry, but applications should tune enabled enrichment providers and capacities to their available internal memory.
 
 ## API overview
 
