@@ -143,8 +143,7 @@ const ProviderTarget *findTarget(
 
 	if (interfaceKey != nullptr && interfaceKey[0] != '\0') {
 		for (size_t i = 0; i < targetCount; ++i) {
-			if (targets[i].ipv4.value == ipv4 &&
-			    targetMatchesInterface(targets[i], interfaceKey)) {
+			if (targets[i].ipv4.value == ipv4 && targetMatchesInterface(targets[i], interfaceKey)) {
 				return &targets[i];
 			}
 		}
@@ -766,15 +765,21 @@ HttpFetchResult fetchHttpBody(
 		if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
 			const int socketError = errno;
 			close(fd);
-			result.status = socketError == ETIMEDOUT ? HttpFetchStatus::Timeout
-			                                           : HttpFetchStatus::NetworkError;
+			if (socketError == ETIMEDOUT) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
 			return result;
 		}
 		const auto ready = waitSocketReady(fd, true, deadlineMs);
 		if (ready != SocketIoStatus::Ok) {
 			close(fd);
-			result.status = ready == SocketIoStatus::Timeout ? HttpFetchStatus::Timeout
-			                                                 : HttpFetchStatus::NetworkError;
+			if (ready == SocketIoStatus::Timeout) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
 			return result;
 		}
 		int socketError = 0;
@@ -803,12 +808,19 @@ HttpFetchResult fetchHttpBody(
 		result.status = HttpFetchStatus::InvalidResponse;
 		return result;
 	}
-	const auto sendStatus =
-	    sendAll(fd, request, static_cast<size_t>(requestLength), deadlineMs);
+	const auto sendStatus = sendAll(
+	    fd,
+	    request,
+	    static_cast<size_t>(requestLength),
+	    deadlineMs
+	);
 	if (sendStatus != SocketIoStatus::Ok) {
 		close(fd);
-		result.status = sendStatus == SocketIoStatus::Timeout ? HttpFetchStatus::Timeout
-		                                                   : HttpFetchStatus::NetworkError;
+		if (sendStatus == SocketIoStatus::Timeout) {
+			result.status = HttpFetchStatus::Timeout;
+		} else {
+			result.status = HttpFetchStatus::NetworkError;
+		}
 		return result;
 	}
 
