@@ -92,7 +92,7 @@ class ScoutLock {
 
 struct ScoutDeviceRecord {
 	ScoutDeviceInfo info{};
-	ScoutDeviceDetails details{};
+	Strata::UniquePtr<ScoutDeviceDetails> details;
 };
 
 struct ScoutImpl {
@@ -133,6 +133,8 @@ struct ScoutImpl {
 	ScoutOuiLookupCallback ouiLookup;
 	size_t icmpCursor = 0;
 	size_t reverseDnsCursor = 0;
+	size_t nbnsCursor = 0;
+	size_t mdnsServiceCursor = 0;
 
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
@@ -358,6 +360,30 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	ScoutDeviceDetails *ensureDetailsLocked(size_t index) {
+		if (index >= deviceCount) {
+			return nullptr;
+		}
+		if (!devices[index].details) {
+			devices[index].details =
+			    Strata::makeUnique<ScoutDeviceDetails>(config.memory.allocation);
+			if (!devices[index].details) {
+				diag.enrichmentAllocationFailures++;
+				return nullptr;
+			}
+			devices[index].details->locallyAdministeredMac =
+			    scout_internal::macIsLocallyAdministered(devices[index].info.mac);
+			devices[index].details->multicastMac =
+			    scout_internal::macIsMulticast(devices[index].info.mac);
+		}
+		return devices[index].details.get();
+	}
+
+	const ScoutDeviceDetails &detailsOrEmptyLocked(size_t index) const {
+		static const ScoutDeviceDetails empty{};
+		return index < deviceCount && devices[index].details ? *devices[index].details : empty;
+	}
+
 	size_t findEndpointOwner(uint8_t interfaceIndex, uint32_t ipv4, size_t excludedIndex) const {
 		for (size_t i = 0; i < deviceCount; ++i) {
 			if (i == excludedIndex) {
@@ -380,18 +406,11 @@ struct ScoutImpl {
 		}
 		const size_t lastIndex = deviceCount - 1;
 		if (index != lastIndex) {
-			devices[index] = devices[lastIndex];
+			devices[index].info = devices[lastIndex].info;
+			devices[index].details = std::move(devices[lastIndex].details);
 		}
-		std::memset(
-		    static_cast<void *>(&devices[lastIndex].info),
-		    0,
-		    sizeof(devices[lastIndex].info)
-		);
-		std::memset(
-		    static_cast<void *>(&devices[lastIndex].details),
-		    0,
-		    sizeof(devices[lastIndex].details)
-		);
+		devices[lastIndex].info = {};
+		devices[lastIndex].details.reset();
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 		identityDirty = true;
@@ -407,7 +426,12 @@ struct ScoutImpl {
 				}
 
 				scout_internal::mergeDeviceInfo(devices[i].info, devices[j].info);
-				scout_internal::mergeDeviceDetails(devices[i].details, devices[j].details);
+				if (devices[j].details) {
+					auto *targetDetails = ensureDetailsLocked(i);
+					if (targetDetails != nullptr) {
+						scout_internal::mergeDeviceDetails(*targetDetails, *devices[j].details);
+					}
+				}
 				removeDeviceAtLocked(j);
 				diag.deduplicatedDeviceCount++;
 			}
@@ -531,9 +555,8 @@ struct ScoutImpl {
 					index = deviceCount++;
 					discovered = true;
 					auto &info = devices[index].info;
-					auto &details = devices[index].details;
-					std::memset(static_cast<void *>(&info), 0, sizeof(info));
-					std::memset(static_cast<void *>(&details), 0, sizeof(details));
+					info = {};
+					devices[index].details.reset();
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
 					info.mac = info.key.mac;
@@ -542,10 +565,6 @@ struct ScoutImpl {
 					info.lastConfirmedAtMs = confirmed ? observedAt : 0;
 					info.observationSources = scoutObservationMask(source);
 					info.observationCount = 1;
-					details.locallyAdministeredMac =
-					    scout_internal::macIsLocallyAdministered(info.mac);
-					details.multicastMac = scout_internal::macIsMulticast(info.mac);
-
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
 				}
@@ -759,9 +778,9 @@ struct ScoutImpl {
 					ScoutIdentityRelation relation{};
 					if (!scout_internal::identityRelation(
 					        devices[left].info,
-					        devices[left].details,
+					        detailsOrEmptyLocked(left),
 					        devices[right].info,
-					        devices[right].details,
+					        detailsOrEmptyLocked(right),
 					        relation
 					    )) {
 						continue;
@@ -881,7 +900,11 @@ struct ScoutImpl {
 
 			auto &record = devices[index];
 			auto &info = record.info;
-			auto &details = record.details;
+			auto *detailsPtr = ensureDetailsLocked(index);
+			if (detailsPtr == nullptr) {
+				return;
+			}
+			auto &details = *detailsPtr;
 			const uint64_t observedAt = nowMs();
 			ScoutDeviceChange changes = ScoutDeviceChange::None;
 
@@ -1070,8 +1093,11 @@ struct ScoutImpl {
 				if (!lock || index >= deviceCount) {
 					break;
 				}
+				if (!devices[index].details) {
+					continue;
+				}
 				const ScoutDeviceChange changes =
-				    scout_internal::expireEnrichment(devices[index].details, nowMs());
+				    scout_internal::expireEnrichment(*devices[index].details, nowMs());
 				const uint32_t changeMask = scoutDeviceChangeMask(changes);
 				if (changeMask != 0) {
 					identityDirty = true;
@@ -1113,6 +1139,7 @@ struct ScoutImpl {
 		const auto stats = scout_internal::runMdnsProvider(
 		    providerTargets,
 		    count,
+		    mdnsServiceCursor,
 		    config.providers.mdns,
 		    &ScoutImpl::providerSink,
 		    this
@@ -1141,6 +1168,7 @@ struct ScoutImpl {
 		const auto stats = scout_internal::runNbnsProvider(
 		    providerTargets,
 		    count,
+		    nbnsCursor,
 		    config.providers.nbns,
 		    &ScoutImpl::providerSink,
 		    this
@@ -1190,9 +1218,10 @@ struct ScoutImpl {
 				}
 				const auto &record = devices[index];
 				mac = record.info.mac;
-				shouldLookup = !record.details.vendor.known &&
-				               !record.details.locallyAdministeredMac &&
-				               !record.details.multicastMac;
+				const bool knownVendor = record.details && record.details->vendor.known;
+				shouldLookup = !knownVendor &&
+				               !scout_internal::macIsLocallyAdministered(mac) &&
+				               !scout_internal::macIsMulticast(mac);
 			}
 			if (!shouldLookup) {
 				continue;
@@ -1213,11 +1242,19 @@ struct ScoutImpl {
 					continue;
 				}
 				const size_t currentIndex = findDeviceByMac(mac.bytes);
-				if (currentIndex == SIZE_MAX || devices[currentIndex].details.vendor.known) {
+				if (currentIndex == SIZE_MAX) {
 					continue;
 				}
-				devices[currentIndex].details.vendor = vendor;
-				devices[currentIndex].details.lastEnrichedAtMs = nowMs();
+				auto *details = ensureDetailsLocked(currentIndex);
+				if (details == nullptr || details->vendor.known) {
+					continue;
+				}
+				vendor.observationSource = ScoutObservationSource::Oui;
+				vendor.firstSeenAtMs = nowMs();
+				vendor.lastSeenAtMs = vendor.firstSeenAtMs;
+				vendor.expiresAtMs = 0;
+				details->vendor = vendor;
+				details->lastEnrichedAtMs = vendor.firstSeenAtMs;
 				identityDirty = true;
 				event.type = ScoutEventType::DeviceChanged;
 				event.status = ScoutStatus::Ok;
@@ -1660,6 +1697,8 @@ struct ScoutImpl {
 		identityRelationCountValue = 0;
 		icmpCursor = 0;
 		reverseDnsCursor = 0;
+		nbnsCursor = 0;
+		mdnsServiceCursor = 0;
 		nextScanId = 1;
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
@@ -2002,7 +2041,11 @@ ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const 
 	if (index >= _impl->deviceCount) {
 		return ScoutResult::failure(ScoutStatus::NotFound, "device index is out of range");
 	}
-	out = _impl->devices[index].details;
+	if (_impl->devices[index].details) {
+		out = *_impl->devices[index].details;
+	} else {
+		out = {};
+	}
 	return ScoutResult::success();
 }
 
@@ -2024,7 +2067,11 @@ ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetai
 	if (index == SIZE_MAX) {
 		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
 	}
-	out = _impl->devices[index].details;
+	if (_impl->devices[index].details) {
+		out = *_impl->devices[index].details;
+	} else {
+		out = {};
+	}
 	return ScoutResult::success();
 }
 
@@ -2047,7 +2094,8 @@ ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName 
 	if (index == SIZE_MAX) {
 		return ScoutResult::failure(ScoutStatus::NotFound, "device not found");
 	}
-	if (scout_internal::selectPreferredName(_impl->devices[index].details, out)) {
+	if (_impl->devices[index].details &&
+	    scout_internal::selectPreferredName(*_impl->devices[index].details, out)) {
 		return ScoutResult::success();
 	}
 	std::snprintf(
