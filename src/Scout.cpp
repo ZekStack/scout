@@ -104,9 +104,7 @@ int enrichmentSourcePriority(ScoutObservationSource source) {
 	}
 }
 
-bool shouldAcceptEnrichmentSource(
-    ScoutObservationSource current, ScoutObservationSource incoming
-) {
+bool acceptsEnrichmentSource(ScoutObservationSource current, ScoutObservationSource incoming) {
 	return current == ScoutObservationSource::None || current == incoming ||
 	       enrichmentSourcePriority(incoming) > enrichmentSourcePriority(current);
 }
@@ -1049,7 +1047,7 @@ struct ScoutImpl {
 					                      ScoutDeviceChange change) {
 						if (source == nullptr || source[0] == '\0' ||
 						    (destination[0] != '\0' &&
-						     !shouldAcceptEnrichmentSource(fieldSource, observation.source))) {
+						     !acceptsEnrichmentSource(fieldSource, observation.source))) {
 							return;
 						}
 						const bool valueChanged = std::strncmp(destination, source, capacity) != 0;
