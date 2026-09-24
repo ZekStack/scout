@@ -100,7 +100,10 @@ that responder before Scout or disable Scout's automatic initialization.
 ## mDNS and IPv6
 
 Scout correlates mDNS results to an existing MAC identity through a known IPv4 endpoint and
-its ESP-NETIF. IPv6 addresses returned in that same result are retained as endpoint aliases.
+its ESP-NETIF. Provider results are accepted only while that exact `(interface, IPv4)` endpoint
+still belongs to the target MAC; delayed results from a reassigned address are discarded and
+counted in `staleProviderObservations`. IPv6 addresses returned in that same result are retained
+as endpoint aliases.
 
 This first IPv6 slice deliberately does not inspect private lwIP neighbour tables and does not
 perform an active IPv6 neighbour sweep. IPv6-only discovery can be added later when there is
@@ -122,8 +125,10 @@ extracts only the fields useful to a user-facing device manager:
 - device type.
 
 The response body is bounded by `maxDescriptionBytes`; Scout does not retain arbitrary XML.
-Within one SSDP run, duplicate `LOCATION` values are fetched only once so repeated advertisements
-from one device cannot consume the whole description-fetch budget.
+Description TCP sockets are bound to the same local IPv4 interface that received the SSDP
+advertisement. Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface,
+so repeated advertisements from one device cannot consume the whole description-fetch budget
+without collapsing identical private addresses that exist on different local networks.
 
 ## OUI vendor lookup
 
@@ -149,8 +154,14 @@ their provider source and expiry. mDNS uses TTL when available, SSDP uses
 `CACHE-CONTROL: max-age`, and providers have fallback retention values.
 
 Expiry removes only the stale enrichment item. It does not remove the underlying MAC record
-and does not declare the device offline. Expiring strong identity evidence immediately marks
-the identity graph dirty so stale Strong/Certain groups are removed.
+and does not declare the device offline. Enrichment expiry is polled independently of the ARP
+scan interval, so short DNS/mDNS/SSDP lifetimes do not remain valid until the next subnet sweep.
+Expiring strong identity evidence immediately marks the identity graph dirty so stale
+Strong/Certain groups are removed.
+
+ARP observations alone advance registry-retention `lastSeenAtMs`. ICMP can advance
+`lastConfirmedAtMs`, while mDNS, SSDP, NBNS and reverse DNS enrich the currently ARP-owned
+endpoint without extending the MAC record's retention lifetime.
 
 ## Reverse DNS
 
