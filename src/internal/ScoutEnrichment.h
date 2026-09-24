@@ -60,7 +60,13 @@ bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &
 
 bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out);
 bool parseUpnpDescription(const char *data, size_t length, UpnpDescriptionInfo &out);
-bool parseNbnsNodeStatusName(const uint8_t *data, size_t length, char *out, size_t outCapacity);
+bool parseNbnsNodeStatusName(
+    const uint8_t *data,
+    size_t length,
+    uint16_t expectedTransactionId,
+    char *out,
+    size_t outCapacity
+);
 
 bool identityRelation(
     const ScoutDeviceInfo &leftInfo,
