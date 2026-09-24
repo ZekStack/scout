@@ -40,12 +40,16 @@ struct EnrichmentObservation {
 	char serialNumber[SCOUT_SERIAL_SIZE] = {};
 	char persistentDeviceId[SCOUT_PERSISTENT_ID_SIZE] = {};
 	char upnpUdn[SCOUT_UPNP_UDN_SIZE] = {};
+	uint64_t identityExpiresAtMs = 0;
 };
 
 struct ProviderRunStats {
 	uint64_t observations = 0;
 	uint64_t errors = 0;
 	uint64_t timeouts = 0;
+	uint64_t noRecords = 0;
+	uint64_t malformedResponses = 0;
+	uint64_t serverErrors = 0;
 	uint64_t dropped = 0;
 };
 
@@ -64,6 +68,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    size_t &serviceCursor,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
     void *context
@@ -82,6 +87,7 @@ ProviderRunStats runSsdpProvider(
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    size_t &cursor,
     const ScoutNbnsConfig &config,
     EnrichmentSink sink,
     void *context
