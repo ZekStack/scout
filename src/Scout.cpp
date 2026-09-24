@@ -901,11 +901,6 @@ struct ScoutImpl {
 
 			auto &record = devices[index];
 			auto &info = record.info;
-			auto *detailsPtr = ensureDetailsLocked(index);
-			if (detailsPtr == nullptr) {
-				return;
-			}
-			auto &details = *detailsPtr;
 			const uint64_t observedAt = nowMs();
 			ScoutDeviceChange changes = ScoutDeviceChange::None;
 
@@ -941,7 +936,17 @@ struct ScoutImpl {
 				}
 			}
 
-			for (size_t i = 0; i < observation.nameCount; ++i) {
+			const bool hasRichData =
+			    observation.nameCount > 0 || observation.hasService || observation.metadataCount > 0 ||
+			    observation.manufacturer[0] != '\0' || observation.modelName[0] != '\0' ||
+			    observation.modelNumber[0] != '\0' || observation.serialNumber[0] != '\0' ||
+			    observation.persistentDeviceId[0] != '\0' || observation.upnpUdn[0] != '\0';
+			if (hasRichData) {
+				auto *detailsPtr = ensureDetailsLocked(index);
+				if (detailsPtr != nullptr) {
+					auto &details = *detailsPtr;
+
+					for (size_t i = 0; i < observation.nameCount; ++i) {
 				const auto result = scout_internal::upsertName(
 				    details,
 				    observation.names[i].source,
@@ -1071,8 +1076,10 @@ struct ScoutImpl {
 				}
 			}
 
-			if (observation.source != ScoutObservationSource::None) {
-				details.lastEnrichedAtMs = observedAt;
+					if (observation.source != ScoutObservationSource::None) {
+						details.lastEnrichedAtMs = observedAt;
+					}
+				}
 			}
 
 			const uint32_t changeMask = scoutDeviceChangeMask(changes);
