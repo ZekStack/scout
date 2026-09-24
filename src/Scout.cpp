@@ -2130,7 +2130,7 @@ ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetai
 }
 
 ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName &out) const {
-	std::memset(&out, 0, sizeof(out));
+	resetInPlace(out);
 	if (!mac.valid()) {
 		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
 	}
