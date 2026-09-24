@@ -755,15 +755,24 @@ bool identityRelation(
 	    !textEqualsIgnoreCase(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
 		return false;
 	}
-	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
+	const bool persistentNamespacesMatch =
+	    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
+	     rightDetails.persistentDeviceNamespace[0] == '\0') ||
 	    sameNonEmpty(
 	        leftDetails.persistentDeviceNamespace,
 	        rightDetails.persistentDeviceNamespace
-	    ) &&
+	    );
+	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
+	    persistentNamespacesMatch &&
 	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		return false;
 	}
-	if (sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&
+	const bool trustedSerialPair =
+	    leftDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
+	    rightDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
+	    leftDetails.manufacturerSource == ScoutObservationSource::Ssdp &&
+	    rightDetails.manufacturerSource == ScoutObservationSource::Ssdp;
+	if (trustedSerialPair && sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&
 	    leftDetails.serialNumber[0] != '\0' && rightDetails.serialNumber[0] != '\0' &&
 	    !textEqualsIgnoreCase(leftDetails.serialNumber, rightDetails.serialNumber)) {
 		return false;
@@ -783,13 +792,13 @@ bool identityRelation(
 	    ) &&
 	    sameNonEmpty(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		out.evidence = {
-		    .type = ScoutIdentityEvidenceType::PersistentDeviceId,
+		    .type = ScoutIdentityEvidenceType::MdnsPersistentId,
 		    .confidence = ScoutIdentityConfidence::Strong,
 		    .source = ScoutObservationSource::Mdns,
 		};
 		return true;
 	}
-	if (sameNonEmpty(leftDetails.serialNumber, rightDetails.serialNumber) &&
+	if (trustedSerialPair && sameNonEmpty(leftDetails.serialNumber, rightDetails.serialNumber) &&
 	    sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer)) {
 		out.evidence = {
 		    .type = ScoutIdentityEvidenceType::SharedSerialNumber,
