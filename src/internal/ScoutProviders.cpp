@@ -780,6 +780,8 @@ HttpFetchResult fetchHttpBody(
 	}
 
 	const size_t bodyLength = received >= headerLength ? received - headerLength : 0;
+	bool hasContentLength = false;
+	size_t declaredLength = 0;
 	for (size_t i = 0; i + 15 < headerLength; ++i) {
 		if ((i == 0 || scratch[i - 1] == '\n') &&
 		    strncasecmp(scratch + i, "Content-Length:", 15) == 0) {
@@ -790,21 +792,38 @@ HttpFetchResult fetchHttpBody(
 			size_t declared = 0;
 			bool hasDigit = false;
 			while (value < scratch + headerLength && *value >= '0' && *value <= '9') {
+				const size_t digit = static_cast<size_t>(*value - '0');
+				if (declared > (SIZE_MAX - digit) / 10U) {
+					result.status = HttpFetchStatus::TooLarge;
+					return result;
+				}
 				hasDigit = true;
-				declared = declared * 10U + static_cast<size_t>(*value - '0');
+				declared = declared * 10U + digit;
 				value++;
 			}
-			if (!hasDigit || declared > bodyLength) {
-				result.status = declared >= capacity ? HttpFetchStatus::TooLarge
-				                                     : HttpFetchStatus::InvalidResponse;
+			if (!hasDigit) {
+				result.status = HttpFetchStatus::InvalidResponse;
 				return result;
 			}
-			std::memmove(scratch, body, declared);
-			scratch[declared] = '\0';
-			result.status = HttpFetchStatus::Ok;
-			result.bodyLength = declared;
+			if (hasContentLength && declaredLength != declared) {
+				result.status = HttpFetchStatus::InvalidResponse;
+				return result;
+			}
+			hasContentLength = true;
+			declaredLength = declared;
+		}
+	}
+	if (hasContentLength) {
+		if (declaredLength > bodyLength) {
+			result.status = declaredLength >= capacity ? HttpFetchStatus::TooLarge
+			                                          : HttpFetchStatus::InvalidResponse;
 			return result;
 		}
+		std::memmove(scratch, body, declaredLength);
+		scratch[declaredLength] = '\0';
+		result.status = HttpFetchStatus::Ok;
+		result.bodyLength = declaredLength;
+		return result;
 	}
 
 	std::memmove(scratch, body, bodyLength);
