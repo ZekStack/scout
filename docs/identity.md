@@ -24,19 +24,24 @@ Confidence is deliberately conservative:
 | Evidence | Confidence | Automatic grouping |
 | --- | --- | --- |
 | same UPnP UDN | Certain | yes |
-| same persistent device ID | Strong | yes |
-| same serial + manufacturer | Strong | yes |
+| same trusted, service-namespaced mDNS persistent ID | Strong | yes |
+| same UPnP serial + manufacturer | Strong | yes |
 | same mDNS hostname | Moderate | no |
 | same service fingerprint | Moderate | no |
 | same manufacturer + model | Weak | no |
 
 A matching hostname by itself is useful context but not proof of one physical device.
+Generic TXT keys such as `deviceid` are retained as metadata but are not promoted to Strong
+identity evidence. Scout currently recognises protocol-specific `id` semantics for selected
+services such as Google Cast and HAP, and records the DNS-SD service/protocol namespace alongside
+the identifier. Equal identifier text from different namespaces therefore does not create a group.
 
 ## Contradictions
 
 Strong identifiers also act as vetoes. For example, two identities are not related through
 a shared hostname when they advertise different non-empty UDNs, different persistent device
-IDs, or conflicting serial numbers from the same manufacturer.
+IDs within the same identity namespace, or conflicting trusted UPnP serial numbers from the same
+manufacturer.
 
 Provider-derived strong identifiers are time-bounded evidence. Their source TTL/max-age is
 retained with the field, and expiry removes the evidence and rebuilds the relation/group view.
