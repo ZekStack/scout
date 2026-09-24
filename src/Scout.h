@@ -495,6 +495,8 @@ struct ScoutProviderDiagnostics {
 	uint64_t runs = 0;
 	uint64_t observations = 0;
 	uint64_t errors = 0;
+	uint64_t transportErrors = 0;
+	uint64_t descriptionErrors = 0;
 	uint64_t timeouts = 0;
 	uint64_t noRecords = 0;
 	uint64_t malformedResponses = 0;
@@ -527,6 +529,8 @@ struct ScoutDiagnostics {
 	uint64_t nameLimitDrops = 0;
 	uint64_t serviceLimitDrops = 0;
 	uint64_t identityRelationDrops = 0;
+	uint64_t identityContradictionBlocks = 0;
+	uint64_t identityGroupMemberLimitDrops = 0;
 	uint64_t identityGroupChanges = 0;
 	uint64_t enrichmentAllocationFailures = 0;
 	uint64_t staleProviderObservations = 0;
