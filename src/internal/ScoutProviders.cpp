@@ -257,7 +257,12 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		result.status = DnsParseStatus::Malformed;
 		return result;
 	}
-	return parsePtrResponse(response, static_cast<size_t>(received), transactionId);
+	return parsePtrResponse(
+	    response,
+	    static_cast<size_t>(received),
+	    transactionId,
+	    ipv4Bytes
+	);
 }
 
 void appendMetadata(
