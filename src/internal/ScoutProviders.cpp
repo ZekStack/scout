@@ -1,6 +1,7 @@
 #include "ScoutProviders.h"
 
 #include "ScoutEnrichment.h"
+#include "ScoutDns.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +13,6 @@
 #include <esp_netif_net_stack.h>
 #include <esp_timer.h>
 #include <lwip/inet.h>
-#include <lwip/netdb.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
 
@@ -159,6 +159,104 @@ int openBoundUdpSocket(uint32_t localIpv4, uint32_t timeoutMs) {
 		return -1;
 	}
 	return fd;
+}
+
+DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
+	DnsPtrAnswer result{};
+	if (target.interfaceKey[0] == '\0') {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	esp_netif_t *netif = esp_netif_get_handle_from_ifkey(target.interfaceKey);
+	if (netif == nullptr) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	esp_netif_ip_info_t ipInfo{};
+	if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK || ipInfo.ip.addr == 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	esp_netif_dns_info_t dnsInfo{};
+	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		dnsInfo = {};
+		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
+	}
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	const int fd = openBoundUdpSocket(ipInfo.ip.addr, timeoutMs);
+	if (fd < 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	const uint16_t transactionId = static_cast<uint16_t>(
+	    (providerNowMs() ^ target.ipv4.value ^ target.interfaceIndex) & 0xFFFFU
+	);
+	uint8_t request[128]{};
+	uint8_t ipv4Bytes[4]{};
+	std::memcpy(ipv4Bytes, &target.ipv4.value, sizeof(ipv4Bytes));
+	const size_t requestLength =
+	    buildPtrQuery(transactionId, ipv4Bytes, request, sizeof(request));
+	if (requestLength == 0) {
+		close(fd);
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+
+	sockaddr_in destination{};
+	destination.sin_family = AF_INET;
+	destination.sin_port = htons(53);
+	destination.sin_addr.s_addr = ip_2_ip4(&dnsInfo.ip)->addr;
+
+	if (sendto(
+	        fd,
+	        request,
+	        requestLength,
+	        0,
+	        reinterpret_cast<const sockaddr *>(&destination),
+	        sizeof(destination)
+	    ) < 0) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	uint8_t response[768]{};
+	sockaddr_in sender{};
+	socklen_t senderLength = sizeof(sender);
+	const int received = recvfrom(
+	    fd,
+	    response,
+	    sizeof(response),
+	    0,
+	    reinterpret_cast<sockaddr *>(&sender),
+	    &senderLength
+	);
+	const int socketError = errno;
+	close(fd);
+
+	if (received <= 0) {
+		result.status =
+		    socketError == EAGAIN || socketError == EWOULDBLOCK
+		        ? DnsParseStatus::Timeout
+		        : DnsParseStatus::NetworkError;
+		return result;
+	}
+	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr) {
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	return parsePtrResponse(response, static_cast<size_t>(received), transactionId);
 }
 
 void appendMetadata(
@@ -606,6 +704,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    size_t &serviceCursor,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
     void *context
@@ -683,7 +782,8 @@ ProviderRunStats runMdnsProvider(
 	    queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 20
 	);
 
-	for (size_t i = 0; i < queryCount; ++i) {
+	for (size_t processed = 0; processed < queryCount; ++processed) {
+		const size_t i = typeCount > 0 ? (serviceCursor + processed) % typeCount : 0;
 		mdns_result_t *results = nullptr;
 		const esp_err_t queryResult = mdns_query_ptr(
 		    types[i].service,
@@ -704,6 +804,9 @@ ProviderRunStats runMdnsProvider(
 			emitMdnsResult(*result, targets, targetCount, config, sink, context, stats);
 		}
 		mdns_query_results_free(results);
+	}
+	if (typeCount > 0) {
+		serviceCursor = (serviceCursor + queryCount) % typeCount;
 	}
 #else
 	(void)config;
@@ -905,6 +1008,7 @@ ProviderRunStats runSsdpProvider(
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    size_t &cursor,
     const ScoutNbnsConfig &config,
     EnrichmentSink sink,
     void *context
@@ -925,7 +1029,8 @@ ProviderRunStats runNbnsProvider(
 		}
 
 		const size_t targetLimit = std::min(targetCount, config.maxTargetsPerRun);
-		for (size_t i = 0; i < targetLimit; ++i) {
+		for (size_t processed = 0; processed < targetLimit; ++processed) {
+			const size_t i = (cursor + processed) % targetCount;
 			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
 				continue;
 			}
@@ -992,6 +1097,7 @@ ProviderRunStats runNbnsProvider(
 		}
 		close(fd);
 	}
+	cursor = (cursor + std::min(targetCount, config.maxTargetsPerRun)) % targetCount;
 	return stats;
 }
 
@@ -1007,41 +1113,50 @@ ProviderRunStats runReverseDnsProvider(
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
 		return stats;
 	}
+
 	const size_t limit = std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
-#if defined(NI_NAMEREQD)
-	(void)config.timeoutMs;
 	for (size_t processed = 0; processed < limit; ++processed) {
 		const size_t index = (cursor + processed) % targetCount;
 		const auto &target = targets[index];
-		sockaddr_in address{};
-		address.sin_family = AF_INET;
-		address.sin_addr.s_addr = target.ipv4.value;
-		char hostname[SCOUT_NAME_SIZE] = {};
-		if (getnameinfo(
-		        reinterpret_cast<const sockaddr *>(&address),
-		        sizeof(address),
-		        hostname,
-		        sizeof(hostname),
-		        nullptr,
-		        0,
-		        NI_NAMEREQD
-		    ) != 0) {
-			stats.timeouts++;
-			continue;
+		const DnsPtrAnswer answer = queryPtr(target, config.timeoutMs);
+
+		switch (answer.status) {
+		case DnsParseStatus::Ok: {
+			const uint64_t now = providerNowMs();
+			EnrichmentObservation observation{};
+			observation.source = ScoutObservationSource::ReverseDns;
+			observation.ipv4 = target.ipv4;
+			observation.interfaceIndex = target.interfaceIndex;
+			const uint64_t expiresAt =
+			    expiryFromTtl(now, answer.ttlSeconds, config.maxAgeMs);
+			addName(
+			    observation,
+			    ScoutNameSource::ReverseDns,
+			    answer.hostname,
+			    now,
+			    expiresAt
+			);
+			sink(target.mac, observation, context);
+			stats.observations++;
+			break;
 		}
-		const uint64_t now = providerNowMs();
-		EnrichmentObservation observation{};
-		observation.source = ScoutObservationSource::ReverseDns;
-		observation.ipv4 = target.ipv4;
-		observation.interfaceIndex = target.interfaceIndex;
-		addName(observation, ScoutNameSource::ReverseDns, hostname, now, now + config.maxAgeMs);
-		sink(target.mac, observation, context);
-		stats.observations++;
+		case DnsParseStatus::NoRecord:
+			stats.noRecords++;
+			break;
+		case DnsParseStatus::Timeout:
+			stats.timeouts++;
+			break;
+		case DnsParseStatus::Malformed:
+			stats.malformedResponses++;
+			break;
+		case DnsParseStatus::ServerError:
+			stats.serverErrors++;
+			break;
+		case DnsParseStatus::NetworkError:
+			stats.errors++;
+			break;
+		}
 	}
-#else
-	(void)config;
-	stats.errors += limit;
-#endif
 	cursor = (cursor + limit) % targetCount;
 	return stats;
 }
