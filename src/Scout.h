@@ -518,6 +518,8 @@ struct ScoutProviderDiagnostics {
 	uint64_t malformedResponses = 0;
 	uint64_t serverErrors = 0;
 	uint64_t droppedObservations = 0;
+	uint64_t budgetYields = 0;
+	uint64_t cancellations = 0;
 };
 
 struct ScoutDiagnostics {
