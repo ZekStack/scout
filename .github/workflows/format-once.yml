@@ -1,4 +1,4 @@
-name: Format once
+name: Format once # final pass
 
 on:
   push:
