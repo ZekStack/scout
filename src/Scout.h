@@ -296,6 +296,10 @@ struct ScoutVendorInfo {
 	bool known = false;
 	ScoutVendorSource source = ScoutVendorSource::None;
 	char name[SCOUT_VENDOR_NAME_SIZE] = {};
+	ScoutObservationSource observationSource = ScoutObservationSource::None;
+	uint64_t firstSeenAtMs = 0;
+	uint64_t lastSeenAtMs = 0;
+	uint64_t expiresAtMs = 0;
 };
 
 struct ScoutDeviceDetails {
@@ -318,6 +322,20 @@ struct ScoutDeviceDetails {
 	char serialNumber[SCOUT_SERIAL_SIZE] = {};
 	char persistentDeviceId[SCOUT_PERSISTENT_ID_SIZE] = {};
 	char upnpUdn[SCOUT_UPNP_UDN_SIZE] = {};
+
+	ScoutObservationSource manufacturerSource = ScoutObservationSource::None;
+	ScoutObservationSource modelNameSource = ScoutObservationSource::None;
+	ScoutObservationSource modelNumberSource = ScoutObservationSource::None;
+	ScoutObservationSource serialNumberSource = ScoutObservationSource::None;
+	ScoutObservationSource persistentDeviceIdSource = ScoutObservationSource::None;
+	ScoutObservationSource upnpUdnSource = ScoutObservationSource::None;
+
+	uint64_t manufacturerExpiresAtMs = 0;
+	uint64_t modelNameExpiresAtMs = 0;
+	uint64_t modelNumberExpiresAtMs = 0;
+	uint64_t serialNumberExpiresAtMs = 0;
+	uint64_t persistentDeviceIdExpiresAtMs = 0;
+	uint64_t upnpUdnExpiresAtMs = 0;
 
 	uint64_t lastEnrichedAtMs = 0;
 };
@@ -472,6 +490,9 @@ struct ScoutProviderDiagnostics {
 	uint64_t observations = 0;
 	uint64_t errors = 0;
 	uint64_t timeouts = 0;
+	uint64_t noRecords = 0;
+	uint64_t malformedResponses = 0;
+	uint64_t serverErrors = 0;
 	uint64_t droppedObservations = 0;
 };
 
@@ -501,6 +522,7 @@ struct ScoutDiagnostics {
 	uint64_t serviceLimitDrops = 0;
 	uint64_t identityRelationDrops = 0;
 	uint64_t identityGroupChanges = 0;
+	uint64_t enrichmentAllocationFailures = 0;
 	uint64_t lastScanDurationMs = 0;
 
 	ScoutProviderDiagnostics icmp{};
