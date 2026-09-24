@@ -432,11 +432,7 @@ void emitMdnsResult(
 		observation.source = ScoutObservationSource::Mdns;
 		observation.ipv4.value = ipv4;
 		observation.interfaceIndex = target->interfaceIndex;
-			copyText(
-			    observation.interfaceKey,
-			    sizeof(observation.interfaceKey),
-			    target->interfaceKey
-			);
+		copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target->interfaceKey);
 		observation.identityExpiresAtMs = expiresAt;
 		addName(observation, ScoutNameSource::MdnsHostname, result.hostname, now, expiresAt);
 		addName(observation, ScoutNameSource::MdnsInstance, result.instance_name, now, expiresAt);
