@@ -573,10 +573,15 @@ bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out) {
 	       data[statusLineLength] != '\n') {
 		statusLineLength++;
 	}
-	if (statusLineLength < 12 || std::memcmp(data, "HTTP/1.", 7) != 0 ||
-	    (data[7] != '0' && data[7] != '1') || data[8] != ' ' || data[9] != '2' ||
-	    data[10] != '0' || data[11] != '0' ||
-	    (statusLineLength > 12 && data[12] != ' ' && data[12] != '\t')) {
+	if (statusLineLength < 12) {
+		return false;
+	}
+	const bool http10 = std::memcmp(data, "HTTP/1.0 ", 9) == 0;
+	const bool http11 = std::memcmp(data, "HTTP/1.1 ", 9) == 0;
+	const bool statusOk = data[9] == '2' && data[10] == '0' && data[11] == '0';
+	const bool validSeparator =
+	    statusLineLength == 12 || data[12] == ' ' || data[12] == '\t';
+	if ((!http10 && !http11) || !statusOk || !validSeparator) {
 		return false;
 	}
 
