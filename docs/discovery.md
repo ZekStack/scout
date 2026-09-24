@@ -56,4 +56,9 @@ After ARP updates the MAC registry, Scout runs independent bounded providers:
 - optional reverse DNS learns resolver-provided hostnames;
 - an application-provided OUI resolver can attach vendor names to globally administered MAC addresses.
 
-Provider schedules and network work budgets are separate from registry storage bounds. Provider failure does not invalidate ARP coverage and does not directly define Online/Offline state. Port scanning and heuristic device-type classification remain outside Scout's scope.
+Provider schedules and network work budgets are separate from registry storage bounds. Provider
+results are applied only while their `(interface, IPv4)` target is still owned by the same MAC.
+IP-only enrichment never refreshes MAC registry retention; ARP remains the source of endpoint
+ownership and `lastSeenAtMs`, while ICMP may independently advance `lastConfirmedAtMs`. Provider
+failure does not invalidate ARP coverage and does not directly define Online/Offline state. Port
+scanning and heuristic device-type classification remain outside Scout's scope.
