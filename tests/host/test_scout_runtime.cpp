@@ -599,6 +599,8 @@ void testIdentityGroupingKeepsModerateRelationsSeparate() {
 void testIdentityGroupConfidenceRequiresCertainConnectivity() {
 	ScoutImpl runtime;
 	assert(runtime.allocateBuffers(runtime.config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
 
 	for (size_t i = 0; i < 3; ++i) {
 		auto &record = runtime.devices[i];
@@ -609,9 +611,6 @@ void testIdentityGroupConfidenceRequiresCertainConnectivity() {
 		record.info.key.mac = record.info.mac;
 		assert(runtime.ensureDetailsLocked(i) != nullptr);
 	}
-	runtime.deviceCount = 3;
-	runtime.diag.deviceCount = 3;
-
 	auto &first = *runtime.devices[0].details;
 	auto &second = *runtime.devices[1].details;
 	auto &third = *runtime.devices[2].details;
@@ -638,6 +637,8 @@ void testIdentityGroupConfidenceRequiresCertainConnectivity() {
 void testIdentityGroupRejectsTransitiveContradiction() {
 	ScoutImpl runtime;
 	assert(runtime.allocateBuffers(runtime.config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
 
 	for (size_t i = 0; i < 3; ++i) {
 		auto &record = runtime.devices[i];
@@ -648,9 +649,6 @@ void testIdentityGroupRejectsTransitiveContradiction() {
 		record.info.key.mac = record.info.mac;
 		assert(runtime.ensureDetailsLocked(i) != nullptr);
 	}
-	runtime.deviceCount = 3;
-	runtime.diag.deviceCount = 3;
-
 	auto &first = *runtime.devices[0].details;
 	auto &second = *runtime.devices[1].details;
 	auto &third = *runtime.devices[2].details;
@@ -686,6 +684,8 @@ void testIdentityRelationCapacityDoesNotCreateUnbackedGroups() {
 	ScoutConfig config = runtime.config;
 	config.maxIdentityRelations = 1;
 	assert(runtime.allocateBuffers(config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
 
 	for (size_t i = 0; i < 3; ++i) {
 		auto &record = runtime.devices[i];
@@ -699,9 +699,6 @@ void testIdentityRelationCapacityDoesNotCreateUnbackedGroups() {
 		std::strcpy(details->persistentDeviceNamespace, "_hap._tcp");
 		std::strcpy(details->persistentDeviceId, "shared-id");
 	}
-	runtime.deviceCount = 3;
-	runtime.diag.deviceCount = 3;
-
 	runtime.rebuildIdentityState();
 	assert(runtime.identityRelationCountValue == 1);
 	assert(runtime.identityGroupCountValue == 1);
@@ -716,6 +713,8 @@ void testIdentityGroupMemberLimitIsExplicit() {
 	assert(runtime.allocateBuffers(runtime.config));
 
 	constexpr size_t DeviceCount = SCOUT_MAX_IDENTITY_GROUP_MEMBERS + 1;
+	runtime.deviceCount = DeviceCount;
+	runtime.diag.deviceCount = DeviceCount;
 	for (size_t i = 0; i < DeviceCount; ++i) {
 		auto &record = runtime.devices[i];
 		record = {};
@@ -727,9 +726,6 @@ void testIdentityGroupMemberLimitIsExplicit() {
 		assert(details != nullptr);
 		std::strcpy(details->upnpUdn, "uuid:large-physical-device");
 	}
-	runtime.deviceCount = DeviceCount;
-	runtime.diag.deviceCount = DeviceCount;
-
 	runtime.rebuildIdentityState();
 	assert(runtime.identityGroupCountValue == 1);
 	assert(runtime.identityGroups[0].memberCount == SCOUT_MAX_IDENTITY_GROUP_MEMBERS);
