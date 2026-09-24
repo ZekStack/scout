@@ -1946,8 +1946,7 @@ struct ScoutImpl {
 				return true;
 			}
 
-			const auto &interfaceSnapshot =
-			    scanProgress.interfaces[scanProgress.interfaceIndex];
+			const auto &interfaceSnapshot = scanProgress.interfaces[scanProgress.interfaceIndex];
 
 			if (!scanProgress.interfacePrepared) {
 				const size_t targetCount = buildTargets(interfaceSnapshot);
@@ -2030,8 +2029,7 @@ struct ScoutImpl {
 					    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
 					const bool confirmed = !wasCached;
 					const ScoutObservationSource source =
-					    confirmed ? ScoutObservationSource::ArpProbe
-					              : ScoutObservationSource::ArpCache;
+					    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache;
 					{
 						ScoutLock lock(mutex);
 						if (lock) {
@@ -2137,10 +2135,7 @@ struct ScoutImpl {
 		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX,
 		    std::memory_order_release
 		);
-		nextEnrichmentExpiryAt.store(
-		    startedAt + EnrichmentExpiryPollMs,
-		    std::memory_order_release
-		);
+		nextEnrichmentExpiryAt.store(startedAt + EnrichmentExpiryPollMs, std::memory_order_release);
 	}
 
 	uint32_t timeUntilNextWorkInternal() const {
@@ -2211,8 +2206,9 @@ struct ScoutImpl {
 				break;
 			}
 
-			const bool requested =
-			    scanProgress.active ? false : scanRequested.exchange(false, std::memory_order_acq_rel);
+			const bool requested = scanProgress.active
+			                           ? false
+			                           : scanRequested.exchange(false, std::memory_order_acq_rel);
 			if (scanProgress.active || requested ||
 			    current >= nextScanAt.load(std::memory_order_acquire)) {
 				const bool completed = processIncrementalScan(deadlineAt);
@@ -2229,25 +2225,37 @@ struct ScoutImpl {
 			if (config.providers.icmp.enabled &&
 			    current >= nextIcmpAt.load(std::memory_order_acquire)) {
 				performIcmpProvider(deadlineAt);
-				nextIcmpAt.store(nowMs() + config.providers.icmp.intervalMs, std::memory_order_release);
+				nextIcmpAt.store(
+				    nowMs() + config.providers.icmp.intervalMs,
+				    std::memory_order_release
+				);
 				continue;
 			}
 			if (config.providers.mdns.enabled &&
 			    current >= nextMdnsAt.load(std::memory_order_acquire)) {
 				performMdnsProvider(deadlineAt);
-				nextMdnsAt.store(nowMs() + config.providers.mdns.intervalMs, std::memory_order_release);
+				nextMdnsAt.store(
+				    nowMs() + config.providers.mdns.intervalMs,
+				    std::memory_order_release
+				);
 				continue;
 			}
 			if (config.providers.ssdp.enabled &&
 			    current >= nextSsdpAt.load(std::memory_order_acquire)) {
 				performSsdpProvider(deadlineAt);
-				nextSsdpAt.store(nowMs() + config.providers.ssdp.intervalMs, std::memory_order_release);
+				nextSsdpAt.store(
+				    nowMs() + config.providers.ssdp.intervalMs,
+				    std::memory_order_release
+				);
 				continue;
 			}
 			if (config.providers.nbns.enabled &&
 			    current >= nextNbnsAt.load(std::memory_order_acquire)) {
 				performNbnsProvider(deadlineAt);
-				nextNbnsAt.store(nowMs() + config.providers.nbns.intervalMs, std::memory_order_release);
+				nextNbnsAt.store(
+				    nowMs() + config.providers.nbns.intervalMs,
+				    std::memory_order_release
+				);
 				continue;
 			}
 			if (config.providers.reverseDns.enabled &&
@@ -2311,7 +2319,9 @@ struct ScoutImpl {
 			}
 			const uint32_t untilNext = timeUntilNextWorkInternal();
 			const uint32_t waitMs =
-			    untilNext == UINT32_MAX ? 1000U : std::max<uint32_t>(1U, std::min<uint32_t>(untilNext, 1000U));
+			    untilNext == UINT32_MAX
+			        ? 1000U
+			        : std::max<uint32_t>(1U, std::min<uint32_t>(untilNext, 1000U));
 			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
 		}
 
@@ -2557,7 +2567,6 @@ struct ScoutImpl {
 		processingActive.store(false, std::memory_order_release);
 		return ScoutResult::success("Scout deinitialized");
 	}
-
 };
 
 namespace {
