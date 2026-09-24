@@ -834,9 +834,11 @@ struct ScoutImpl {
 				if (identityRoot(rightIndex) != rightRoot || !devices[rightIndex].details) {
 					continue;
 				}
-				if (scout_internal::identityDetailsContradict(
-				        *devices[leftIndex].details, *devices[rightIndex].details
-				    )) {
+				const bool contradicts = scout_internal::identityDetailsContradict(
+				    *devices[leftIndex].details,
+				    *devices[rightIndex].details
+				);
+				if (contradicts) {
 					return IdentityUnionResult::Contradiction;
 				}
 			}
@@ -913,9 +915,11 @@ struct ScoutImpl {
 						continue;
 					}
 					const bool retained = storeIdentityRelation(relation);
-					if (!retained ||
-					    static_cast<uint8_t>(relation.evidence.confidence) <
-					        static_cast<uint8_t>(ScoutIdentityConfidence::Strong)) {
+					const auto confidence =
+					    static_cast<uint8_t>(relation.evidence.confidence);
+					const auto strongConfidence =
+					    static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
+					if (!retained || confidence < strongConfidence) {
 						continue;
 					}
 
