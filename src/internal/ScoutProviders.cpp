@@ -61,6 +61,20 @@ bool providerShouldStop(const ProviderRunControl *control) {
 	return control->deadlineMs != UINT64_MAX && providerNowMs() >= control->deadlineMs;
 }
 
+void recordProviderStop(ProviderRunStats &stats, const ProviderRunControl *control) {
+	if (control == nullptr) {
+		return;
+	}
+	if (control->stopRequested != nullptr &&
+	    control->stopRequested->load(std::memory_order_acquire)) {
+		stats.cancelled = true;
+		return;
+	}
+	if (control->deadlineMs != UINT64_MAX && providerNowMs() >= control->deadlineMs) {
+		stats.budgetYielded = true;
+	}
+}
+
 uint32_t providerRemainingMs(const ProviderRunControl *control, uint32_t fallbackMs) {
 	if (control == nullptr || control->deadlineMs == UINT64_MAX) {
 		return fallbackMs;
@@ -976,19 +990,21 @@ ProviderRunStats runIcmpProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
-	    providerShouldStop(control)) {
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		return stats;
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 #if SCOUT_HAS_PING
-	const size_t configuredLimit =
+	const size_t limit =
 	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
-	const size_t limit = control != nullptr && control->deadlineMs != UINT64_MAX
-	                         ? std::min<size_t>(configuredLimit, 1)
-	                         : configuredLimit;
+	stats.plannedUnits = limit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
 		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
 			break;
 		}
 		const size_t index = (cursor + processedCount) % targetCount;
@@ -1000,8 +1016,10 @@ ProviderRunStats runIcmpProvider(
 		pingConfig.interval_ms = 0;
 		const uint32_t pingTimeout = providerRemainingMs(control, config.timeoutMs);
 		if (pingTimeout == 0) {
+			recordProviderStop(stats, control);
 			break;
 		}
+		stats.workUnits++;
 		pingConfig.timeout_ms = pingTimeout;
 		pingConfig.task_stack_size = config.taskStackBytes;
 		pingConfig.task_prio = config.taskPriority;
@@ -1059,6 +1077,9 @@ ProviderRunStats runIcmpProvider(
 			stats.timeouts++;
 		}
 	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
+	}
 	cursor = (cursor + processedCount) % targetCount;
 #else
 	(void)cursor;
@@ -1079,8 +1100,11 @@ ProviderRunStats runMdnsProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
-	    providerShouldStop(control)) {
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		return stats;
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 #if SCOUT_HAS_MDNS
@@ -1118,6 +1142,7 @@ ProviderRunStats runMdnsProvider(
 	uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
 	enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
 	if (enumerationTimeout == 0) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 	if (mdns_query_ptr(
@@ -1151,10 +1176,8 @@ ProviderRunStats runMdnsProvider(
 	const uint32_t queryBudget = config.queryTimeoutMs > enumerationTimeout
 	                                 ? config.queryTimeoutMs - enumerationTimeout
 	                                 : config.queryTimeoutMs;
-	const size_t configuredQueryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
-	const size_t queryCount = control != nullptr && control->deadlineMs != UINT64_MAX
-	                              ? std::min<size_t>(configuredQueryCount, 1)
-	                              : configuredQueryCount;
+	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
+	stats.plannedUnits = queryCount;
 	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
 	uint32_t perQueryTimeout = 1;
 	if (queryCount > 0) {
@@ -1168,8 +1191,10 @@ ProviderRunStats runMdnsProvider(
 	size_t processedQueries = 0;
 	for (; processedQueries < queryCount && perQueryTimeout > 0; ++processedQueries) {
 		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
 			break;
 		}
+		stats.workUnits++;
 		const size_t i = typeCount > 0 ? (serviceCursor + processedQueries) % typeCount : 0;
 		mdns_result_t *results = nullptr;
 		const esp_err_t queryResult = mdns_query_ptr(
@@ -1201,6 +1226,9 @@ ProviderRunStats runMdnsProvider(
 		}
 		mdns_query_results_free(results);
 	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
+	}
 	if (typeCount > 0) {
 		serviceCursor = (serviceCursor + processedQueries) % typeCount;
 	}
@@ -1223,8 +1251,11 @@ ProviderRunStats runSsdpProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
-	    providerShouldStop(control)) {
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		return stats;
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 
@@ -1235,6 +1266,7 @@ ProviderRunStats runSsdpProvider(
 		stats.transportErrors++;
 		return stats;
 	}
+	stats.plannedUnits = interfaceCount;
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
 	                          "MAN: \"ssdp:discover\"\r\n"
@@ -1277,8 +1309,10 @@ ProviderRunStats runSsdpProvider(
 	};
 	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
 		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
 			break;
 		}
+		stats.workUnits++;
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
@@ -1482,6 +1516,9 @@ ProviderRunStats runSsdpProvider(
 		}
 		close(fd);
 	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
+	}
 	return stats;
 }
 
@@ -1495,8 +1532,11 @@ ProviderRunStats runNbnsProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
-	    providerShouldStop(control)) {
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		return stats;
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 
@@ -1519,18 +1559,18 @@ ProviderRunStats runNbnsProvider(
 			continue;
 		}
 
-		const size_t configuredTargetLimit = std::min(targetCount, config.maxTargetsPerRun);
-		const size_t targetLimit = control != nullptr && control->deadlineMs != UINT64_MAX
-		                               ? std::min<size_t>(configuredTargetLimit, 1)
-		                               : configuredTargetLimit;
+		const size_t targetLimit = std::min(targetCount, config.maxTargetsPerRun);
+		stats.plannedUnits = std::max(stats.plannedUnits, targetLimit);
 		for (size_t processed = 0; processed < targetLimit; ++processed) {
 			if (providerShouldStop(control)) {
+				recordProviderStop(stats, control);
 				break;
 			}
 			const size_t i = (cursor + processed) % targetCount;
 			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
 				continue;
 			}
+			stats.workUnits++;
 			uint8_t request[50]{};
 			buildNbnsNodeStatusRequest(
 			    request,
@@ -1606,6 +1646,9 @@ ProviderRunStats runNbnsProvider(
 		}
 		close(fd);
 	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
+	}
 	cursor = (cursor + std::min(targetCount, config.maxTargetsPerRun)) % targetCount;
 	return stats;
 }
@@ -1620,27 +1663,31 @@ ProviderRunStats runReverseDnsProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
-	    providerShouldStop(control)) {
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		return stats;
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 		return stats;
 	}
 
-	const size_t configuredLimit =
+	const size_t limit =
 	    std::min({MaxProviderTargetsPerRun, config.maxTargetsPerRun, targetCount});
-	const size_t limit = control != nullptr && control->deadlineMs != UINT64_MAX
-	                         ? std::min<size_t>(configuredLimit, 1)
-	                         : configuredLimit;
+	stats.plannedUnits = limit;
 	size_t processedCount = 0;
 	for (; processedCount < limit; ++processedCount) {
 		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
 			break;
 		}
 		const size_t index = (cursor + processedCount) % targetCount;
 		const auto &target = targets[index];
 		const uint32_t timeoutMs = providerRemainingMs(control, config.timeoutMs);
 		if (timeoutMs == 0) {
+			recordProviderStop(stats, control);
 			break;
 		}
+		stats.workUnits++;
 		const DnsPtrAnswer answer = queryPtr(target, timeoutMs);
 
 		switch (answer.status) {
@@ -1677,6 +1724,9 @@ ProviderRunStats runReverseDnsProvider(
 			stats.errors++;
 			break;
 		}
+	}
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
 	}
 	cursor = (cursor + processedCount) % targetCount;
 	return stats;
