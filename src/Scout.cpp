@@ -172,6 +172,24 @@ struct ScoutImpl {
 	std::atomic<bool> processingActive{false};
 	std::atomic<Strata::FreeRTOS::TaskHandle> processingOwner{nullptr};
 
+	struct IncrementalScanState {
+		bool active = false;
+		uint64_t scanId = 0;
+		uint64_t startedAt = 0;
+		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
+		size_t interfaceCount = 0;
+		size_t interfaceIndex = 0;
+		bool interfacePrepared = false;
+		size_t targetCount = 0;
+		size_t targetOffset = 0;
+		bool batchPending = false;
+		size_t batchCount = 0;
+		uint64_t batchReadyAt = 0;
+		uint64_t nextBatchAt = 0;
+		bool hadRequestFailures = false;
+		ScoutStatus status = ScoutStatus::Ok;
+	} scanProgress{};
+
 	std::atomic<bool> stopRequested{false};
 	std::atomic<bool> scanRequested{false};
 	std::atomic<bool> startReady{false};
@@ -1800,6 +1818,300 @@ struct ScoutImpl {
 		);
 	}
 
+	void advanceIncrementalInterface(ScoutStatus interfaceStatus) {
+		if (interfaceStatus == ScoutStatus::InternalError ||
+		    (scanProgress.status == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
+			scanProgress.status = interfaceStatus;
+		}
+		scanProgress.interfaceIndex++;
+		scanProgress.interfacePrepared = false;
+		scanProgress.targetCount = 0;
+		scanProgress.targetOffset = 0;
+		scanProgress.batchPending = false;
+		scanProgress.batchCount = 0;
+		scanProgress.batchReadyAt = 0;
+		scanProgress.nextBatchAt = 0;
+		scanProgress.hadRequestFailures = false;
+	}
+
+	bool beginIncrementalScan() {
+		if (scanProgress.active) {
+			return true;
+		}
+		scanProgress = {};
+		scanProgress.active = true;
+		scanProgress.scanId = nextScanId++;
+		scanProgress.startedAt = nowMs();
+
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				diag.scanCount++;
+			}
+		}
+		emitSimple(
+		    ScoutEventType::ScanStarted,
+		    ScoutStatus::Ok,
+		    scanProgress.scanId,
+		    "scan started"
+		);
+
+		maintainRegistry(scanProgress.scanId);
+		if (stopRequested.load(std::memory_order_acquire)) {
+			finishScan(
+			    scanProgress.scanId,
+			    scanProgress.startedAt,
+			    ScoutStatus::Cancelled,
+			    "scan cancelled"
+			);
+			scanProgress.active = false;
+			return false;
+		}
+
+		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
+		    scanProgress.interfaces,
+		    scout_internal::MaxInterfaces,
+		    scanProgress.interfaceCount
+		);
+		if (interfaceResult != ESP_OK) {
+			updateCoverage(false, 0, scanProgress.scanId);
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.skippedScanCount++;
+				}
+			}
+			recordNetworkError(scanProgress.scanId, "failed to enumerate network interfaces");
+			finishScan(
+			    scanProgress.scanId,
+			    scanProgress.startedAt,
+			    ScoutStatus::InternalError,
+			    "scan failed while enumerating network interfaces"
+			);
+			scanProgress.active = false;
+			return false;
+		}
+
+		if (scanProgress.interfaceCount == 0) {
+			updateCoverage(false, 0, scanProgress.scanId);
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.skippedScanCount++;
+				}
+			}
+			emitSimple(
+			    ScoutEventType::ScanSkipped,
+			    ScoutStatus::NetworkUnavailable,
+			    scanProgress.scanId,
+			    "no eligible ARP-capable interface"
+			);
+			finishScan(
+			    scanProgress.scanId,
+			    scanProgress.startedAt,
+			    ScoutStatus::NetworkUnavailable,
+			    "scan completed without an eligible interface"
+			);
+			scanProgress.active = false;
+			return false;
+		}
+		return true;
+	}
+
+	bool processIncrementalScan(uint64_t deadlineAt) {
+		if (!scanProgress.active && !beginIncrementalScan()) {
+			return true;
+		}
+
+		while (scanProgress.active && !stopRequested.load(std::memory_order_acquire)) {
+			const uint64_t current = nowMs();
+			if (deadlineAt != UINT64_MAX && current >= deadlineAt) {
+				return false;
+			}
+			if (scanProgress.interfaceIndex >= scanProgress.interfaceCount) {
+				updateCoverage(
+				    scanProgress.status == ScoutStatus::Ok,
+				    scanProgress.interfaceCount,
+				    scanProgress.scanId
+				);
+				finishScan(
+				    scanProgress.scanId,
+				    scanProgress.startedAt,
+				    scanProgress.status,
+				    scanProgress.status == ScoutStatus::Ok
+				        ? "scan completed"
+				        : "scan completed with skipped or failed interfaces"
+				);
+				scanProgress.active = false;
+				return true;
+			}
+
+			const auto &interfaceSnapshot =
+			    scanProgress.interfaces[scanProgress.interfaceIndex];
+
+			if (!scanProgress.interfacePrepared) {
+				const size_t targetCount = buildTargets(interfaceSnapshot);
+				if (targetCount == SIZE_MAX) {
+					{
+						ScoutLock lock(mutex);
+						if (lock) {
+							diag.skippedScanCount++;
+						}
+					}
+					emitSimple(
+					    ScoutEventType::ScanSkipped,
+					    ScoutStatus::InvalidConfig,
+					    scanProgress.scanId,
+					    "subnet exceeds maxHostsPerSubnet"
+					);
+					advanceIncrementalInterface(ScoutStatus::InvalidConfig);
+					continue;
+				}
+				if (targetCount == 0) {
+					{
+						ScoutLock lock(mutex);
+						if (lock) {
+							diag.skippedScanCount++;
+						}
+					}
+					emitSimple(
+					    ScoutEventType::ScanSkipped,
+					    ScoutStatus::NetworkUnavailable,
+					    scanProgress.scanId,
+					    "subnet has no ARP targets"
+					);
+					advanceIncrementalInterface(ScoutStatus::NetworkUnavailable);
+					continue;
+				}
+				scanProgress.targetCount = targetCount;
+				scanProgress.targetOffset = 0;
+				scanProgress.interfacePrepared = true;
+				{
+					ScoutLock lock(mutex);
+					if (lock) {
+						diag.hostsConsidered += targetCount;
+					}
+				}
+			}
+
+			if (scanProgress.targetOffset >= scanProgress.targetCount) {
+				if (scanProgress.hadRequestFailures) {
+					recordNetworkError(scanProgress.scanId, "one or more ARP requests failed");
+					advanceIncrementalInterface(ScoutStatus::InternalError);
+				} else {
+					advanceIncrementalInterface(ScoutStatus::Ok);
+				}
+				continue;
+			}
+
+			if (scanProgress.batchPending) {
+				if (current < scanProgress.batchReadyAt) {
+					return false;
+				}
+				const uint32_t *batch = targets + scanProgress.targetOffset;
+				const esp_err_t afterResult = scout_internal::lookupArpMappings(
+				    interfaceSnapshot.index,
+				    batch,
+				    scanProgress.batchCount,
+				    afterMappings
+				);
+				if (afterResult != ESP_OK) {
+					recordNetworkError(scanProgress.scanId, "failed to read ARP results");
+					advanceIncrementalInterface(ScoutStatus::InternalError);
+					continue;
+				}
+
+				for (size_t i = 0; i < scanProgress.batchCount; ++i) {
+					if (!afterMappings[i].found) {
+						continue;
+					}
+					const bool wasCached =
+					    beforeMappings[i].found &&
+					    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
+					const bool confirmed = !wasCached;
+					const ScoutObservationSource source =
+					    confirmed ? ScoutObservationSource::ArpProbe
+					              : ScoutObservationSource::ArpCache;
+					{
+						ScoutLock lock(mutex);
+						if (lock) {
+							diag.arpCacheHits++;
+							if (confirmed) {
+								diag.arpProbeDiscoveries++;
+							}
+						}
+					}
+					observe(
+					    interfaceSnapshot,
+					    batch[i],
+					    afterMappings[i].mac,
+					    source,
+					    confirmed,
+					    scanProgress.scanId
+					);
+				}
+				scanProgress.targetOffset += scanProgress.batchCount;
+				scanProgress.batchPending = false;
+				scanProgress.batchCount = 0;
+				scanProgress.batchReadyAt = 0;
+				scanProgress.nextBatchAt =
+				    config.interBatchDelayMs > 0 ? nowMs() + config.interBatchDelayMs : 0;
+				return false;
+			}
+
+			if (scanProgress.nextBatchAt > current) {
+				return false;
+			}
+
+			const size_t count =
+			    std::min(mappingCapacity, scanProgress.targetCount - scanProgress.targetOffset);
+			const uint32_t *batch = targets + scanProgress.targetOffset;
+			const esp_err_t beforeResult = scout_internal::lookupArpMappings(
+			    interfaceSnapshot.index,
+			    batch,
+			    count,
+			    beforeMappings
+			);
+			if (beforeResult != ESP_OK) {
+				recordNetworkError(scanProgress.scanId, "failed to inspect ARP cache");
+				advanceIncrementalInterface(ScoutStatus::InternalError);
+				continue;
+			}
+
+			scout_internal::ArpRequestStats requestStats;
+			const esp_err_t requestResult =
+			    scout_internal::requestArp(interfaceSnapshot.index, batch, count, requestStats);
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.arpRequestsSent += requestStats.sent;
+					diag.arpRequestFailures += requestStats.failed;
+				}
+			}
+			scanProgress.hadRequestFailures |= requestStats.failed > 0;
+			if (requestResult != ESP_OK) {
+				recordNetworkError(scanProgress.scanId, "failed to send ARP requests");
+				advanceIncrementalInterface(ScoutStatus::InternalError);
+				continue;
+			}
+			scanProgress.batchPending = true;
+			scanProgress.batchCount = count;
+			scanProgress.batchReadyAt = nowMs() + config.arpResponseWaitMs;
+			return false;
+		}
+
+		if (scanProgress.active) {
+			finishScan(
+			    scanProgress.scanId,
+			    scanProgress.startedAt,
+			    ScoutStatus::Cancelled,
+			    "scan cancelled"
+			);
+			scanProgress.active = false;
+		}
+		return true;
+	}
+
 	void initializeSchedule(uint64_t startedAt) {
 		nextScanAt.store(
 		    scanRequested.load() ? startedAt : startedAt + config.scanIntervalMs,
@@ -1835,10 +2147,23 @@ struct ScoutImpl {
 		if (stopRequested.load(std::memory_order_acquire)) {
 			return UINT32_MAX;
 		}
+		const uint64_t current = nowMs();
+		if (scanProgress.active) {
+			if (scanProgress.batchPending && scanProgress.batchReadyAt > current) {
+				return static_cast<uint32_t>(
+				    std::min<uint64_t>(scanProgress.batchReadyAt - current, UINT32_MAX)
+				);
+			}
+			if (scanProgress.nextBatchAt > current) {
+				return static_cast<uint32_t>(
+				    std::min<uint64_t>(scanProgress.nextBatchAt - current, UINT32_MAX)
+				);
+			}
+			return 0;
+		}
 		if (scanRequested.load(std::memory_order_acquire)) {
 			return 0;
 		}
-		const uint64_t current = nowMs();
 		const uint64_t nextWorkAt = std::min(
 		    {nextScanAt.load(std::memory_order_acquire),
 		     nextIcmpAt.load(std::memory_order_acquire),
@@ -1887,8 +2212,13 @@ struct ScoutImpl {
 			}
 
 			const bool requested = scanRequested.exchange(false, std::memory_order_acq_rel);
-			if (requested || current >= nextScanAt.load(std::memory_order_acquire)) {
-				performScan();
+			if (scanProgress.active || requested ||
+			    current >= nextScanAt.load(std::memory_order_acquire)) {
+				const bool completed = processIncrementalScan(deadlineAt);
+				if (!completed) {
+					budgetYield = timeUntilNextWorkInternal() == 0;
+					break;
+				}
 				expireEnrichmentRecords();
 				performOuiProvider();
 				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
@@ -2084,6 +2414,7 @@ struct ScoutImpl {
 		nbnsCursor = 0;
 		mdnsServiceCursor = 0;
 		nextScanId = 1;
+		scanProgress = {};
 
 		// Keep buffer and task publication under the same lock used by snapshot readers.
 		if (!allocateBuffers(incoming)) {
