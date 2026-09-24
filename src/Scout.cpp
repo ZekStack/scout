@@ -1060,11 +1060,19 @@ struct ScoutImpl {
 					);
 					if (observation.persistentDeviceId[0] != '\0' &&
 					    observation.persistentDeviceNamespace[0] != '\0') {
+						const bool namespaceChanged = std::strncmp(
+						                                  details.persistentDeviceNamespace,
+						                                  observation.persistentDeviceNamespace,
+						                                  sizeof(details.persistentDeviceNamespace)
+						                              ) != 0;
 						scout_internal::copyText(
 						    details.persistentDeviceNamespace,
 						    sizeof(details.persistentDeviceNamespace),
 						    observation.persistentDeviceNamespace
 						);
+						if (namespaceChanged) {
+							changes |= ScoutDeviceChange::Identity;
+						}
 					}
 					updateText(
 					    details.upnpUdn,
@@ -1715,8 +1723,8 @@ struct ScoutImpl {
 		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
 		      incoming.providers.ssdp.responseWindowMs == 0 ||
 		      (incoming.providers.ssdp.fetchDeviceDescription &&
-		       incoming.providers.ssdp.httpTimeoutMs == 0) ||
-		      incoming.providers.ssdp.maxDescriptionFetchesPerRun == 0)) ||
+		       (incoming.providers.ssdp.httpTimeoutMs == 0 ||
+		        incoming.providers.ssdp.maxDescriptionFetchesPerRun == 0)))) ||
 		    (incoming.providers.nbns.enabled &&
 		     (incoming.providers.nbns.intervalMs < MinScanIntervalMs ||
 		      incoming.providers.nbns.responseWindowMs == 0 ||
