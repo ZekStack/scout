@@ -44,6 +44,7 @@ enum class ScoutStatus : uint8_t {
 	NoMemory,
 	TaskCreateFailed,
 	Busy,
+	WrongExecutionMode,
 	Cancelled,
 	Timeout,
 	NetworkUnavailable,
@@ -57,6 +58,11 @@ enum class ScoutState : uint8_t {
 	Starting,
 	Running,
 	Stopping,
+};
+
+enum class ScoutExecutionMode : uint8_t {
+	BackgroundTask,
+	CallerDriven,
 };
 
 enum class ScoutIdentityKind : uint8_t {
@@ -471,6 +477,11 @@ struct ScoutProviderConfig {
 	bool oui = true;
 };
 
+struct ScoutExecutionConfig {
+	ScoutExecutionMode mode = ScoutExecutionMode::BackgroundTask;
+	uint32_t workBudgetMs = 1000;
+};
+
 struct ScoutConfig {
 	Strata::MemoryPolicy memory{
 	    .allocation = Strata::Placement::PreferExternal,
@@ -492,6 +503,7 @@ struct ScoutConfig {
 	BaseType_t taskCore = tskNO_AFFINITY;
 
 	bool scanOnInit = true;
+	ScoutExecutionConfig execution{};
 	ScoutProviderConfig providers{};
 };
 
@@ -539,6 +551,12 @@ struct ScoutDiagnostics {
 	uint64_t enrichmentAllocationFailures = 0;
 	uint64_t staleProviderObservations = 0;
 	uint64_t lastScanDurationMs = 0;
+	uint64_t processCalls = 0;
+	uint64_t processBudgetYields = 0;
+	uint64_t cancellationYields = 0;
+	uint64_t lastProcessDurationMs = 0;
+	uint64_t maxProcessDurationMs = 0;
+	ScoutExecutionMode executionMode = ScoutExecutionMode::BackgroundTask;
 
 	ScoutProviderDiagnostics icmp{};
 	ScoutProviderDiagnostics mdns{};
@@ -572,6 +590,9 @@ class Scout {
 	ScoutResult deinit(uint32_t timeoutMs = 5000);
 
 	ScoutResult scanNow();
+	ScoutResult process(uint32_t budgetMs = 0);
+	uint32_t timeUntilNextWork() const;
+	ScoutExecutionMode executionMode() const;
 
 	bool isInitialized() const;
 	bool running() const;
