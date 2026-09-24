@@ -665,9 +665,7 @@ struct ScoutImpl {
 			}
 			if (observation.interfaceKey[0] != '\0' &&
 			    std::strncmp(
-			        endpoint.interfaceKey,
-			        observation.interfaceKey,
-			        sizeof(endpoint.interfaceKey)
+			        endpoint.interfaceKey, observation.interfaceKey, sizeof(endpoint.interfaceKey)
 			    ) != 0) {
 				continue;
 			}
@@ -2034,8 +2032,7 @@ bool scoutFormatIpv6(const ScoutIpv6Address &address, char *out, size_t capacity
 	uint16_t words[8]{};
 	for (size_t i = 0; i < 8; ++i) {
 		words[i] = static_cast<uint16_t>(
-		    (static_cast<uint16_t>(address.bytes[i * 2]) << 8U) |
-		    address.bytes[i * 2 + 1]
+		    (static_cast<uint16_t>(address.bytes[i * 2]) << 8U) | address.bytes[i * 2 + 1]
 		);
 	}
 
