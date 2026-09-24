@@ -1277,6 +1277,7 @@ ProviderRunStats runSsdpProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		state = {};
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1580,7 +1581,7 @@ ProviderRunStats runNbnsProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
-		state.active = false;
+		state = {};
 		return stats;
 	}
 	if (providerShouldStop(control)) {
