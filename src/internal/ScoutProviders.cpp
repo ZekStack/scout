@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <strings.h>
 
 #include <esp_netif.h>
 #include <esp_netif_net_stack.h>
