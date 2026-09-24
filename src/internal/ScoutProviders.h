@@ -48,6 +48,8 @@ struct EnrichmentObservation {
 struct ProviderRunStats {
 	uint64_t observations = 0;
 	uint64_t errors = 0;
+	uint64_t transportErrors = 0;
+	uint64_t descriptionErrors = 0;
 	uint64_t timeouts = 0;
 	uint64_t noRecords = 0;
 	uint64_t malformedResponses = 0;

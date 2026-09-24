@@ -119,8 +119,11 @@ an acceptable public API path.
 
 ## SSDP and UPnP
 
-SSDP discovery uses a normal UDP `M-SEARCH` on each local IPv4 interface. Scout records
-`USN`, `SERVER`, `ST`, `LOCATION` and cache lifetime metadata.
+SSDP discovery uses a normal UDP `M-SEARCH` on each active Scout IPv4 interface. Provider
+interface enumeration reuses the same eligibility rules as ARP discovery: the lwIP interface must
+be up, link-up, ARP-capable and have a valid IPv4 address and netmask. This prevents inactive
+ESP-NETIF instances that retain configured addresses from producing false transport failures.
+Scout records `USN`, `SERVER`, `ST`, `LOCATION` and cache lifetime metadata.
 
 When enabled, Scout fetches a bounded number of plain-HTTP UPnP device descriptions and
 extracts only the fields useful to a user-facing device manager:
@@ -132,11 +135,25 @@ extracts only the fields useful to a user-facing device manager:
 - UDN;
 - device type.
 
+Scout accepts SSDP responses only when the start line is a syntactically valid HTTP/1.0 or
+HTTP/1.1 `200` response. Literal `null` / `(null)` header sentinels are treated as absent,
+and overflowing `max-age` values are ignored so the configured fallback lifetime is used.
+
 The response body is bounded by `maxDescriptionBytes`; Scout does not retain arbitrary XML.
 Description TCP sockets are bound to the same local IPv4 interface that received the SSDP
-advertisement. Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface,
-so repeated advertisements from one device cannot consume the whole description-fetch budget
-without collapsing identical private addresses that exist on different local networks.
+response. Target correlation is exact for a known interface: Scout does not fall back to a
+different MAC merely because another interface currently has the same private IPv4 address.
+
+`httpTimeoutMs` is an end-to-end deadline covering TCP connect, request send and response
+receive. To keep that bound deterministic, description fetching currently accepts numeric IPv4
+`LOCATION` hosts only and does not call a potentially blocking hostname resolver. Hostname-based
+locations remain visible as metadata but their description fetch is skipped.
+
+Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface, so repeated
+advertisements from one device cannot consume the whole description-fetch budget without
+collapsing identical private addresses that exist on different local networks. Provider
+diagnostics expose `transportErrors` separately from `descriptionErrors`, while the existing
+timeout, malformed, server-error and dropped counters retain the failure class.
 
 ## OUI vendor lookup
 

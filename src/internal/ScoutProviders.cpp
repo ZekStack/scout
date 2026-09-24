@@ -2,16 +2,17 @@
 
 #include "ScoutDns.h"
 #include "ScoutEnrichment.h"
+#include "ScoutNetwork.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <strings.h>
 
 #include <esp_netif.h>
-#include <esp_netif_net_stack.h>
 #include <esp_timer.h>
 #include <lwip/inet.h>
 #include <lwip/netdb.h>
@@ -35,23 +36,10 @@
 namespace scout_internal {
 namespace {
 
-constexpr size_t MaxLocalInterfaces = 8;
 constexpr size_t MaxMdnsServiceTypes = 64;
 constexpr size_t MaxProviderTargetsPerRun = 32;
 constexpr size_t MaxSsdpDescriptionFetches = 16;
 constexpr uint32_t SocketPollMs = 50;
-
-struct LocalInterface {
-	uint32_t ipv4 = 0;
-	uint32_t netmask = 0;
-	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
-};
-
-struct LocalInterfaceCollectContext {
-	LocalInterface *out = nullptr;
-	size_t capacity = 0;
-	size_t count = 0;
-};
 
 struct MdnsServiceType {
 	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
@@ -86,50 +74,12 @@ uint64_t mdnsRetentionFloorMs(
 	);
 }
 
-esp_err_t collectLocalInterfacesTcpip(void *rawContext) {
-	auto *context = static_cast<LocalInterfaceCollectContext *>(rawContext);
-	if (context == nullptr || context->out == nullptr || context->capacity == 0) {
-		return ESP_ERR_INVALID_ARG;
-	}
-
-	context->count = 0;
-	esp_netif_t *netif = nullptr;
-	while ((netif = esp_netif_next_unsafe(netif)) != nullptr && context->count < context->capacity
-	) {
-		esp_netif_ip_info_t info{};
-		if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0 ||
-		    info.netmask.addr == 0) {
-			continue;
-		}
-		auto &item = context->out[context->count++];
-		item = {};
-		item.ipv4 = info.ip.addr;
-		item.netmask = info.netmask.addr;
-		const char *key = esp_netif_get_ifkey(netif);
-		copyText(item.key, sizeof(item.key), key != nullptr ? key : "");
-	}
-	return ESP_OK;
-}
-
-size_t collectLocalInterfaces(LocalInterface *out, size_t capacity) {
-	if (out == nullptr || capacity == 0) {
-		return 0;
-	}
-	LocalInterfaceCollectContext context{
-	    .out = out,
-	    .capacity = capacity,
-	};
-	if (esp_netif_tcpip_exec(collectLocalInterfacesTcpip, &context) != ESP_OK) {
-		return 0;
-	}
-	return context.count;
-}
-
 bool targetMatchesInterface(const ProviderTarget &target, const char *interfaceKey) {
-	if (interfaceKey == nullptr || interfaceKey[0] == '\0' || target.interfaceKey[0] == '\0') {
+	if (interfaceKey == nullptr || interfaceKey[0] == '\0') {
 		return true;
 	}
-	return textEqualsIgnoreCase(target.interfaceKey, interfaceKey);
+	return target.interfaceKey[0] != '\0' &&
+	       textEqualsIgnoreCase(target.interfaceKey, interfaceKey);
 }
 
 const ProviderTarget *findTarget(
@@ -138,19 +88,27 @@ const ProviderTarget *findTarget(
 	if (targets == nullptr || ipv4 == 0) {
 		return nullptr;
 	}
-	const ProviderTarget *fallback = nullptr;
+
+	if (interfaceKey != nullptr && interfaceKey[0] != '\0') {
+		for (size_t i = 0; i < targetCount; ++i) {
+			if (targets[i].ipv4.value == ipv4 && targetMatchesInterface(targets[i], interfaceKey)) {
+				return &targets[i];
+			}
+		}
+		return nullptr;
+	}
+
+	const ProviderTarget *match = nullptr;
 	for (size_t i = 0; i < targetCount; ++i) {
 		if (targets[i].ipv4.value != ipv4) {
 			continue;
 		}
-		if (fallback == nullptr) {
-			fallback = &targets[i];
+		if (match != nullptr) {
+			return nullptr;
 		}
-		if (targetMatchesInterface(targets[i], interfaceKey)) {
-			return &targets[i];
-		}
+		match = &targets[i];
 	}
-	return fallback;
+	return match;
 }
 
 bool setSocketTimeout(int socketFd, uint32_t timeoutMs) {
@@ -535,6 +493,7 @@ enum class HttpFetchStatus : uint8_t {
 	HttpError,
 	TooLarge,
 	UnsupportedEncoding,
+	UnsupportedAddress,
 };
 
 struct HttpFetchResult {
@@ -580,16 +539,77 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	return out.host[0] != '\0';
 }
 
-bool sendAll(int fd, const char *data, size_t length) {
+enum class SocketIoStatus : uint8_t {
+	Ok,
+	Timeout,
+	Error,
+};
+
+SocketIoStatus waitSocketReady(int fd, bool writable, uint64_t deadlineMs) {
+	for (;;) {
+		const uint64_t now = providerNowMs();
+		if (now >= deadlineMs) {
+			return SocketIoStatus::Timeout;
+		}
+		const uint64_t remainingMs = deadlineMs - now;
+		timeval timeout{
+		    .tv_sec = static_cast<time_t>(remainingMs / 1000U),
+		    .tv_usec = static_cast<suseconds_t>((remainingMs % 1000U) * 1000U),
+		};
+		fd_set readSet;
+		fd_set writeSet;
+		FD_ZERO(&readSet);
+		FD_ZERO(&writeSet);
+		if (writable) {
+			FD_SET(fd, &writeSet);
+		} else {
+			FD_SET(fd, &readSet);
+		}
+		const int selected = select(
+		    fd + 1,
+		    writable ? nullptr : &readSet,
+		    writable ? &writeSet : nullptr,
+		    nullptr,
+		    &timeout
+		);
+		if (selected > 0) {
+			return SocketIoStatus::Ok;
+		}
+		if (selected == 0) {
+			return SocketIoStatus::Timeout;
+		}
+		if (errno != EINTR) {
+			return SocketIoStatus::Error;
+		}
+	}
+}
+
+bool setNonBlocking(int fd) {
+	const int flags = fcntl(fd, F_GETFL, 0);
+	return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+SocketIoStatus sendAll(int fd, const char *data, size_t length, uint64_t deadlineMs) {
 	size_t sent = 0;
 	while (sent < length) {
 		const int count = send(fd, data + sent, length - sent, 0);
-		if (count <= 0) {
-			return false;
+		if (count > 0) {
+			sent += static_cast<size_t>(count);
+			continue;
 		}
-		sent += static_cast<size_t>(count);
+		if (count < 0 && errno == EINTR) {
+			continue;
+		}
+		if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			const auto ready = waitSocketReady(fd, true, deadlineMs);
+			if (ready != SocketIoStatus::Ok) {
+				return ready;
+			}
+			continue;
+		}
+		return SocketIoStatus::Error;
 	}
-	return true;
+	return SocketIoStatus::Ok;
 }
 
 bool hasChunkedTransferEncoding(const char *data, size_t length) {
@@ -650,7 +670,7 @@ HttpFetchResult fetchHttpBody(
     const char *url, uint32_t localIpv4, uint32_t timeoutMs, char *scratch, size_t capacity
 ) {
 	HttpFetchResult result{};
-	if (scratch == nullptr || capacity < 2) {
+	if (scratch == nullptr || capacity < 2 || timeoutMs == 0) {
 		return result;
 	}
 	ParsedHttpUrl parsed{};
@@ -658,24 +678,26 @@ HttpFetchResult fetchHttpBody(
 		return result;
 	}
 
-	addrinfo hints{};
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	char portText[8] = {};
-	std::snprintf(portText, sizeof(portText), "%u", static_cast<unsigned>(parsed.port));
-	addrinfo *resolved = nullptr;
-	if (getaddrinfo(parsed.host, portText, &hints, &resolved) != 0 || resolved == nullptr) {
+	sockaddr_in remote{};
+	remote.sin_family = AF_INET;
+	remote.sin_port = htons(parsed.port);
+	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) != 1) {
+		result.status = HttpFetchStatus::UnsupportedAddress;
+		return result;
+	}
+
+	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
+	const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (fd < 0) {
+		result.status = HttpFetchStatus::NetworkError;
+		return result;
+	}
+	if (!setNonBlocking(fd)) {
+		close(fd);
 		result.status = HttpFetchStatus::NetworkError;
 		return result;
 	}
 
-	const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (fd < 0) {
-		freeaddrinfo(resolved);
-		result.status = HttpFetchStatus::NetworkError;
-		return result;
-	}
-	setSocketTimeout(fd, timeoutMs);
 	sockaddr_in local{};
 	local.sin_family = AF_INET;
 	local.sin_port = 0;
@@ -683,21 +705,44 @@ HttpFetchResult fetchHttpBody(
 	if (localIpv4 == 0 ||
 	    bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) != 0) {
 		close(fd);
-		freeaddrinfo(resolved);
 		result.status = HttpFetchStatus::NetworkError;
 		return result;
 	}
-	if (connect(fd, resolved->ai_addr, resolved->ai_addrlen) != 0) {
-		const int socketError = errno;
-		close(fd);
-		freeaddrinfo(resolved);
-		result.status =
-		    socketError == EAGAIN || socketError == EWOULDBLOCK || socketError == ETIMEDOUT
-		        ? HttpFetchStatus::Timeout
-		        : HttpFetchStatus::NetworkError;
-		return result;
+
+	if (connect(fd, reinterpret_cast<const sockaddr *>(&remote), sizeof(remote)) != 0) {
+		if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+			const int socketError = errno;
+			close(fd);
+			if (socketError == ETIMEDOUT) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
+			return result;
+		}
+		const auto ready = waitSocketReady(fd, true, deadlineMs);
+		if (ready != SocketIoStatus::Ok) {
+			close(fd);
+			if (ready == SocketIoStatus::Timeout) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
+			return result;
+		}
+		int socketError = 0;
+		socklen_t socketErrorLength = sizeof(socketError);
+		if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength) != 0 ||
+		    socketError != 0) {
+			close(fd);
+			if (socketError == ETIMEDOUT) {
+				result.status = HttpFetchStatus::Timeout;
+			} else {
+				result.status = HttpFetchStatus::NetworkError;
+			}
+			return result;
+		}
 	}
-	freeaddrinfo(resolved);
 
 	char request[512] = {};
 	const int requestLength = std::snprintf(
@@ -709,28 +754,45 @@ HttpFetchResult fetchHttpBody(
 	    parsed.host,
 	    static_cast<unsigned>(parsed.port)
 	);
-	if (requestLength <= 0 || static_cast<size_t>(requestLength) >= sizeof(request) ||
-	    !sendAll(fd, request, static_cast<size_t>(requestLength))) {
+	if (requestLength <= 0 || static_cast<size_t>(requestLength) >= sizeof(request)) {
 		close(fd);
-		result.status = HttpFetchStatus::NetworkError;
+		result.status = HttpFetchStatus::InvalidResponse;
+		return result;
+	}
+	const size_t requestSize = static_cast<size_t>(requestLength);
+	const auto sendStatus = sendAll(fd, request, requestSize, deadlineMs);
+	if (sendStatus != SocketIoStatus::Ok) {
+		close(fd);
+		if (sendStatus == SocketIoStatus::Timeout) {
+			result.status = HttpFetchStatus::Timeout;
+		} else {
+			result.status = HttpFetchStatus::NetworkError;
+		}
 		return result;
 	}
 
 	size_t received = 0;
-	bool peerClosed = false;
+	bool complete = false;
 	while (received + 1 < capacity) {
+		const auto ready = waitSocketReady(fd, false, deadlineMs);
+		if (ready != SocketIoStatus::Ok) {
+			close(fd);
+			result.status = ready == SocketIoStatus::Timeout ? HttpFetchStatus::Timeout
+			                                                 : HttpFetchStatus::NetworkError;
+			return result;
+		}
+
 		const int count = recv(fd, scratch + received, capacity - received - 1, 0);
 		if (count == 0) {
-			peerClosed = true;
+			complete = true;
 			break;
 		}
 		if (count < 0) {
-			const int socketError = errno;
+			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+				continue;
+			}
 			close(fd);
-			result.status =
-			    socketError == EAGAIN || socketError == EWOULDBLOCK || socketError == ETIMEDOUT
-			        ? HttpFetchStatus::Timeout
-			        : HttpFetchStatus::NetworkError;
+			result.status = HttpFetchStatus::NetworkError;
 			return result;
 		}
 		received += static_cast<size_t>(count);
@@ -741,14 +803,14 @@ HttpFetchResult fetchHttpBody(
 			return result;
 		}
 		if (completeContentLengthBody(scratch, received)) {
-			peerClosed = true;
+			complete = true;
 			break;
 		}
 	}
 	close(fd);
 	scratch[received] = '\0';
 
-	if (!peerClosed && received + 1 >= capacity) {
+	if (!complete && received + 1 >= capacity) {
 		result.status = HttpFetchStatus::TooLarge;
 		return result;
 	}
@@ -1107,8 +1169,13 @@ ProviderRunStats runSsdpProvider(
 		return stats;
 	}
 
-	LocalInterface interfaces[MaxLocalInterfaces]{};
-	const size_t interfaceCount = collectLocalInterfaces(interfaces, MaxLocalInterfaces);
+	InterfaceSnapshot interfaces[MaxInterfaces]{};
+	size_t interfaceCount = 0;
+	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
+		stats.errors++;
+		stats.transportErrors++;
+		return stats;
+	}
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
 	                          "MAN: \"ssdp:discover\"\r\n"
@@ -1154,6 +1221,7 @@ ProviderRunStats runSsdpProvider(
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, SocketPollMs);
 		if (fd < 0) {
 			stats.errors++;
+			stats.transportErrors++;
 			continue;
 		}
 		if (sendto(
@@ -1165,6 +1233,7 @@ ProviderRunStats runSsdpProvider(
 		        sizeof(destination)
 		    ) < 0) {
 			stats.errors++;
+			stats.transportErrors++;
 			close(fd);
 			continue;
 		}
@@ -1303,13 +1372,18 @@ ProviderRunStats runSsdpProvider(
 						    now,
 						    expiresAt
 						);
+					} else {
+						stats.malformedResponses++;
+						stats.descriptionErrors++;
 					}
 				} else {
+					stats.descriptionErrors++;
 					switch (fetch.status) {
 					case HttpFetchStatus::Timeout:
 						stats.timeouts++;
 						break;
 					case HttpFetchStatus::TooLarge:
+					case HttpFetchStatus::UnsupportedAddress:
 						stats.dropped++;
 						break;
 					case HttpFetchStatus::InvalidResponse:
@@ -1317,8 +1391,11 @@ ProviderRunStats runSsdpProvider(
 						stats.malformedResponses++;
 						break;
 					case HttpFetchStatus::HttpError:
+						stats.serverErrors++;
+						break;
 					case HttpFetchStatus::NetworkError:
 						stats.errors++;
+						stats.transportErrors++;
 						break;
 					case HttpFetchStatus::Ok:
 						break;
@@ -1350,8 +1427,12 @@ ProviderRunStats runNbnsProvider(
 		return stats;
 	}
 
-	LocalInterface interfaces[MaxLocalInterfaces]{};
-	const size_t interfaceCount = collectLocalInterfaces(interfaces, MaxLocalInterfaces);
+	InterfaceSnapshot interfaces[MaxInterfaces]{};
+	size_t interfaceCount = 0;
+	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
+		stats.errors++;
+		return stats;
+	}
 	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, SocketPollMs);

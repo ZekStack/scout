@@ -567,18 +567,45 @@ bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out) {
 	if (data == nullptr || length == 0) {
 		return false;
 	}
+
+	size_t statusLineLength = 0;
+	while (statusLineLength < length && data[statusLineLength] != '\r' &&
+	       data[statusLineLength] != '\n') {
+		statusLineLength++;
+	}
+	if (statusLineLength < 12) {
+		return false;
+	}
+	const bool http10 = std::memcmp(data, "HTTP/1.0 ", 9) == 0;
+	const bool http11 = std::memcmp(data, "HTTP/1.1 ", 9) == 0;
+	const bool statusOk = data[9] == '2' && data[10] == '0' && data[11] == '0';
+	const bool validSeparator = statusLineLength == 12 || data[12] == ' ' || data[12] == '\t';
+	if ((!http10 && !http11) || !statusOk || !validSeparator) {
+		return false;
+	}
+
+	auto clearNullSentinel = [](char *value) {
+		if (textEqualsIgnoreCase(value, "null") || textEqualsIgnoreCase(value, "(null)")) {
+			value[0] = '\0';
+		}
+	};
+
 	size_t valueLength = 0;
 	if (const char *value = findHeader(data, length, "LOCATION", valueLength)) {
 		copyTextN(out.location, sizeof(out.location), value, valueLength);
+		clearNullSentinel(out.location);
 	}
 	if (const char *value = findHeader(data, length, "USN", valueLength)) {
 		copyTextN(out.usn, sizeof(out.usn), value, valueLength);
+		clearNullSentinel(out.usn);
 	}
 	if (const char *value = findHeader(data, length, "SERVER", valueLength)) {
 		copyTextN(out.server, sizeof(out.server), value, valueLength);
+		clearNullSentinel(out.server);
 	}
 	if (const char *value = findHeader(data, length, "ST", valueLength)) {
 		copyTextN(out.searchTarget, sizeof(out.searchTarget), value, valueLength);
+		clearNullSentinel(out.searchTarget);
 	}
 	if (const char *value = findHeader(data, length, "CACHE-CONTROL", valueLength)) {
 		for (size_t i = 0; i + 7 < valueLength; ++i) {
@@ -594,11 +621,21 @@ bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out) {
 					pos++;
 				}
 				uint32_t parsed = 0;
+				bool hasDigit = false;
+				bool overflow = false;
 				while (pos < valueLength && std::isdigit(static_cast<unsigned char>(value[pos]))) {
-					parsed = parsed * 10U + static_cast<uint32_t>(value[pos] - '0');
+					const uint32_t digit = static_cast<uint32_t>(value[pos] - '0');
+					hasDigit = true;
+					if (parsed > (UINT32_MAX - digit) / 10U) {
+						overflow = true;
+					} else if (!overflow) {
+						parsed = parsed * 10U + digit;
+					}
 					pos++;
 				}
-				out.maxAgeSeconds = parsed;
+				if (hasDigit && !overflow) {
+					out.maxAgeSeconds = parsed;
+				}
 				break;
 			}
 		}
@@ -734,6 +771,37 @@ bool parseNbnsNodeStatusName(
 	return false;
 }
 
+bool identityDetailsContradict(
+    const ScoutDeviceDetails &leftDetails, const ScoutDeviceDetails &rightDetails
+) {
+	if (leftDetails.upnpUdn[0] != '\0' && rightDetails.upnpUdn[0] != '\0' &&
+	    !textEqualsIgnoreCase(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
+		return true;
+	}
+
+	const bool persistentNamespacesMatch =
+	    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
+	     rightDetails.persistentDeviceNamespace[0] == '\0') ||
+	    sameNonEmpty(leftDetails.persistentDeviceNamespace, rightDetails.persistentDeviceNamespace);
+	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
+	    persistentNamespacesMatch &&
+	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
+		return true;
+	}
+
+	const bool trustedSerialPair =
+	    leftDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
+	    rightDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
+	    leftDetails.manufacturerSource == ScoutObservationSource::Ssdp &&
+	    rightDetails.manufacturerSource == ScoutObservationSource::Ssdp;
+	if (trustedSerialPair && sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&
+	    leftDetails.serialNumber[0] != '\0' && rightDetails.serialNumber[0] != '\0' &&
+	    !textEqualsIgnoreCase(leftDetails.serialNumber, rightDetails.serialNumber)) {
+		return true;
+	}
+	return false;
+}
+
 bool identityRelation(
     const ScoutDeviceInfo &leftInfo,
     const ScoutDeviceDetails &leftDetails,
@@ -748,32 +816,15 @@ bool identityRelation(
 	out.first = leftInfo.key;
 	out.second = rightInfo.key;
 
-	// Strong identifiers are also contradiction evidence. Never let a weaker
-	// hostname/service coincidence relate devices that explicitly advertise
-	// different persistent identities.
-	if (leftDetails.upnpUdn[0] != '\0' && rightDetails.upnpUdn[0] != '\0' &&
-	    !textEqualsIgnoreCase(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
+	if (identityDetailsContradict(leftDetails, rightDetails)) {
 		return false;
 	}
-	const bool persistentNamespacesMatch =
-	    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
-	     rightDetails.persistentDeviceNamespace[0] == '\0') ||
-	    sameNonEmpty(leftDetails.persistentDeviceNamespace, rightDetails.persistentDeviceNamespace);
-	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
-	    persistentNamespacesMatch &&
-	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
-		return false;
-	}
+
 	const bool trustedSerialPair =
 	    leftDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
 	    rightDetails.serialNumberSource == ScoutObservationSource::Ssdp &&
 	    leftDetails.manufacturerSource == ScoutObservationSource::Ssdp &&
 	    rightDetails.manufacturerSource == ScoutObservationSource::Ssdp;
-	if (trustedSerialPair && sameNonEmpty(leftDetails.manufacturer, rightDetails.manufacturer) &&
-	    leftDetails.serialNumber[0] != '\0' && rightDetails.serialNumber[0] != '\0' &&
-	    !textEqualsIgnoreCase(leftDetails.serialNumber, rightDetails.serialNumber)) {
-		return false;
-	}
 
 	if (sameNonEmpty(leftDetails.upnpUdn, rightDetails.upnpUdn)) {
 		out.evidence = {

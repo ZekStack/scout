@@ -464,6 +464,8 @@ void testStaleProviderObservationAndDiagnostics() {
 	scout_internal::ProviderRunStats stats{};
 	stats.observations = 1;
 	stats.errors = 2;
+	stats.transportErrors = 8;
+	stats.descriptionErrors = 9;
 	stats.timeouts = 3;
 	stats.noRecords = 4;
 	stats.malformedResponses = 5;
@@ -474,6 +476,8 @@ void testStaleProviderObservationAndDiagnostics() {
 	assert(diagnostics.runs == 1);
 	assert(diagnostics.observations == 1);
 	assert(diagnostics.errors == 2);
+	assert(diagnostics.transportErrors == 8);
+	assert(diagnostics.descriptionErrors == 9);
 	assert(diagnostics.timeouts == 3);
 	assert(diagnostics.noRecords == 4);
 	assert(diagnostics.malformedResponses == 5);
@@ -588,6 +592,144 @@ void testIdentityGroupingKeepsModerateRelationsSeparate() {
 	secondDetails->upnpUdnExpiresAtMs = 1;
 	runtime.expireEnrichmentRecords();
 	assert(runtime.identityGroupCountValue == 0);
+
+	runtime.releaseBuffers();
+}
+
+void testIdentityGroupConfidenceRequiresCertainConnectivity() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
+
+	for (size_t i = 0; i < 3; ++i) {
+		auto &record = runtime.devices[i];
+		record = {};
+		record.info.mac =
+		    ScoutMacAddress{{0x00, 0x21, 0x22, 0x23, 0x24, static_cast<uint8_t>(i + 1)}};
+		record.info.key.kind = ScoutIdentityKind::Mac;
+		record.info.key.mac = record.info.mac;
+		assert(runtime.ensureDetailsLocked(i) != nullptr);
+	}
+	auto &first = *runtime.devices[0].details;
+	auto &second = *runtime.devices[1].details;
+	auto &third = *runtime.devices[2].details;
+	std::strcpy(first.upnpUdn, "uuid:certain-edge");
+	std::strcpy(second.upnpUdn, "uuid:certain-edge");
+
+	std::strcpy(second.manufacturer, "Example");
+	std::strcpy(third.manufacturer, "Example");
+	std::strcpy(second.serialNumber, "SERIAL-42");
+	std::strcpy(third.serialNumber, "SERIAL-42");
+	second.manufacturerSource = ScoutObservationSource::Ssdp;
+	third.manufacturerSource = ScoutObservationSource::Ssdp;
+	second.serialNumberSource = ScoutObservationSource::Ssdp;
+	third.serialNumberSource = ScoutObservationSource::Ssdp;
+
+	runtime.rebuildIdentityState();
+	assert(runtime.identityGroupCountValue == 1);
+	assert(runtime.identityGroups[0].memberCount == 3);
+	assert(runtime.identityGroups[0].confidence == ScoutIdentityConfidence::Strong);
+
+	runtime.releaseBuffers();
+}
+
+void testIdentityGroupRejectsTransitiveContradiction() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
+
+	for (size_t i = 0; i < 3; ++i) {
+		auto &record = runtime.devices[i];
+		record = {};
+		record.info.mac =
+		    ScoutMacAddress{{0x00, 0x31, 0x32, 0x33, 0x34, static_cast<uint8_t>(i + 1)}};
+		record.info.key.kind = ScoutIdentityKind::Mac;
+		record.info.key.mac = record.info.mac;
+		assert(runtime.ensureDetailsLocked(i) != nullptr);
+	}
+	auto &first = *runtime.devices[0].details;
+	auto &second = *runtime.devices[1].details;
+	auto &third = *runtime.devices[2].details;
+	std::strcpy(first.upnpUdn, "uuid:bridge");
+	std::strcpy(second.upnpUdn, "uuid:bridge");
+
+	std::strcpy(second.manufacturer, "Example");
+	std::strcpy(third.manufacturer, "Example");
+	std::strcpy(second.serialNumber, "SERIAL-99");
+	std::strcpy(third.serialNumber, "SERIAL-99");
+	second.manufacturerSource = ScoutObservationSource::Ssdp;
+	third.manufacturerSource = ScoutObservationSource::Ssdp;
+	second.serialNumberSource = ScoutObservationSource::Ssdp;
+	third.serialNumberSource = ScoutObservationSource::Ssdp;
+
+	std::strcpy(first.persistentDeviceNamespace, "_hap._tcp");
+	std::strcpy(third.persistentDeviceNamespace, "_hap._tcp");
+	std::strcpy(first.persistentDeviceId, "id-a");
+	std::strcpy(third.persistentDeviceId, "id-c");
+
+	runtime.rebuildIdentityState();
+	assert(runtime.identityRelationCountValue == 2);
+	assert(runtime.identityGroupCountValue == 1);
+	assert(runtime.identityGroups[0].memberCount == 2);
+	assert(runtime.identityGroups[0].confidence == ScoutIdentityConfidence::Certain);
+	assert(runtime.diag.identityContradictionBlocks == 1);
+
+	runtime.releaseBuffers();
+}
+
+void testIdentityRelationCapacityDoesNotCreateUnbackedGroups() {
+	ScoutImpl runtime;
+	ScoutConfig config = runtime.config;
+	config.maxIdentityRelations = 1;
+	assert(runtime.allocateBuffers(config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
+
+	for (size_t i = 0; i < 3; ++i) {
+		auto &record = runtime.devices[i];
+		record = {};
+		record.info.mac =
+		    ScoutMacAddress{{0x00, 0x41, 0x42, 0x43, 0x44, static_cast<uint8_t>(i + 1)}};
+		record.info.key.kind = ScoutIdentityKind::Mac;
+		record.info.key.mac = record.info.mac;
+		auto *details = runtime.ensureDetailsLocked(i);
+		assert(details != nullptr);
+		std::strcpy(details->persistentDeviceNamespace, "_hap._tcp");
+		std::strcpy(details->persistentDeviceId, "shared-id");
+	}
+	runtime.rebuildIdentityState();
+	assert(runtime.identityRelationCountValue == 1);
+	assert(runtime.identityGroupCountValue == 1);
+	assert(runtime.identityGroups[0].memberCount == 2);
+	assert(runtime.diag.identityRelationDrops == 2);
+
+	runtime.releaseBuffers();
+}
+
+void testIdentityGroupMemberLimitIsExplicit() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	constexpr size_t DeviceCount = SCOUT_MAX_IDENTITY_GROUP_MEMBERS + 1;
+	runtime.deviceCount = DeviceCount;
+	runtime.diag.deviceCount = DeviceCount;
+	for (size_t i = 0; i < DeviceCount; ++i) {
+		auto &record = runtime.devices[i];
+		record = {};
+		record.info.mac =
+		    ScoutMacAddress{{0x00, 0x51, 0x52, 0x53, 0x54, static_cast<uint8_t>(i + 1)}};
+		record.info.key.kind = ScoutIdentityKind::Mac;
+		record.info.key.mac = record.info.mac;
+		auto *details = runtime.ensureDetailsLocked(i);
+		assert(details != nullptr);
+		std::strcpy(details->upnpUdn, "uuid:large-physical-device");
+	}
+	runtime.rebuildIdentityState();
+	assert(runtime.identityGroupCountValue == 1);
+	assert(runtime.identityGroups[0].memberCount == SCOUT_MAX_IDENTITY_GROUP_MEMBERS);
+	assert(runtime.diag.identityGroupMemberLimitDrops > 0);
 
 	runtime.releaseBuffers();
 }
@@ -731,6 +873,10 @@ int main() {
 	testFormattingHelpers();
 	testInvalidSsdpHttpTimeout();
 	testIdentityGroupingKeepsModerateRelationsSeparate();
+	testIdentityGroupConfidenceRequiresCertainConnectivity();
+	testIdentityGroupRejectsTransitiveContradiction();
+	testIdentityRelationCapacityDoesNotCreateUnbackedGroups();
+	testIdentityGroupMemberLimitIsExplicit();
 	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
 }

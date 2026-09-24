@@ -68,6 +68,10 @@ bool parseNbnsNodeStatusName(
     size_t outCapacity
 );
 
+bool identityDetailsContradict(
+    const ScoutDeviceDetails &leftDetails, const ScoutDeviceDetails &rightDetails
+);
+
 bool identityRelation(
     const ScoutDeviceInfo &leftInfo,
     const ScoutDeviceDetails &leftDetails,

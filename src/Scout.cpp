@@ -719,6 +719,8 @@ struct ScoutImpl {
 		target.runs++;
 		target.observations += run.observations;
 		target.errors += run.errors;
+		target.transportErrors += run.transportErrors;
+		target.descriptionErrors += run.descriptionErrors;
 		target.timeouts += run.timeouts;
 		target.noRecords += run.noRecords;
 		target.malformedResponses += run.malformedResponses;
@@ -795,12 +797,87 @@ struct ScoutImpl {
 		return index;
 	}
 
-	void unionIdentity(size_t left, size_t right) {
+	enum class IdentityUnionResult : uint8_t {
+		AlreadyUnified,
+		Merged,
+		Contradiction,
+		MemberLimit,
+	};
+
+	size_t identityComponentSize(size_t root) {
+		size_t count = 0;
+		for (size_t i = 0; i < deviceCount; ++i) {
+			if (identityRoot(i) == root) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	IdentityUnionResult tryUnionIdentity(size_t left, size_t right) {
 		const size_t leftRoot = identityRoot(left);
 		const size_t rightRoot = identityRoot(right);
-		if (leftRoot != rightRoot) {
-			identityParents[rightRoot] = leftRoot;
+		if (leftRoot == rightRoot) {
+			return IdentityUnionResult::AlreadyUnified;
 		}
+
+		if (identityComponentSize(leftRoot) + identityComponentSize(rightRoot) >
+		    SCOUT_MAX_IDENTITY_GROUP_MEMBERS) {
+			return IdentityUnionResult::MemberLimit;
+		}
+
+		for (size_t leftIndex = 0; leftIndex < deviceCount; ++leftIndex) {
+			if (identityRoot(leftIndex) != leftRoot || !devices[leftIndex].details) {
+				continue;
+			}
+			for (size_t rightIndex = 0; rightIndex < deviceCount; ++rightIndex) {
+				if (identityRoot(rightIndex) != rightRoot || !devices[rightIndex].details) {
+					continue;
+				}
+				const bool contradicts = scout_internal::identityDetailsContradict(
+				    *devices[leftIndex].details,
+				    *devices[rightIndex].details
+				);
+				if (contradicts) {
+					return IdentityUnionResult::Contradiction;
+				}
+			}
+		}
+
+		identityParents[rightRoot] = leftRoot;
+		return IdentityUnionResult::Merged;
+	}
+
+	bool storeIdentityRelation(const ScoutIdentityRelation &relation) {
+		if (identityRelationCountValue < identityRelationCapacity) {
+			identityRelations[identityRelationCountValue++] = relation;
+			return true;
+		}
+
+		const auto incomingConfidence = static_cast<uint8_t>(relation.evidence.confidence);
+		const auto strongConfidence = static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
+		size_t replacement = SIZE_MAX;
+		uint8_t replacementConfidence = static_cast<uint8_t>(0xFFU);
+		for (size_t i = 0; i < identityRelationCountValue; ++i) {
+			const auto storedConfidence =
+			    static_cast<uint8_t>(identityRelations[i].evidence.confidence);
+			const bool canReplace =
+			    incomingConfidence >= strongConfidence
+			        ? storedConfidence < strongConfidence
+			        : incomingConfidence > storedConfidence && storedConfidence < strongConfidence;
+			if (canReplace && storedConfidence < replacementConfidence) {
+				replacement = i;
+				replacementConfidence = storedConfidence;
+			}
+		}
+		if (replacement == SIZE_MAX) {
+			diag.identityRelationDrops++;
+			return false;
+		}
+
+		identityRelations[replacement] = relation;
+		diag.identityRelationDrops++;
+		return true;
 	}
 
 	void rebuildIdentityState() {
@@ -837,14 +914,24 @@ struct ScoutImpl {
 					    )) {
 						continue;
 					}
-					if (identityRelationCountValue < identityRelationCapacity) {
-						identityRelations[identityRelationCountValue++] = relation;
-					} else {
-						diag.identityRelationDrops++;
+					const bool retained = storeIdentityRelation(relation);
+					const auto confidence = static_cast<uint8_t>(relation.evidence.confidence);
+					const auto strongConfidence =
+					    static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
+					if (!retained || confidence < strongConfidence) {
+						continue;
 					}
-					if (static_cast<uint8_t>(relation.evidence.confidence) >=
-					    static_cast<uint8_t>(ScoutIdentityConfidence::Strong)) {
-						unionIdentity(left, right);
+
+					switch (tryUnionIdentity(left, right)) {
+					case IdentityUnionResult::Contradiction:
+						diag.identityContradictionBlocks++;
+						break;
+					case IdentityUnionResult::MemberLimit:
+						diag.identityGroupMemberLimitDrops++;
+						break;
+					case IdentityUnionResult::AlreadyUnified:
+					case IdentityUnionResult::Merged:
+						break;
 					}
 				}
 			}
@@ -854,13 +941,20 @@ struct ScoutImpl {
 					continue;
 				}
 				ScoutIdentityGroup group{};
+				bool memberOverflow = false;
 				for (size_t i = 0; i < deviceCount; ++i) {
 					if (identityRoot(i) != rootCandidate) {
 						continue;
 					}
-					if (group.memberCount < SCOUT_MAX_IDENTITY_GROUP_MEMBERS) {
-						group.members[group.memberCount++] = devices[i].info.key;
+					if (group.memberCount >= SCOUT_MAX_IDENTITY_GROUP_MEMBERS) {
+						memberOverflow = true;
+						break;
 					}
+					group.members[group.memberCount++] = devices[i].info.key;
+				}
+				if (memberOverflow) {
+					diag.identityGroupMemberLimitDrops++;
+					continue;
 				}
 				if (group.memberCount < 2) {
 					continue;
@@ -880,29 +974,64 @@ struct ScoutImpl {
 				    scout_internal::identityGroupRuntimeId(group.members, group.memberCount);
 				group.confidence = ScoutIdentityConfidence::Strong;
 
-				auto contains = [&](const ScoutDeviceKey &key) {
+				auto memberIndex = [&](const ScoutDeviceKey &key) {
 					for (size_t i = 0; i < group.memberCount; ++i) {
 						if (group.members[i] == key) {
-							return true;
+							return i;
 						}
 					}
-					return false;
+					return SIZE_MAX;
 				};
+
 				for (size_t relationIndex = 0; relationIndex < identityRelationCountValue &&
 				                               group.evidenceCount < SCOUT_MAX_IDENTITY_EVIDENCE;
 				     ++relationIndex) {
 					const auto &relation = identityRelations[relationIndex];
-					if (!contains(relation.first) || !contains(relation.second) ||
+					if (memberIndex(relation.first) == SIZE_MAX ||
+					    memberIndex(relation.second) == SIZE_MAX ||
 					    static_cast<uint8_t>(relation.evidence.confidence) <
 					        static_cast<uint8_t>(ScoutIdentityConfidence::Strong)) {
 						continue;
 					}
 					group.evidence[group.evidenceCount++] = relation.evidence;
-					if (static_cast<uint8_t>(relation.evidence.confidence) >
-					    static_cast<uint8_t>(group.confidence)) {
-						group.confidence = relation.evidence.confidence;
+				}
+
+				bool certainReachable[SCOUT_MAX_IDENTITY_GROUP_MEMBERS]{};
+				certainReachable[0] = true;
+				for (size_t pass = 0; pass < group.memberCount; ++pass) {
+					bool progress = false;
+					for (size_t relationIndex = 0; relationIndex < identityRelationCountValue;
+					     ++relationIndex) {
+						const auto &relation = identityRelations[relationIndex];
+						if (relation.evidence.confidence != ScoutIdentityConfidence::Certain) {
+							continue;
+						}
+						const size_t first = memberIndex(relation.first);
+						const size_t second = memberIndex(relation.second);
+						if (first == SIZE_MAX || second == SIZE_MAX) {
+							continue;
+						}
+						if (certainReachable[first] && !certainReachable[second]) {
+							certainReachable[second] = true;
+							progress = true;
+						}
+						if (certainReachable[second] && !certainReachable[first]) {
+							certainReachable[first] = true;
+							progress = true;
+						}
+					}
+					if (!progress) {
+						break;
 					}
 				}
+				bool allCertain = true;
+				for (size_t i = 0; i < group.memberCount; ++i) {
+					allCertain = allCertain && certainReachable[i];
+				}
+				if (allCertain) {
+					group.confidence = ScoutIdentityConfidence::Certain;
+				}
+
 				identityGroups[identityGroupCountValue++] = group;
 			}
 
