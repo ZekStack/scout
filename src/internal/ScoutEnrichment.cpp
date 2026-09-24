@@ -384,38 +384,41 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 			changes |= ScoutDeviceChange::Vendor;
 		}
 	}
-	if (expireTextField(
-	        details.modelName,
-	        details.modelNameSource,
-	        details.modelNameExpiresAtMs,
-	        nowMs
-	    ) ||
-	    expireTextField(
-	        details.modelNumber,
-	        details.modelNumberSource,
-	        details.modelNumberExpiresAtMs,
-	        nowMs
-	    )) {
+	const bool modelNameExpired = expireTextField(
+	    details.modelName,
+	    details.modelNameSource,
+	    details.modelNameExpiresAtMs,
+	    nowMs
+	);
+	const bool modelNumberExpired = expireTextField(
+	    details.modelNumber,
+	    details.modelNumberSource,
+	    details.modelNumberExpiresAtMs,
+	    nowMs
+	);
+	if (modelNameExpired || modelNumberExpired) {
 		changes |= ScoutDeviceChange::Metadata;
 	}
-	if (expireTextField(
-	        details.serialNumber,
-	        details.serialNumberSource,
-	        details.serialNumberExpiresAtMs,
-	        nowMs
-	    ) ||
-	    expireTextField(
-	        details.persistentDeviceId,
-	        details.persistentDeviceIdSource,
-	        details.persistentDeviceIdExpiresAtMs,
-	        nowMs
-	    ) ||
-	    expireTextField(
-	        details.upnpUdn,
-	        details.upnpUdnSource,
-	        details.upnpUdnExpiresAtMs,
-	        nowMs
-	    )) {
+
+	const bool serialExpired = expireTextField(
+	    details.serialNumber,
+	    details.serialNumberSource,
+	    details.serialNumberExpiresAtMs,
+	    nowMs
+	);
+	const bool persistentIdExpired = expireTextField(
+	    details.persistentDeviceId,
+	    details.persistentDeviceIdSource,
+	    details.persistentDeviceIdExpiresAtMs,
+	    nowMs
+	);
+	const bool upnpUdnExpired = expireTextField(
+	    details.upnpUdn,
+	    details.upnpUdnSource,
+	    details.upnpUdnExpiresAtMs,
+	    nowMs
+	);
+	if (serialExpired || persistentIdExpired || upnpUdnExpired) {
 		changes |= ScoutDeviceChange::Identity;
 	}
 
