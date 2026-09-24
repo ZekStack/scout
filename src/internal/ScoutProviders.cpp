@@ -70,15 +70,12 @@ uint64_t expiryFromTtl(uint64_t now, uint32_t ttlSeconds, uint64_t fallbackMs) {
 }
 
 uint64_t mdnsRetentionFloorMs(
-    const ScoutMdnsConfig &config,
-    size_t serviceTypeCount,
-    size_t serviceQueryCount
+    const ScoutMdnsConfig &config, size_t serviceTypeCount, size_t serviceQueryCount
 ) {
 	if (serviceQueryCount == 0 || config.intervalMs == 0 || config.fallbackMaxAgeMs == 0) {
 		return 0;
 	}
-	const uint64_t rotationRuns =
-	    (serviceTypeCount + serviceQueryCount - 1U) / serviceQueryCount;
+	const uint64_t rotationRuns = (serviceTypeCount + serviceQueryCount - 1U) / serviceQueryCount;
 	const uint64_t retentionRuns = rotationRuns + 1U;
 	if (retentionRuns > config.fallbackMaxAgeMs / config.intervalMs) {
 		return config.fallbackMaxAgeMs;
