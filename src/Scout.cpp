@@ -2315,7 +2315,10 @@ struct ScoutImpl {
 		}
 
 		while (!stopRequested.load(std::memory_order_acquire)) {
-			(void)processWork(config.execution.workBudgetMs);
+			// Preserve the legacy background-task behavior: a scheduled provider run may
+			// consume its configured run budget. Cancellation still propagates through
+			// ProviderRunControl; caller-driven mode is the mode that applies a time slice.
+			(void)processWork(UINT32_MAX);
 			if (stopRequested.load(std::memory_order_acquire)) {
 				break;
 			}
