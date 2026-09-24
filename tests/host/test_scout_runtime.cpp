@@ -795,6 +795,42 @@ void testCallerDrivenExecution() {
 	assert(scout.deinit().status == ScoutStatus::Ok);
 }
 
+void testCallerDrivenDeinitCompletesActiveScan() {
+	networkMode.store(NetworkMode::SmallSubnet);
+	Scout scout;
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.execution.workBudgetMs = 25;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	config.arpResponseWaitMs = 1000;
+	config.interBatchDelayMs = 0;
+
+	std::vector<ScoutEvent> events;
+	scout.onEvent([&](const ScoutEvent &event) { events.push_back(event); });
+	assert(scout.init(config).status == ScoutStatus::Ok);
+	assert(scout.scanNow().status == ScoutStatus::Ok);
+	assert(scout.process(25).status == ScoutStatus::Ok);
+
+	bool sawStarted = false;
+	bool sawCompleted = false;
+	for (const auto &event : events) {
+		sawStarted |= event.type == ScoutEventType::ScanStarted;
+		sawCompleted |= event.type == ScoutEventType::ScanCompleted;
+	}
+	assert(sawStarted);
+	assert(!sawCompleted);
+
+	assert(scout.deinit().status == ScoutStatus::Ok);
+	assertTerminalScanPair(events);
+	assert(events.back().type == ScoutEventType::ScanCompleted);
+	assert(events.back().status == ScoutStatus::Cancelled);
+}
+
 void testProcessRejectsBackgroundMode() {
 	Scout scout;
 	ScoutConfig config;
@@ -999,6 +1035,7 @@ int main() {
 	testIdentityRelationCapacityDoesNotCreateUnbackedGroups();
 	testIdentityGroupMemberLimitIsExplicit();
 	testCallerDrivenExecution();
+	testCallerDrivenDeinitCompletesActiveScan();
 	testProcessRejectsBackgroundMode();
 	testCallerDrivenDestructionFromCallback();
 	testDestructionFromCallback();
