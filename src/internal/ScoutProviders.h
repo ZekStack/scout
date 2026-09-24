@@ -56,6 +56,10 @@ struct ProviderRunStats {
 	uint64_t malformedResponses = 0;
 	uint64_t serverErrors = 0;
 	uint64_t dropped = 0;
+	size_t plannedUnits = 0;
+	size_t workUnits = 0;
+	bool budgetYielded = false;
+	bool cancelled = false;
 };
 
 using EnrichmentSink =
