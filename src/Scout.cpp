@@ -157,13 +157,15 @@ struct ScoutImpl {
 
 	ScoutEventCallback callback;
 	ScoutOuiLookupCallback ouiLookup;
+	ScoutEvent eventScratch[2]{};
 	size_t icmpCursor = 0;
 	size_t reverseDnsCursor = 0;
-	size_t nbnsCursor = 0;
 	size_t mdnsServiceCursor = 0;
 	size_t icmpRunRemaining = 0;
 	size_t mdnsRunRemaining = 0;
 	size_t reverseDnsRunRemaining = 0;
+	scout_internal::SsdpProviderState ssdpState{};
+	scout_internal::NbnsProviderState nbnsState{};
 
 	std::atomic<uint64_t> nextScanAt{UINT64_MAX};
 	std::atomic<uint64_t> nextIcmpAt{UINT64_MAX};
@@ -325,7 +327,12 @@ struct ScoutImpl {
 		return callback;
 	}
 
-	void emit(ScoutEvent event) {
+	ScoutEvent &scratchEvent(size_t slot = 0) {
+		eventScratch[slot] = {};
+		return eventScratch[slot];
+	}
+
+	void emit(const ScoutEvent &event) {
 		ScoutEventCallback current = callbackSnapshot();
 		if (current) {
 			current(event);
@@ -333,16 +340,16 @@ struct ScoutImpl {
 	}
 
 	void emitSimple(ScoutEventType type, ScoutStatus status, uint64_t scanId, const char *message) {
-		emit(ScoutEvent{
-		    .type = type,
-		    .status = status,
-		    .scanId = scanId,
-		    .message = message,
-		});
+		auto &event = scratchEvent();
+		event.type = type;
+		event.status = status;
+		event.scanId = scanId;
+		event.message = message;
+		emit(event);
 	}
 
 	void updateCoverage(bool available, size_t interfaceCount, uint64_t scanId) {
-		ScoutEvent event;
+		auto &event = scratchEvent();
 		bool shouldEmit = false;
 		{
 			ScoutLock lock(mutex);
@@ -544,7 +551,7 @@ struct ScoutImpl {
 	void expireStaleDevices(uint64_t scanId, uint64_t currentTime) {
 		size_t index = 0;
 		while (!stopRequested.load()) {
-			ScoutEvent event;
+			auto &event = scratchEvent();
 			bool foundExpired = false;
 			{
 				ScoutLock lock(mutex);
@@ -598,7 +605,9 @@ struct ScoutImpl {
 	    bool confirmed,
 	    uint64_t scanId
 	) {
-		ScoutEvent events[2]{};
+		eventScratch[0] = {};
+		eventScratch[1] = {};
+		ScoutEvent *events = eventScratch;
 		size_t eventCount = 0;
 		const uint64_t observedAt = nowMs();
 
@@ -919,7 +928,7 @@ struct ScoutImpl {
 	}
 
 	void rebuildIdentityState() {
-		ScoutEvent event{};
+		auto &event = scratchEvent();
 		bool changed = false;
 		{
 			ScoutLock lock(mutex);
@@ -1105,7 +1114,7 @@ struct ScoutImpl {
 	void applyEnrichmentObservation(
 	    const ScoutMacAddress &mac, const scout_internal::EnrichmentObservation &observation
 	) {
-		ScoutEvent event{};
+		auto &event = scratchEvent();
 		bool shouldEmit = false;
 		{
 			ScoutLock lock(mutex);
@@ -1372,7 +1381,7 @@ struct ScoutImpl {
 	void expireEnrichmentRecords() {
 		bool anyIdentityChange = false;
 		for (size_t index = 0;; ++index) {
-			ScoutEvent event{};
+			auto &event = scratchEvent();
 			bool emitChange = false;
 			{
 				ScoutLock lock(mutex);
@@ -1472,12 +1481,13 @@ struct ScoutImpl {
 		return continueRun;
 	}
 
-	void performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
 		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runSsdpProvider(
 		    providerTargets,
 		    count,
+		    ssdpState,
 		    config.providers.ssdp,
 		    httpScratch,
 		    httpScratchCapacity,
@@ -1485,24 +1495,29 @@ struct ScoutImpl {
 		    this,
 		    &control
 		);
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && ssdpState.remainingInterfaces > 0;
 		accumulateProviderStats(diag.ssdp, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
-	void performNbnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performNbnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const size_t count = snapshotProviderTargets();
 		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
 		const auto stats = scout_internal::runNbnsProvider(
 		    providerTargets,
 		    count,
-		    nbnsCursor,
+		    nbnsState,
 		    config.providers.nbns,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && nbnsState.active;
 		accumulateProviderStats(diag.nbns, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
 	bool performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
@@ -1583,7 +1598,7 @@ struct ScoutImpl {
 			vendor.known = true;
 			vendor.source = ScoutVendorSource::Oui;
 
-			ScoutEvent event{};
+			auto &event = scratchEvent();
 			bool emitChange = false;
 			{
 				ScoutLock lock(mutex);
@@ -2335,20 +2350,28 @@ struct ScoutImpl {
 			}
 			if (config.providers.ssdp.enabled &&
 			    current >= nextSsdpAt.load(std::memory_order_acquire)) {
-				performSsdpProvider(deadlineAt);
+				const bool continueProvider = performSsdpProvider(deadlineAt);
 				nextSsdpAt.store(
-				    nowMs() + config.providers.ssdp.intervalMs,
+				    continueProvider ? nowMs() : nowMs() + config.providers.ssdp.intervalMs,
 				    std::memory_order_release
 				);
+				if (continueProvider) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 			if (config.providers.nbns.enabled &&
 			    current >= nextNbnsAt.load(std::memory_order_acquire)) {
-				performNbnsProvider(deadlineAt);
+				const bool continueProvider = performNbnsProvider(deadlineAt);
 				nextNbnsAt.store(
-				    nowMs() + config.providers.nbns.intervalMs,
+				    continueProvider ? nowMs() : nowMs() + config.providers.nbns.intervalMs,
 				    std::memory_order_release
 				);
+				if (continueProvider) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 			if (config.providers.reverseDns.enabled &&
@@ -2521,11 +2544,12 @@ struct ScoutImpl {
 		identityRelationCountValue = 0;
 		icmpCursor = 0;
 		reverseDnsCursor = 0;
-		nbnsCursor = 0;
 		mdnsServiceCursor = 0;
 		icmpRunRemaining = 0;
 		mdnsRunRemaining = 0;
 		reverseDnsRunRemaining = 0;
+		ssdpState = {};
+		nbnsState = {};
 		nextScanId = 1;
 		scanProgress = IncrementalScanState{};
 		incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
