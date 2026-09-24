@@ -39,6 +39,7 @@ struct EnrichmentObservation {
 	char modelNumber[SCOUT_MODEL_SIZE] = {};
 	char serialNumber[SCOUT_SERIAL_SIZE] = {};
 	char persistentDeviceId[SCOUT_PERSISTENT_ID_SIZE] = {};
+	char persistentDeviceNamespace[SCOUT_PERSISTENT_NAMESPACE_SIZE] = {};
 	char upnpUdn[SCOUT_UPNP_UDN_SIZE] = {};
 	uint64_t identityExpiresAtMs = 0;
 };
