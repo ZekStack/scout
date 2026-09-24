@@ -124,6 +124,12 @@ def _render_markdown(*, display_tag, commits):
     return "\n".join(lines)
 
 
+def _resolve_commit_limit(previous_tag, requested_max):
+    if requested_max is not None:
+        return max(requested_max, 1)
+    return 100 if previous_tag else None
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Generate release-changelog.md from git changes."
@@ -157,9 +163,7 @@ def main():
     display_tag = args.tag_name.strip() or current_tag or target_ref
     previous_tag = _resolve_previous_tag(target_ref)
     range_spec = f"{previous_tag}..{target_ref}" if previous_tag else target_ref
-    commit_limit = args.max_commits
-    if commit_limit is None and previous_tag:
-        commit_limit = 100
+    commit_limit = _resolve_commit_limit(previous_tag, args.max_commits)
     commits = _resolve_commits(range_spec, commit_limit)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
