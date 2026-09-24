@@ -37,7 +37,7 @@ void loop() {
 	if (waitMs == UINT32_MAX) {
 		delay(100);
 	} else if (waitMs > 0) {
-		delay(min<uint32_t>(waitMs, 25U));
+		delay(waitMs < 25U ? waitMs : 25U);
 	} else {
 		yield();
 	}
