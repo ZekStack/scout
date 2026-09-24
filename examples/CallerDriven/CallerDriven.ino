@@ -19,7 +19,7 @@ void setup() {
 
 	ScoutConfig config;
 	config.execution.mode = ScoutExecutionMode::CallerDriven;
-	config.execution.workBudgetMs = 25;
+	config.execution.workBudgetMs = 1000;
 
 	const ScoutResult result = scout.init(config);
 	if (!result) {
