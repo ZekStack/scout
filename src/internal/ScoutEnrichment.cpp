@@ -23,6 +23,22 @@ bool expired(uint64_t expiresAtMs, uint64_t nowMs) {
 	return expiresAtMs != 0 && nowMs >= expiresAtMs;
 }
 
+template <size_t N>
+bool expireTextField(
+    char (&value)[N],
+    ScoutObservationSource &source,
+    uint64_t &expiresAtMs,
+    uint64_t nowMs
+) {
+	if (value[0] == '\0' || !expired(expiresAtMs, nowMs)) {
+		return false;
+	}
+	value[0] = '\0';
+	source = ScoutObservationSource::None;
+	expiresAtMs = 0;
+	return true;
+}
+
 size_t oldestNameIndex(const ScoutDeviceDetails &details) {
 	size_t oldest = 0;
 	for (size_t i = 1; i < details.nameCount; ++i) {
@@ -355,6 +371,58 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 			i++;
 		}
 	}
+
+	if (expireTextField(
+	        details.manufacturer,
+	        details.manufacturerSource,
+	        details.manufacturerExpiresAtMs,
+	        nowMs
+	    )) {
+		changes |= ScoutDeviceChange::Metadata;
+		if (details.vendor.known && details.vendor.source == ScoutVendorSource::Ssdp) {
+			details.vendor = {};
+			changes |= ScoutDeviceChange::Vendor;
+		}
+	}
+	if (expireTextField(
+	        details.modelName,
+	        details.modelNameSource,
+	        details.modelNameExpiresAtMs,
+	        nowMs
+	    ) ||
+	    expireTextField(
+	        details.modelNumber,
+	        details.modelNumberSource,
+	        details.modelNumberExpiresAtMs,
+	        nowMs
+	    )) {
+		changes |= ScoutDeviceChange::Metadata;
+	}
+	if (expireTextField(
+	        details.serialNumber,
+	        details.serialNumberSource,
+	        details.serialNumberExpiresAtMs,
+	        nowMs
+	    ) ||
+	    expireTextField(
+	        details.persistentDeviceId,
+	        details.persistentDeviceIdSource,
+	        details.persistentDeviceIdExpiresAtMs,
+	        nowMs
+	    ) ||
+	    expireTextField(
+	        details.upnpUdn,
+	        details.upnpUdnSource,
+	        details.upnpUdnExpiresAtMs,
+	        nowMs
+	    )) {
+		changes |= ScoutDeviceChange::Identity;
+	}
+
+	if (details.vendor.known && expired(details.vendor.expiresAtMs, nowMs)) {
+		details.vendor = {};
+		changes |= ScoutDeviceChange::Vendor;
+	}
 	return changes;
 }
 
@@ -379,28 +447,68 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 	}
 	target.locallyAdministeredMac = target.locallyAdministeredMac || source.locallyAdministeredMac;
 	target.multicastMac = target.multicastMac || source.multicastMac;
-	if (target.manufacturer[0] == '\0') {
-		copyText(target.manufacturer, sizeof(target.manufacturer), source.manufacturer);
-	}
-	if (target.modelName[0] == '\0') {
-		copyText(target.modelName, sizeof(target.modelName), source.modelName);
-	}
-	if (target.modelNumber[0] == '\0') {
-		copyText(target.modelNumber, sizeof(target.modelNumber), source.modelNumber);
-	}
-	if (target.serialNumber[0] == '\0') {
-		copyText(target.serialNumber, sizeof(target.serialNumber), source.serialNumber);
-	}
-	if (target.persistentDeviceId[0] == '\0') {
-		copyText(
-		    target.persistentDeviceId,
-		    sizeof(target.persistentDeviceId),
-		    source.persistentDeviceId
-		);
-	}
-	if (target.upnpUdn[0] == '\0') {
-		copyText(target.upnpUdn, sizeof(target.upnpUdn), source.upnpUdn);
-	}
+
+	auto mergeText = [](auto &targetValue,
+	                    ScoutObservationSource &targetSource,
+	                    uint64_t &targetExpiresAt,
+	                    const auto &sourceValue,
+	                    ScoutObservationSource sourceSource,
+	                    uint64_t sourceExpiresAt) {
+		if (targetValue[0] != '\0' || sourceValue[0] == '\0') {
+			return;
+		}
+		copyText(targetValue, sizeof(targetValue), sourceValue);
+		targetSource = sourceSource;
+		targetExpiresAt = sourceExpiresAt;
+	};
+	mergeText(
+	    target.manufacturer,
+	    target.manufacturerSource,
+	    target.manufacturerExpiresAtMs,
+	    source.manufacturer,
+	    source.manufacturerSource,
+	    source.manufacturerExpiresAtMs
+	);
+	mergeText(
+	    target.modelName,
+	    target.modelNameSource,
+	    target.modelNameExpiresAtMs,
+	    source.modelName,
+	    source.modelNameSource,
+	    source.modelNameExpiresAtMs
+	);
+	mergeText(
+	    target.modelNumber,
+	    target.modelNumberSource,
+	    target.modelNumberExpiresAtMs,
+	    source.modelNumber,
+	    source.modelNumberSource,
+	    source.modelNumberExpiresAtMs
+	);
+	mergeText(
+	    target.serialNumber,
+	    target.serialNumberSource,
+	    target.serialNumberExpiresAtMs,
+	    source.serialNumber,
+	    source.serialNumberSource,
+	    source.serialNumberExpiresAtMs
+	);
+	mergeText(
+	    target.persistentDeviceId,
+	    target.persistentDeviceIdSource,
+	    target.persistentDeviceIdExpiresAtMs,
+	    source.persistentDeviceId,
+	    source.persistentDeviceIdSource,
+	    source.persistentDeviceIdExpiresAtMs
+	);
+	mergeText(
+	    target.upnpUdn,
+	    target.upnpUdnSource,
+	    target.upnpUdnExpiresAtMs,
+	    source.upnpUdn,
+	    source.upnpUdnSource,
+	    source.upnpUdnExpiresAtMs
+	);
 	target.lastEnrichedAtMs = std::max(target.lastEnrichedAtMs, source.lastEnrichedAtMs);
 }
 
