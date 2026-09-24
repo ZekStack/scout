@@ -2279,7 +2279,7 @@ ScoutResult Scout::findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetai
 	if (_impl->devices[index].details) {
 		out = *_impl->devices[index].details;
 	} else {
-		out = ScoutDeviceDetails{};
+		resetInPlace(out);
 	}
 	return ScoutResult::success();
 }
