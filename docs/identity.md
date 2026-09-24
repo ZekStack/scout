@@ -38,6 +38,11 @@ Strong identifiers also act as vetoes. For example, two identities are not relat
 a shared hostname when they advertise different non-empty UDNs, different persistent device
 IDs, or conflicting serial numbers from the same manufacturer.
 
+Provider-derived strong identifiers are time-bounded evidence. Their source TTL/max-age is
+retained with the field, and expiry removes the evidence and rebuilds the relation/group view.
+A device therefore cannot remain in a Strong/Certain group indefinitely because of a stale
+UPnP UDN, persistent mDNS ID, or serial observation.
+
 This prevents friendly-name coincidences from corrupting physical-device identity.
 
 ## Groups
