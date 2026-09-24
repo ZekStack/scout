@@ -24,7 +24,7 @@
   "frameworks": "arduino",
   "platforms": "espressif32",
   "dependencies": {
-    "Strata": "https://github.com/ZekStack/strata.git#v0.1.2"
+    "Strata": "https://github.com/ZekStack/strata.git#fix-esp32-platform-detection"
   },
   "build": {
     "srcDir": "src",
