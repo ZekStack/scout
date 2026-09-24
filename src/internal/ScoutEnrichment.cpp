@@ -758,10 +758,7 @@ bool identityRelation(
 	const bool persistentNamespacesMatch =
 	    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
 	     rightDetails.persistentDeviceNamespace[0] == '\0') ||
-	    sameNonEmpty(
-	        leftDetails.persistentDeviceNamespace,
-	        rightDetails.persistentDeviceNamespace
-	    );
+	    sameNonEmpty(leftDetails.persistentDeviceNamespace, rightDetails.persistentDeviceNamespace);
 	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
 	    persistentNamespacesMatch &&
 	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
