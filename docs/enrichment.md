@@ -18,13 +18,16 @@ The default provider set is intentionally useful on a PSRAM-equipped ESP32:
 | NBNS | disabled | Enrich legacy Windows/NAS devices with a NetBIOS name. |
 | reverse DNS | disabled | Opportunistically learn a resolver-provided hostname. |
 
-Providers have independent schedules. A large PSRAM registry therefore does not imply that
-all network protocols are run during every ARP sweep.
+Providers have independent schedules. Bounded providers use persistent cursors so per-run work
+budgets rotate across targets/service types instead of permanently favoring the first entries. A
+large registry therefore does not imply that all network protocols are run during every ARP sweep.
 
 ## PSRAM-first bounds
 
-Scout deliberately starts with generous fixed capacities so a NetworkDeviceManager can keep
-rich information without immediately having to tune every field:
+Scout deliberately exposes generous bounded snapshot capacities so a NetworkDeviceManager can
+keep rich information without immediately having to tune every field. The compact MAC registry
+is preallocated, while each large `ScoutDeviceDetails` record is allocated lazily only after a
+device actually receives enrichment data:
 
 - 128 MAC identities;
 - 16 IPv4/interface endpoints per identity;
@@ -34,9 +37,11 @@ rich information without immediately having to tune every field:
 - 96 metadata entries per device;
 - 512 identity relations.
 
-The device registry, rich detail records, provider target buffer, identity tables and UPnP
-HTTP scratch buffer all use the configured Strata allocation placement. The default remains
-`Strata::Placement::PreferExternal`.
+The device registry, lazily created rich detail records, provider target buffer, identity tables
+and UPnP HTTP scratch buffer all use the configured Strata allocation placement. The default
+remains `Strata::Placement::PreferExternal`. If a rich-details allocation fails, the MAC-level
+registry remains valid and Scout records an enrichment allocation failure instead of failing the
+whole runtime.
 
 These are storage bounds, not work budgets. Providers separately limit work performed per
 run so a large registry does not monopolize the Scout task.
@@ -117,6 +122,8 @@ extracts only the fields useful to a user-facing device manager:
 - device type.
 
 The response body is bounded by `maxDescriptionBytes`; Scout does not retain arbitrary XML.
+Within one SSDP run, duplicate `LOCATION` values are fetched only once so repeated advertisements
+from one device cannot consume the whole description-fetch budget.
 
 ## OUI vendor lookup
 
@@ -137,11 +144,24 @@ MAC addresses, where the prefix is not reliable vendor evidence.
 ## Metadata freshness
 
 Names, services and generic metadata carry first-seen, last-seen and expiry timestamps.
-mDNS uses TTL when available, SSDP uses `CACHE-CONTROL: max-age`, and providers have
-fallback retention values.
+Identity-bearing fields such as serial number, persistent device ID and UPnP UDN also retain
+their provider source and expiry. mDNS uses TTL when available, SSDP uses
+`CACHE-CONTROL: max-age`, and providers have fallback retention values.
 
 Expiry removes only the stale enrichment item. It does not remove the underlying MAC record
-and does not declare the device offline.
+and does not declare the device offline. Expiring strong identity evidence immediately marks
+the identity graph dirty so stale Strong/Certain groups are removed.
+
+## Reverse DNS
+
+Reverse DNS does not use libc `getnameinfo()`. Scout builds an IPv4 PTR query directly, selects
+the DNS server configured for the endpoint's ESP-NETIF, binds the UDP socket to that interface's
+local IPv4 address, and enforces `ScoutReverseDnsConfig::timeoutMs` through socket timeouts.
+
+The DNS codec validates transaction IDs, response codes, record bounds and compressed DNS names.
+PTR TTL controls the learned name lifetime; `maxAgeMs` is only a fallback when the response TTL
+is zero. NXDOMAIN/no-PTR, timeout, malformed reply, server failure and network failure are counted
+separately in provider diagnostics.
 
 ## Change events
 
