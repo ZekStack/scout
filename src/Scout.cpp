@@ -88,6 +88,11 @@ class ScoutLock {
 	}
 }
 
+template <typename T> void resetInPlace(T &value) {
+	std::destroy_at(&value);
+	std::construct_at(&value);
+}
+
 } // namespace
 
 struct ScoutDeviceRecord {
@@ -404,7 +409,7 @@ struct ScoutImpl {
 			devices[index].info = devices[lastIndex].info;
 			devices[index].details = std::move(devices[lastIndex].details);
 		}
-		std::memset(&devices[lastIndex].info, 0, sizeof(devices[lastIndex].info));
+		resetInPlace(devices[lastIndex].info);
 		devices[lastIndex].details.reset();
 		deviceCount--;
 		diag.deviceCount = deviceCount;
@@ -554,7 +559,7 @@ struct ScoutImpl {
 					index = deviceCount++;
 					discovered = true;
 					auto &info = devices[index].info;
-					std::memset(&info, 0, sizeof(info));
+					resetInPlace(info);
 					devices[index].details.reset();
 					info.key.kind = ScoutIdentityKind::Mac;
 					info.key.mac = scout_internal::macFromBytes(mac);
@@ -2093,7 +2098,7 @@ ScoutResult Scout::deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const 
 	if (_impl->devices[index].details) {
 		out = *_impl->devices[index].details;
 	} else {
-		std::memset(&out, 0, sizeof(out));
+		resetInPlace(out);
 	}
 	return ScoutResult::success();
 }
