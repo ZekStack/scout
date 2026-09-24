@@ -398,8 +398,10 @@ void testDnsPtrCodec() {
 	response[6] = 0;
 	response[7] = 1;
 	offset = queryLength;
-	response[offset++] = 0xC0;
-	response[offset++] = static_cast<uint8_t>(offset - 1);
+	const size_t pointerOffset = offset;
+	response[offset++] =
+	    static_cast<uint8_t>(0xC0U | ((pointerOffset >> 8U) & 0x3FU));
+	response[offset++] = static_cast<uint8_t>(pointerOffset & 0xFFU);
 	const auto malformed =
 	    scout_internal::parsePtrResponse(response, offset, transactionId);
 	assert(malformed.status == scout_internal::DnsParseStatus::Malformed);
