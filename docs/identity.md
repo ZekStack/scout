@@ -48,7 +48,11 @@ retained with the field, and expiry removes the evidence and rebuilds the relati
 A device therefore cannot remain in a Strong/Certain group indefinitely because of a stale
 UPnP UDN, persistent mDNS ID, or serial observation.
 
-This prevents friendly-name coincidences from corrupting physical-device identity.
+This prevents friendly-name coincidences from corrupting physical-device identity. The veto is
+component-wide: before Scout joins two existing Strong/Certain components, it checks every
+cross-component pair for conflicting strong identifiers. A bridge device that exposes two
+different kinds of strong evidence therefore cannot indirectly join two identities that
+contradict each other.
 
 ## Groups
 
@@ -62,6 +66,21 @@ ScoutDeviceInfo (Ethernet MAC) --+
 ```
 
 The original records, endpoints and timestamps remain independently queryable.
+
+Only identity relations retained in the bounded relation table may participate in grouping.
+When that table is full, incoming Strong/Certain evidence may displace retained Weak/Moderate
+evidence, but Scout never forms a group from a relation that it cannot expose. If all retained
+slots already contain Strong/Certain relations, additional strong relations remain ungrouped and
+increment `identityRelationDrops`.
+
+`SCOUT_MAX_IDENTITY_GROUP_MEMBERS` is a hard semantic bound, not a silent truncation limit.
+A merge that would exceed the bound is rejected and increments
+`identityGroupMemberLimitDrops`. Component-level contradiction vetoes increment
+`identityContradictionBlocks`.
+
+A group's confidence describes the whole connected component. It is `Certain` only when
+Certain-only relations connect every member of the group; otherwise a group formed from any
+mixture of Strong and Certain evidence is reported as `Strong`.
 
 `runtimeId` is stable only for the current runtime and current member set. Scout deliberately
 does not persist groups to flash. Persistent user IDs, room assignment, custom names and
