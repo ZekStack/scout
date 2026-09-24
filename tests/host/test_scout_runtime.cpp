@@ -294,6 +294,52 @@ void testRegistryAgingAndDeduplication() {
 	runtime.releaseBuffers();
 }
 
+void testLazyDetailsAllocation() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+	const uint8_t deviceMac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x77};
+	const uint32_t address = lwip_htonl(0xC0A80120U);
+
+	runtime.observe(
+	    interfaceSnapshot,
+	    address,
+	    deviceMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	assert(runtime.deviceCount == 1);
+	assert(!runtime.devices[0].details);
+
+	scout_internal::EnrichmentObservation confirmation{};
+	confirmation.source = ScoutObservationSource::Icmp;
+	confirmation.ipv4.value = address;
+	confirmation.interfaceIndex = 1;
+	confirmation.confirmed = true;
+	runtime.applyEnrichmentObservation(runtime.devices[0].info.mac, confirmation);
+	assert(!runtime.devices[0].details);
+
+	scout_internal::EnrichmentObservation reverseDns{};
+	reverseDns.source = ScoutObservationSource::ReverseDns;
+	reverseDns.ipv4.value = address;
+	reverseDns.interfaceIndex = 1;
+	reverseDns.nameCount = 1;
+	reverseDns.names[0].source = ScoutNameSource::ReverseDns;
+	std::strcpy(reverseDns.names[0].value, "device.example");
+	reverseDns.names[0].lastSeenAtMs = nowMs();
+	reverseDns.names[0].expiresAtMs = nowMs() + 1000;
+	runtime.applyEnrichmentObservation(runtime.devices[0].info.mac, reverseDns);
+	assert(runtime.devices[0].details);
+	assert(runtime.devices[0].details->nameCount == 1);
+
+	runtime.releaseBuffers();
+}
+
 void testIdentityGroupingKeepsModerateRelationsSeparate() {
 	ScoutImpl runtime;
 	assert(runtime.allocateBuffers(runtime.config));
@@ -352,6 +398,14 @@ void testIdentityGroupingKeepsModerateRelationsSeparate() {
 		}
 	}
 	assert(sawModerateHostname);
+
+	firstDetails->upnpUdnSource = ScoutObservationSource::Ssdp;
+	secondDetails->upnpUdnSource = ScoutObservationSource::Ssdp;
+	firstDetails->upnpUdnExpiresAtMs = 1;
+	secondDetails->upnpUdnExpiresAtMs = 1;
+	runtime.expireEnrichmentRecords();
+	assert(runtime.identityGroupCountValue == 0);
+
 	runtime.releaseBuffers();
 }
 
@@ -488,6 +542,7 @@ int main() {
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
+	testLazyDetailsAllocation();
 	testIdentityGroupingKeepsModerateRelationsSeparate();
 	testDestructionFromCallback();
 	std::cout << "Scout runtime host tests passed\n";
