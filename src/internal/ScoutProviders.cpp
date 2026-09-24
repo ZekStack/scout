@@ -1269,6 +1269,7 @@ ProviderRunStats runSsdpProvider(
 		        sizeof(destination)
 		    ) < 0) {
 			stats.errors++;
+			stats.transportErrors++;
 			close(fd);
 			continue;
 		}
