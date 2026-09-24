@@ -663,10 +663,11 @@ struct ScoutImpl {
 			if (endpoint.interfaceIndex != observation.interfaceIndex) {
 				continue;
 			}
-			if (observation.interfaceKey[0] != '\0' &&
-			    std::strncmp(
-			        endpoint.interfaceKey, observation.interfaceKey, sizeof(endpoint.interfaceKey)
-			    ) != 0) {
+			if (observation.interfaceKey[0] != '\0' && std::strncmp(
+			                                               endpoint.interfaceKey,
+			                                               observation.interfaceKey,
+			                                               sizeof(endpoint.interfaceKey)
+			                                           ) != 0) {
 				continue;
 			}
 			if (observation.ipv4.valid() && endpoint.ipv4 != observation.ipv4) {
