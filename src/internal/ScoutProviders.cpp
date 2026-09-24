@@ -1360,9 +1360,13 @@ ProviderRunStats runNbnsProvider(
 				continue;
 			}
 			char name[SCOUT_NAME_SIZE] = {};
+			const size_t targetIndex = static_cast<size_t>(target - targets);
+			const uint16_t expectedTransactionId =
+			    static_cast<uint16_t>(0x4000U + (targetIndex & 0x3FFFU));
 			if (!parseNbnsNodeStatusName(
 			        response,
 			        static_cast<size_t>(received),
+			        expectedTransactionId,
 			        name,
 			        sizeof(name)
 			    )) {
