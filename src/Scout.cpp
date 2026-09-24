@@ -1663,6 +1663,7 @@ struct ScoutImpl {
 		     (incoming.providers.mdns.intervalMs < MinScanIntervalMs ||
 		      incoming.providers.mdns.queryTimeoutMs == 0 ||
 		      incoming.providers.mdns.maxResults == 0 ||
+		      incoming.providers.mdns.maxServiceTypes == 0 ||
 		      incoming.providers.mdns.maxServiceQueriesPerRun == 0)) ||
 		    (incoming.providers.ssdp.enabled &&
 		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
@@ -1674,6 +1675,7 @@ struct ScoutImpl {
 		      incoming.providers.nbns.maxTargetsPerRun == 0)) ||
 		    (incoming.providers.reverseDns.enabled &&
 		     (incoming.providers.reverseDns.intervalMs < MinScanIntervalMs ||
+		      incoming.providers.reverseDns.timeoutMs == 0 ||
 		      incoming.providers.reverseDns.maxTargetsPerRun == 0));
 
 		if (!Strata::validPlacement(incoming.memory.allocation) ||
