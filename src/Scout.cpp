@@ -2551,6 +2551,16 @@ struct ScoutImpl {
 				}
 				vTaskDelay(1);
 			}
+
+			// Caller-driven mode has no worker that can close an in-flight incremental
+			// scan after process() has yielded. Preserve the ScanStarted/ScanCompleted
+			// contract before releasing the scan buffers.
+			if (scanProgress.active) {
+				const uint64_t scanId = scanProgress.scanId;
+				const uint64_t startedAt = scanProgress.startedAt;
+				scanProgress.active = false;
+				finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
+			}
 		}
 
 		ScoutLock lock(mutex);
