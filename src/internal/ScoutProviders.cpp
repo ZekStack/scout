@@ -529,12 +529,7 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	return out.host[0] != '\0';
 }
 
-HttpFetchResult fetchHttpBody(
-    const char *url,
-    uint32_t timeoutMs,
-    char *scratch,
-    size_t capacity
-) {
+HttpFetchResult fetchHttpBody(const char *url, uint32_t timeoutMs, char *scratch, size_t capacity) {
 	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2) {
 		return result;
@@ -621,9 +616,9 @@ HttpFetchResult fetchHttpBody(
 		return result;
 	}
 	const char *statusSpace = std::strchr(scratch, ' ');
-	if (statusSpace == nullptr || statusSpace + 3 >= scratch + received ||
-	    statusSpace[1] < '0' || statusSpace[1] > '9' || statusSpace[2] < '0' ||
-	    statusSpace[2] > '9' || statusSpace[3] < '0' || statusSpace[3] > '9') {
+	if (statusSpace == nullptr || statusSpace + 3 >= scratch + received || statusSpace[1] < '0' ||
+	    statusSpace[1] > '9' || statusSpace[2] < '0' || statusSpace[2] > '9' ||
+	    statusSpace[3] < '0' || statusSpace[3] > '9') {
 		return result;
 	}
 	const int statusCode =

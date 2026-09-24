@@ -941,144 +941,147 @@ struct ScoutImpl {
 			}
 
 			const bool hasRichData =
-			    observation.nameCount > 0 || observation.hasService || observation.metadataCount > 0 ||
-			    observation.manufacturer[0] != '\0' || observation.modelName[0] != '\0' ||
-			    observation.modelNumber[0] != '\0' || observation.serialNumber[0] != '\0' ||
-			    observation.persistentDeviceId[0] != '\0' || observation.upnpUdn[0] != '\0';
+			    observation.nameCount > 0 || observation.hasService ||
+			    observation.metadataCount > 0 || observation.manufacturer[0] != '\0' ||
+			    observation.modelName[0] != '\0' || observation.modelNumber[0] != '\0' ||
+			    observation.serialNumber[0] != '\0' || observation.persistentDeviceId[0] != '\0' ||
+			    observation.upnpUdn[0] != '\0';
 			if (hasRichData) {
 				auto *detailsPtr = ensureDetailsLocked(index);
 				if (detailsPtr != nullptr) {
 					auto &details = *detailsPtr;
 
 					for (size_t i = 0; i < observation.nameCount; ++i) {
-				const auto result = scout_internal::upsertName(
-				    details,
-				    observation.names[i].source,
-				    observation.names[i].value,
-				    observation.names[i].lastSeenAtMs,
-				    observation.names[i].expiresAtMs
-				);
-				if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
-					changes |= ScoutDeviceChange::Name;
-					if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
-						diag.nameLimitDrops++;
+						const auto result = scout_internal::upsertName(
+						    details,
+						    observation.names[i].source,
+						    observation.names[i].value,
+						    observation.names[i].lastSeenAtMs,
+						    observation.names[i].expiresAtMs
+						);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Name;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.nameLimitDrops++;
+							}
+						}
 					}
-				}
-			}
 
-			if (observation.hasService) {
-				const auto result = scout_internal::upsertService(details, observation.service);
-				if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
-					changes |= ScoutDeviceChange::Service;
-					if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
-						diag.serviceLimitDrops++;
+					if (observation.hasService) {
+						const auto result =
+						    scout_internal::upsertService(details, observation.service);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Service;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.serviceLimitDrops++;
+							}
+						}
 					}
-				}
-			}
 
-			for (size_t i = 0; i < observation.metadataCount; ++i) {
-				const auto result =
-				    scout_internal::upsertMetadata(details, observation.metadata[i]);
-				if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
-					changes |= ScoutDeviceChange::Metadata;
-					if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
-						diag.metadataLimitDrops++;
+					for (size_t i = 0; i < observation.metadataCount; ++i) {
+						const auto result =
+						    scout_internal::upsertMetadata(details, observation.metadata[i]);
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
+							changes |= ScoutDeviceChange::Metadata;
+							if (result == scout_internal::EnrichmentUpsertResult::Replaced) {
+								diag.metadataLimitDrops++;
+							}
+						}
 					}
-				}
-			}
 
-			auto updateText = [&](char *destination,
-			                      size_t capacity,
-			                      const char *source,
-			                      ScoutObservationSource &fieldSource,
-			                      uint64_t &expiresAtMs,
-			                      ScoutDeviceChange change) {
-				if (source == nullptr || source[0] == '\0') {
-					return;
-				}
-				const bool changed = std::strncmp(destination, source, capacity) != 0;
-				if (changed) {
-					scout_internal::copyText(destination, capacity, source);
-					changes |= change;
-				}
-				fieldSource = observation.source;
-				expiresAtMs = observation.identityExpiresAtMs;
-			};
-			updateText(
-			    details.manufacturer,
-			    sizeof(details.manufacturer),
-			    observation.manufacturer,
-			    details.manufacturerSource,
-			    details.manufacturerExpiresAtMs,
-			    ScoutDeviceChange::Metadata
-			);
-			updateText(
-			    details.modelName,
-			    sizeof(details.modelName),
-			    observation.modelName,
-			    details.modelNameSource,
-			    details.modelNameExpiresAtMs,
-			    ScoutDeviceChange::Metadata
-			);
-			updateText(
-			    details.modelNumber,
-			    sizeof(details.modelNumber),
-			    observation.modelNumber,
-			    details.modelNumberSource,
-			    details.modelNumberExpiresAtMs,
-			    ScoutDeviceChange::Metadata
-			);
-			updateText(
-			    details.serialNumber,
-			    sizeof(details.serialNumber),
-			    observation.serialNumber,
-			    details.serialNumberSource,
-			    details.serialNumberExpiresAtMs,
-			    ScoutDeviceChange::Identity
-			);
-			updateText(
-			    details.persistentDeviceId,
-			    sizeof(details.persistentDeviceId),
-			    observation.persistentDeviceId,
-			    details.persistentDeviceIdSource,
-			    details.persistentDeviceIdExpiresAtMs,
-			    ScoutDeviceChange::Identity
-			);
-			updateText(
-			    details.upnpUdn,
-			    sizeof(details.upnpUdn),
-			    observation.upnpUdn,
-			    details.upnpUdnSource,
-			    details.upnpUdnExpiresAtMs,
-			    ScoutDeviceChange::Identity
-			);
+					auto updateText = [&](char *destination,
+					                      size_t capacity,
+					                      const char *source,
+					                      ScoutObservationSource &fieldSource,
+					                      uint64_t &expiresAtMs,
+					                      ScoutDeviceChange change) {
+						if (source == nullptr || source[0] == '\0') {
+							return;
+						}
+						const bool changed = std::strncmp(destination, source, capacity) != 0;
+						if (changed) {
+							scout_internal::copyText(destination, capacity, source);
+							changes |= change;
+						}
+						fieldSource = observation.source;
+						expiresAtMs = observation.identityExpiresAtMs;
+					};
+					updateText(
+					    details.manufacturer,
+					    sizeof(details.manufacturer),
+					    observation.manufacturer,
+					    details.manufacturerSource,
+					    details.manufacturerExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.modelName,
+					    sizeof(details.modelName),
+					    observation.modelName,
+					    details.modelNameSource,
+					    details.modelNameExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.modelNumber,
+					    sizeof(details.modelNumber),
+					    observation.modelNumber,
+					    details.modelNumberSource,
+					    details.modelNumberExpiresAtMs,
+					    ScoutDeviceChange::Metadata
+					);
+					updateText(
+					    details.serialNumber,
+					    sizeof(details.serialNumber),
+					    observation.serialNumber,
+					    details.serialNumberSource,
+					    details.serialNumberExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
+					updateText(
+					    details.persistentDeviceId,
+					    sizeof(details.persistentDeviceId),
+					    observation.persistentDeviceId,
+					    details.persistentDeviceIdSource,
+					    details.persistentDeviceIdExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
+					updateText(
+					    details.upnpUdn,
+					    sizeof(details.upnpUdn),
+					    observation.upnpUdn,
+					    details.upnpUdnSource,
+					    details.upnpUdnExpiresAtMs,
+					    ScoutDeviceChange::Identity
+					);
 
-			if (observation.source == ScoutObservationSource::Ssdp &&
-			    observation.manufacturer[0] != '\0' &&
-			    (!details.vendor.known || details.vendor.source == ScoutVendorSource::Oui ||
-			     details.vendor.source == ScoutVendorSource::Ssdp)) {
-				const bool vendorChanged = !details.vendor.known || std::strncmp(
-				                                                        details.vendor.name,
-				                                                        observation.manufacturer,
-				                                                        sizeof(details.vendor.name)
-				                                                    ) != 0;
-				details.vendor.known = true;
-				details.vendor.source = ScoutVendorSource::Ssdp;
-				details.vendor.observationSource = ScoutObservationSource::Ssdp;
-				if (details.vendor.firstSeenAtMs == 0) {
-					details.vendor.firstSeenAtMs = observedAt;
-				}
-				details.vendor.lastSeenAtMs = observedAt;
-				details.vendor.expiresAtMs = observation.identityExpiresAtMs;
-				scout_internal::copyText(
-				    details.vendor.name,
-				    sizeof(details.vendor.name),
-				    observation.manufacturer
-				);
-				if (vendorChanged) {
-					changes |= ScoutDeviceChange::Vendor;
-				}
-			}
+					if (observation.source == ScoutObservationSource::Ssdp &&
+					    observation.manufacturer[0] != '\0' &&
+					    (!details.vendor.known || details.vendor.source == ScoutVendorSource::Oui ||
+					     details.vendor.source == ScoutVendorSource::Ssdp)) {
+						const bool vendorChanged =
+						    !details.vendor.known || std::strncmp(
+						                                 details.vendor.name,
+						                                 observation.manufacturer,
+						                                 sizeof(details.vendor.name)
+						                             ) != 0;
+						details.vendor.known = true;
+						details.vendor.source = ScoutVendorSource::Ssdp;
+						details.vendor.observationSource = ScoutObservationSource::Ssdp;
+						if (details.vendor.firstSeenAtMs == 0) {
+							details.vendor.firstSeenAtMs = observedAt;
+						}
+						details.vendor.lastSeenAtMs = observedAt;
+						details.vendor.expiresAtMs = observation.identityExpiresAtMs;
+						scout_internal::copyText(
+						    details.vendor.name,
+						    sizeof(details.vendor.name),
+						    observation.manufacturer
+						);
+						if (vendorChanged) {
+							changes |= ScoutDeviceChange::Vendor;
+						}
+					}
 
 					if (observation.source != ScoutObservationSource::None) {
 						details.lastEnrichedAtMs = observedAt;
