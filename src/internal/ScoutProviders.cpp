@@ -1157,7 +1157,10 @@ ProviderRunStats runMdnsProvider(
 	                              : configuredQueryCount;
 	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
 	uint32_t perQueryTimeout = std::max<uint32_t>(
-	    1, queryCount > 0 ? queryBudget / static_cast<uint32_t>(queryCount) : 1
+	    1,
+	    queryCount > 0
+	        ? queryBudget / static_cast<uint32_t>(queryCount)
+	        : 1
 	);
 	perQueryTimeout = providerRemainingMs(control, perQueryTimeout);
 
