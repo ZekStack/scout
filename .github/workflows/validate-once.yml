@@ -1,4 +1,4 @@
-name: Validate once
+name: Validate once # retry
 
 on:
   push:
