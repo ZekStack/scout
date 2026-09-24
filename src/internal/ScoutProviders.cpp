@@ -1156,12 +1156,13 @@ ProviderRunStats runMdnsProvider(
 	                              ? std::min<size_t>(configuredQueryCount, 1)
 	                              : configuredQueryCount;
 	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
-	uint32_t perQueryTimeout = std::max<uint32_t>(
-	    1,
-	    queryCount > 0
-	        ? queryBudget / static_cast<uint32_t>(queryCount)
-	        : 1
-	);
+	uint32_t perQueryTimeout = 1;
+	if (queryCount > 0) {
+		perQueryTimeout = queryBudget / static_cast<uint32_t>(queryCount);
+		if (perQueryTimeout == 0) {
+			perQueryTimeout = 1;
+		}
+	}
 	perQueryTimeout = providerRemainingMs(control, perQueryTimeout);
 
 	size_t processedQueries = 0;
