@@ -32,9 +32,17 @@ enrichment data, so `maxDevices` does not reserve the worst-case rich payload fo
 
 ## taskStack
 
-The Scout task stack uses memory.taskStack and therefore prefers external RAM by default.
+`memory.taskStack` applies only to `ScoutExecutionMode::BackgroundTask`, where Scout owns a
+scheduler task. That task stack follows the configured placement policy and therefore prefers
+external RAM by default.
 
-Scout also has one process-lifetime deferred-cleanup task shared by all Scout instances. Its stack is fixed to `PreferExternal` because it only exists to reclaim a Scout runtime that is destroyed from its own callback task. Its FreeRTOS control block follows Strata's normal internal-memory safety rule.
+`ScoutExecutionMode::CallerDriven` creates no Scout scheduler task, so `memory.taskStack` does
+not control the application-owned task stack that calls `process()`.
+
+Scout also has one process-lifetime deferred-cleanup task shared by all Scout instances. Its stack
+is fixed to `PreferExternal` because it only exists to reclaim a Scout runtime that is destroyed
+from its own callback context. Its FreeRTOS control block follows Strata's normal internal-memory
+safety rule.
 
 ## Safety constraints
 
