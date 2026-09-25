@@ -161,7 +161,10 @@ int openBoundUdpSocket(uint32_t localIpv4, uint32_t timeoutMs) {
 	if (fd < 0) {
 		return -1;
 	}
-	setSocketTimeout(fd, timeoutMs);
+	if (!setSocketTimeout(fd, timeoutMs)) {
+		close(fd);
+		return -1;
+	}
 
 	sockaddr_in local{};
 	local.sin_family = AF_INET;
@@ -718,8 +721,30 @@ HttpFetchResult fetchHttpBody(
 	remote.sin_family = AF_INET;
 	remote.sin_port = htons(parsed.port);
 	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) != 1) {
-		result.status = HttpFetchStatus::UnsupportedAddress;
-		return result;
+		addrinfo hints{};
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_protocol = IPPROTO_TCP;
+		addrinfo *addresses = nullptr;
+		if (getaddrinfo(parsed.host, nullptr, &hints, &addresses) != 0 || addresses == nullptr) {
+			result.status = HttpFetchStatus::UnsupportedAddress;
+			return result;
+		}
+		bool resolved = false;
+		for (addrinfo *address = addresses; address != nullptr; address = address->ai_next) {
+			if (address->ai_family != AF_INET || address->ai_addr == nullptr ||
+			    address->ai_addrlen < sizeof(sockaddr_in)) {
+				continue;
+			}
+			remote.sin_addr = reinterpret_cast<const sockaddr_in *>(address->ai_addr)->sin_addr;
+			resolved = true;
+			break;
+		}
+		freeaddrinfo(addresses);
+		if (!resolved) {
+			result.status = HttpFetchStatus::UnsupportedAddress;
+			return result;
+		}
 	}
 
 	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
@@ -1242,6 +1267,7 @@ ProviderRunStats runMdnsProvider(
 ProviderRunStats runSsdpProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    SsdpProviderState &state,
     const ScoutSsdpConfig &config,
     char *httpScratch,
     size_t httpScratchCapacity,
@@ -1251,6 +1277,7 @@ ProviderRunStats runSsdpProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		state = {};
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1263,9 +1290,21 @@ ProviderRunStats runSsdpProvider(
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
 		stats.transportErrors++;
+		state.remainingInterfaces = 0;
 		return stats;
 	}
-	stats.plannedUnits = interfaceCount;
+	if (interfaceCount == 0) {
+		state = {};
+		return stats;
+	}
+	state.interfaceCursor %= interfaceCount;
+	const size_t plannedInterfaces = state.remainingInterfaces == 0
+	                                     ? interfaceCount
+	                                     : std::min(state.remainingInterfaces, interfaceCount);
+	if (state.remainingInterfaces == 0) {
+		state.remainingInterfaces = plannedInterfaces;
+	}
+	stats.plannedUnits = plannedInterfaces;
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
 	                          "MAN: \"ssdp:discover\"\r\n"
@@ -1306,12 +1345,15 @@ ProviderRunStats runSsdpProvider(
 		fetchedLocationCount++;
 		return true;
 	};
-	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
+	size_t processedInterfaces = 0;
+	for (; processedInterfaces < plannedInterfaces; ++processedInterfaces) {
 		if (providerShouldStop(control)) {
 			recordProviderStop(stats, control);
 			break;
 		}
 		stats.workUnits++;
+		const size_t interfaceIndex =
+		    (state.interfaceCursor + processedInterfaces) % interfaceCount;
 		const auto &interfaceInfo = interfaces[interfaceIndex];
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
@@ -1518,13 +1560,20 @@ ProviderRunStats runSsdpProvider(
 	if (providerShouldStop(control)) {
 		recordProviderStop(stats, control);
 	}
+	state.interfaceCursor = (state.interfaceCursor + processedInterfaces) % interfaceCount;
+	state.remainingInterfaces = processedInterfaces >= state.remainingInterfaces
+	                                ? 0
+	                                : state.remainingInterfaces - processedInterfaces;
+	if (!stats.budgetYielded || stats.cancelled) {
+		state.remainingInterfaces = 0;
+	}
 	return stats;
 }
 
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
-    size_t &cursor,
+    NbnsProviderState &state,
     const ScoutNbnsConfig &config,
     EnrichmentSink sink,
     void *context,
@@ -1532,6 +1581,7 @@ ProviderRunStats runNbnsProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		state = {};
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1543,29 +1593,51 @@ ProviderRunStats runNbnsProvider(
 	size_t interfaceCount = 0;
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
+		state.active = false;
 		return stats;
 	}
-	for (size_t interfaceIndex = 0; interfaceIndex < interfaceCount; ++interfaceIndex) {
+	if (interfaceCount == 0) {
+		state.active = false;
+		return stats;
+	}
+
+	if (!state.active || state.targetLimit == 0 || state.runStartCursor >= targetCount ||
+	    state.targetLimit > targetCount) {
+		state.runStartCursor = state.targetCursor % targetCount;
+		state.targetLimit = std::min(targetCount, config.maxTargetsPerRun);
+		state.interfaceCursor = 0;
+		state.targetOffset = 0;
+		state.active = state.targetLimit > 0;
+	}
+	if (!state.active) {
+		return stats;
+	}
+	stats.plannedUnits = state.targetLimit;
+
+	while (state.interfaceCursor < interfaceCount) {
 		if (providerShouldStop(control)) {
-			break;
+			recordProviderStop(stats, control);
+			return stats;
 		}
-		const auto &interfaceInfo = interfaces[interfaceIndex];
+
+		const auto &interfaceInfo = interfaces[state.interfaceCursor];
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, socketTimeout);
 		if (fd < 0) {
 			stats.errors++;
+			state.interfaceCursor++;
+			state.targetOffset = 0;
 			continue;
 		}
 
-		const size_t targetLimit = std::min(targetCount, config.maxTargetsPerRun);
-		stats.plannedUnits = std::max(stats.plannedUnits, targetLimit);
-		for (size_t processed = 0; processed < targetLimit; ++processed) {
+		for (; state.targetOffset < state.targetLimit; ++state.targetOffset) {
 			if (providerShouldStop(control)) {
 				recordProviderStop(stats, control);
-				break;
+				close(fd);
+				return stats;
 			}
-			const size_t i = (cursor + processed) % targetCount;
+			const size_t i = (state.runStartCursor + state.targetOffset) % targetCount;
 			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
 				continue;
 			}
@@ -1644,11 +1716,21 @@ ProviderRunStats runNbnsProvider(
 			stats.observations++;
 		}
 		close(fd);
+
+		state.interfaceCursor++;
+		state.targetOffset = 0;
+		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
+			return stats;
+		}
 	}
-	if (providerShouldStop(control)) {
-		recordProviderStop(stats, control);
-	}
-	cursor = (cursor + std::min(targetCount, config.maxTargetsPerRun)) % targetCount;
+
+	state.targetCursor = (state.runStartCursor + state.targetLimit) % targetCount;
+	state.runStartCursor = state.targetCursor;
+	state.targetLimit = 0;
+	state.interfaceCursor = 0;
+	state.targetOffset = 0;
+	state.active = false;
 	return stats;
 }
 

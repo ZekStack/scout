@@ -70,6 +70,20 @@ struct ProviderRunControl {
 	uint64_t deadlineMs = UINT64_MAX;
 };
 
+struct SsdpProviderState {
+	size_t interfaceCursor = 0;
+	size_t remainingInterfaces = 0;
+};
+
+struct NbnsProviderState {
+	size_t targetCursor = 0;
+	size_t runStartCursor = 0;
+	size_t targetLimit = 0;
+	size_t interfaceCursor = 0;
+	size_t targetOffset = 0;
+	bool active = false;
+};
+
 ProviderRunStats runIcmpProvider(
     const ProviderTarget *targets,
     size_t targetCount,
@@ -93,6 +107,7 @@ ProviderRunStats runMdnsProvider(
 ProviderRunStats runSsdpProvider(
     const ProviderTarget *targets,
     size_t targetCount,
+    SsdpProviderState &state,
     const ScoutSsdpConfig &config,
     char *httpScratch,
     size_t httpScratchCapacity,
@@ -104,7 +119,7 @@ ProviderRunStats runSsdpProvider(
 ProviderRunStats runNbnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
-    size_t &cursor,
+    NbnsProviderState &state,
     const ScoutNbnsConfig &config,
     EnrichmentSink sink,
     void *context,

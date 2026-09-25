@@ -18,9 +18,11 @@ The default provider set is intentionally useful on a PSRAM-equipped ESP32:
 | NBNS | disabled | Enrich legacy Windows/NAS devices with a NetBIOS name. |
 | reverse DNS | disabled | Opportunistically learn a resolver-provided hostname. |
 
-Providers have independent schedules. Bounded providers use persistent cursors so per-run work
-budgets rotate across targets/service types instead of permanently favoring the first entries. A
-large registry therefore does not imply that all network protocols are run during every ARP sweep.
+Providers have independent schedules. Bounded providers use persistent continuation state so
+per-run work budgets rotate across targets, service types and network interfaces instead of
+permanently favoring the first entries. SSDP and NBNS resume unfinished interface/target work on
+the next caller-driven `process()` call before returning to their normal intervals. A large
+registry therefore does not imply that all network protocols are run during every ARP sweep.
 
 For scalar details that multiple providers can report, Scout uses deterministic source precedence
 instead of last-writer-wins updates. SSDP/UPnP outranks mDNS for manufacturer/model-style fields,
@@ -144,10 +146,11 @@ Description TCP sockets are bound to the same local IPv4 interface that received
 response. Target correlation is exact for a known interface: Scout does not fall back to a
 different MAC merely because another interface currently has the same private IPv4 address.
 
-`httpTimeoutMs` is an end-to-end deadline covering TCP connect, request send and response
-receive. To keep that bound deterministic, description fetching currently accepts numeric IPv4
-`LOCATION` hosts only and does not call a potentially blocking hostname resolver. Hostname-based
-locations remain visible as metadata but their description fetch is skipped.
+For numeric IPv4 `LOCATION` hosts, `httpTimeoutMs` is an end-to-end deadline covering TCP
+connect, request send and response receive. Hostname-based locations are also supported: Scout
+resolves the host through lwIP before opening the interface-bound TCP connection, then applies the
+same HTTP deadline. Hostname resolution follows the platform resolver's own blocking behavior, so
+it is not a hard real-time part of the caller-driven work budget.
 
 Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface, so repeated
 advertisements from one device cannot consume the whole description-fetch budget without
