@@ -1730,11 +1730,7 @@ ProviderRunStats runSsdpProvider(
 						    sizeof(observation.modelNumber),
 						    description.modelNumber
 						);
-						copyText(
-						    observation.serialNumber,
-						    sizeof(observation.serialNumber),
-						    description.serialNumber
-						);
+						bool descriptionIdentityConflict = false;
 						if (description.udn[0] != '\0') {
 							if (observation.upnpUdn[0] == '\0') {
 								copyText(
@@ -1746,8 +1742,16 @@ ProviderRunStats runSsdpProvider(
 							               observation.upnpUdn,
 							               description.udn
 							           )) {
+								descriptionIdentityConflict = true;
 								stats.identityConflicts++;
 							}
+						}
+						if (!descriptionIdentityConflict) {
+							copyText(
+							    observation.serialNumber,
+							    sizeof(observation.serialNumber),
+							    description.serialNumber
+							);
 						}
 						appendMetadata(
 						    observation,
