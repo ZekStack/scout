@@ -1428,13 +1428,37 @@ struct ScoutImpl {
 		}
 	}
 
+	uint64_t topologyGenerationSnapshot() {
+		ScoutLock lock(mutex);
+		return lock ? registryTopologyGeneration : 0;
+	}
+
+	ScoutDnsServerLookupCallback dnsServerLookupSnapshot() {
+		ScoutLock lock(mutex);
+		return lock ? dnsServerLookup : ScoutDnsServerLookupCallback{};
+	}
+
+	void recordTopologyRestart() {
+		ScoutLock lock(mutex);
+		if (lock) {
+			diag.providerTopologyRestarts++;
+		}
+	}
+
 	bool performIcmpProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (icmpRunRemaining > 0 && icmpTopologyGeneration != generation) {
+			icmpCursor = 0;
+			icmpRunRemaining = 0;
+			recordTopologyRestart();
+		}
+		icmpTopologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
 		ScoutIcmpConfig runConfig = config.providers.icmp;
 		if (icmpRunRemaining > 0) {
 			runConfig.maxTargetsPerRun = icmpRunRemaining;
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runIcmpProvider(
 		    providerTargets,
 		    count,
@@ -1447,11 +1471,8 @@ struct ScoutImpl {
 		if (icmpRunRemaining == 0) {
 			icmpRunRemaining = stats.plannedUnits;
 		}
-		if (stats.workUnits >= icmpRunRemaining) {
-			icmpRunRemaining = 0;
-		} else {
-			icmpRunRemaining -= stats.workUnits;
-		}
+		icmpRunRemaining =
+		    stats.workUnits >= icmpRunRemaining ? 0 : icmpRunRemaining - stats.workUnits;
 		const bool continueRun = stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
 		if (!continueRun) {
 			icmpRunRemaining = 0;
@@ -1462,41 +1483,45 @@ struct ScoutImpl {
 	}
 
 	bool performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
-		const size_t count = snapshotProviderTargets();
-		ScoutMdnsConfig runConfig = config.providers.mdns;
-		if (mdnsRunRemaining > 0) {
-			runConfig.maxServiceQueriesPerRun = mdnsRunRemaining;
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (mdnsState.active && mdnsState.topologyGeneration != generation) {
+			const size_t cursor = mdnsState.serviceCursor;
+			mdnsState = {};
+			mdnsState.serviceCursor = cursor;
+			recordTopologyRestart();
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		mdnsState.topologyGeneration = generation;
+		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runMdnsProvider(
 		    providerTargets,
 		    count,
-		    mdnsServiceCursor,
-		    runConfig,
+		    mdnsState,
+		    config.providers.mdns,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
-		if (mdnsRunRemaining == 0) {
-			mdnsRunRemaining = stats.plannedUnits;
-		}
-		if (stats.workUnits >= mdnsRunRemaining) {
-			mdnsRunRemaining = 0;
-		} else {
-			mdnsRunRemaining -= stats.workUnits;
-		}
-		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
-		if (!continueRun) {
-			mdnsRunRemaining = 0;
-		}
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsState.active;
 		accumulateProviderStats(diag.mdns, stats);
 		flushIdentityIfDirty();
 		return continueRun;
 	}
 
 	bool performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (ssdpState.active && ssdpState.topologyGeneration != generation) {
+			ssdpState = {};
+			recordTopologyRestart();
+		}
+		ssdpState.topologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		ScoutDnsServerLookupCallback dnsLookup = dnsServerLookupSnapshot();
+		const scout_internal::ProviderRunControl control{
+		    &stopRequested,
+		    deadlineAt,
+		    dnsLookup ? &dnsLookup : nullptr,
+		};
 		const auto stats = scout_internal::runSsdpProvider(
 		    providerTargets,
 		    count,
@@ -1508,16 +1533,24 @@ struct ScoutImpl {
 		    this,
 		    &control
 		);
-		const bool continueRun =
-		    stats.budgetYielded && !stats.cancelled && ssdpState.remainingInterfaces > 0;
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && ssdpState.active &&
+		                         ssdpState.remainingInterfaces > 0;
 		accumulateProviderStats(diag.ssdp, stats);
 		flushIdentityIfDirty();
 		return continueRun;
 	}
 
 	bool performNbnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (nbnsState.active && nbnsState.topologyGeneration != generation) {
+			const size_t cursor = nbnsState.targetCursor;
+			nbnsState = {};
+			nbnsState.targetCursor = cursor;
+			recordTopologyRestart();
+		}
+		nbnsState.topologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runNbnsProvider(
 		    providerTargets,
 		    count,
@@ -1534,12 +1567,24 @@ struct ScoutImpl {
 	}
 
 	bool performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (reverseDnsRunRemaining > 0 && reverseDnsTopologyGeneration != generation) {
+			reverseDnsCursor = 0;
+			reverseDnsRunRemaining = 0;
+			recordTopologyRestart();
+		}
+		reverseDnsTopologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
 		ScoutReverseDnsConfig runConfig = config.providers.reverseDns;
 		if (reverseDnsRunRemaining > 0) {
 			runConfig.maxTargetsPerRun = reverseDnsRunRemaining;
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		ScoutDnsServerLookupCallback dnsLookup = dnsServerLookupSnapshot();
+		const scout_internal::ProviderRunControl control{
+		    &stopRequested,
+		    deadlineAt,
+		    dnsLookup ? &dnsLookup : nullptr,
+		};
 		const auto stats = scout_internal::runReverseDnsProvider(
 		    providerTargets,
 		    count,
@@ -1565,41 +1610,71 @@ struct ScoutImpl {
 		return continueRun;
 	}
 
-	void performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
 		if (!config.providers.oui) {
-			return;
+			ouiActive = false;
+			ouiRemaining = 0;
+			return false;
 		}
 		ScoutOuiLookupCallback resolver;
+		uint64_t generation = 0;
+		size_t currentDeviceCount = 0;
 		{
 			ScoutLock lock(mutex);
 			if (!lock) {
-				return;
+				return false;
 			}
 			resolver = ouiLookup;
+			generation = registryTopologyGeneration;
+			currentDeviceCount = deviceCount;
 		}
-		if (!resolver) {
-			return;
+		if (!resolver || currentDeviceCount == 0) {
+			ouiActive = false;
+			ouiRemaining = 0;
+			return false;
+		}
+		if (ouiActive && ouiTopologyGeneration != generation) {
+			ouiActive = false;
+			ouiRemaining = 0;
+			recordTopologyRestart();
+		}
+		if (!ouiActive) {
+			ouiActive = true;
+			ouiCursor = 0;
+			ouiRemaining = currentDeviceCount;
+			ouiTopologyGeneration = generation;
 		}
 
-		uint64_t observations = 0;
-		for (size_t index = 0;; ++index) {
-			if (stopRequested.load(std::memory_order_acquire) ||
-			    (deadlineAt != UINT64_MAX && nowMs() >= deadlineAt)) {
+		scout_internal::ProviderRunStats stats{};
+		stats.plannedUnits = ouiRemaining;
+		while (ouiRemaining > 0) {
+			if (stopRequested.load(std::memory_order_acquire)) {
+				stats.cancelled = true;
 				break;
 			}
+			if (deadlineAt != UINT64_MAX && nowMs() >= deadlineAt) {
+				stats.budgetYielded = true;
+				break;
+			}
+
 			ScoutMacAddress mac{};
 			bool shouldLookup = false;
 			{
 				ScoutLock lock(mutex);
-				if (!lock || index >= deviceCount) {
+				if (!lock || deviceCount == 0) {
+					ouiRemaining = 0;
 					break;
 				}
+				const size_t index = ouiCursor % deviceCount;
+				ouiCursor = (ouiCursor + 1) % deviceCount;
+				ouiRemaining--;
 				const auto &record = devices[index];
 				mac = record.info.mac;
 				const bool knownVendor = record.details && record.details->vendor.known;
 				shouldLookup = !knownVendor && !scout_internal::macIsLocallyAdministered(mac) &&
 				               !scout_internal::macIsMulticast(mac);
 			}
+			stats.workUnits++;
 			if (!shouldLookup) {
 				continue;
 			}
@@ -1641,20 +1716,22 @@ struct ScoutImpl {
 				event.device = devices[currentIndex].info;
 				event.message = "device vendor enriched";
 				emitChange = true;
-				observations++;
+				stats.observations++;
 			}
 			if (emitChange) {
 				emit(event);
 			}
 		}
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.oui.runs++;
-				diag.oui.observations += observations;
-			}
+
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && ouiActive && ouiRemaining > 0;
+		if (!continueRun) {
+			ouiActive = false;
+			ouiRemaining = 0;
 		}
+		accumulateProviderStats(diag.oui, stats);
 		flushIdentityIfDirty();
+		return continueRun;
 	}
 
 	ScoutStatus
