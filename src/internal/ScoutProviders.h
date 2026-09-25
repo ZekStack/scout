@@ -58,6 +58,7 @@ struct ProviderRunStats {
 	uint64_t dropped = 0;
 	uint64_t resolverUnavailable = 0;
 	uint64_t identityConflicts = 0;
+	uint64_t topologyRestarts = 0;
 	size_t plannedUnits = 0;
 	size_t workUnits = 0;
 	bool budgetYielded = false;
@@ -94,6 +95,7 @@ struct MdnsProviderState {
 struct SsdpProviderState {
 	bool active = false;
 	uint64_t topologyGeneration = 0;
+	uint64_t interfaceSignature = 0;
 	size_t interfaceCursor = 0;
 	size_t remainingInterfaces = 0;
 	size_t descriptionFetches = 0;
@@ -104,6 +106,7 @@ struct SsdpProviderState {
 struct NbnsProviderState {
 	bool active = false;
 	uint64_t topologyGeneration = 0;
+	uint64_t interfaceSignature = 0;
 	size_t targetCursor = 0;
 	size_t runStartCursor = 0;
 	size_t targetLimit = 0;
