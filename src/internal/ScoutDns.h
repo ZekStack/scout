@@ -10,6 +10,7 @@ enum class DnsParseStatus : uint8_t {
 	NoRecord,
 	Timeout,
 	NetworkError,
+	ResolverUnavailable,
 	Malformed,
 	ServerError,
 };
