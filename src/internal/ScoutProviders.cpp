@@ -1756,105 +1756,105 @@ ProviderRunStats runSsdpProvider(
 					recordProviderStop(stats, control);
 				} else {
 					const HttpFetchResult fetch = fetchHttpBody(
-				    parsed.location,
-				    *target,
-				    targets,
-				    targetCount,
-				    interfaceInfo.ipv4,
-				    httpTimeout,
-				    httpScratch,
-				    httpScratchCapacity,
-				    control
-				);
-				state.descriptionFetches++;
-				if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
-					UpnpDescriptionInfo description{};
-					if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
-						addName(
-						    observation,
-						    ScoutNameSource::SsdpFriendlyName,
-						    description.friendlyName,
-						    now,
-						    expiresAt
-						);
-						copyText(
-						    observation.manufacturer,
-						    sizeof(observation.manufacturer),
-						    description.manufacturer
-						);
-						copyText(
-						    observation.modelName,
-						    sizeof(observation.modelName),
-						    description.modelName
-						);
-						copyText(
-						    observation.modelNumber,
-						    sizeof(observation.modelNumber),
-						    description.modelNumber
-						);
-						bool descriptionIdentityConflict = false;
-						if (description.udn[0] != '\0') {
-							if (observation.upnpUdn[0] == '\0') {
-								copyText(
-								    observation.upnpUdn,
-								    sizeof(observation.upnpUdn),
-								    description.udn
-								);
-							} else if (!textEqualsIgnoreCase(
-							               observation.upnpUdn,
-							               description.udn
-							           )) {
-								descriptionIdentityConflict = true;
-								stats.identityConflicts++;
-							}
-						}
-						if (!descriptionIdentityConflict) {
-							copyText(
-							    observation.serialNumber,
-							    sizeof(observation.serialNumber),
-							    description.serialNumber
+					    parsed.location,
+					    *target,
+					    targets,
+					    targetCount,
+					    interfaceInfo.ipv4,
+					    httpTimeout,
+					    httpScratch,
+					    httpScratchCapacity,
+					    control
+					);
+					state.descriptionFetches++;
+					if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
+						UpnpDescriptionInfo description{};
+						if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
+							addName(
+							    observation,
+							    ScoutNameSource::SsdpFriendlyName,
+							    description.friendlyName,
+							    now,
+							    expiresAt
 							);
+							copyText(
+							    observation.manufacturer,
+							    sizeof(observation.manufacturer),
+							    description.manufacturer
+							);
+							copyText(
+							    observation.modelName,
+							    sizeof(observation.modelName),
+							    description.modelName
+							);
+							copyText(
+							    observation.modelNumber,
+							    sizeof(observation.modelNumber),
+							    description.modelNumber
+							);
+							bool descriptionIdentityConflict = false;
+							if (description.udn[0] != '\0') {
+								if (observation.upnpUdn[0] == '\0') {
+									copyText(
+									    observation.upnpUdn,
+									    sizeof(observation.upnpUdn),
+									    description.udn
+									);
+								} else if (!textEqualsIgnoreCase(
+								               observation.upnpUdn,
+								               description.udn
+								           )) {
+									descriptionIdentityConflict = true;
+									stats.identityConflicts++;
+								}
+							}
+							if (!descriptionIdentityConflict) {
+								copyText(
+								    observation.serialNumber,
+								    sizeof(observation.serialNumber),
+								    description.serialNumber
+								);
+							}
+							appendMetadata(
+							    observation,
+							    ScoutObservationSource::Ssdp,
+							    "upnp.deviceType",
+							    description.deviceType,
+							    now,
+							    expiresAt
+							);
+						} else {
+							stats.malformedResponses++;
+							stats.descriptionErrors++;
 						}
-						appendMetadata(
-						    observation,
-						    ScoutObservationSource::Ssdp,
-						    "upnp.deviceType",
-						    description.deviceType,
-						    now,
-						    expiresAt
-						);
 					} else {
-						stats.malformedResponses++;
 						stats.descriptionErrors++;
+						switch (fetch.status) {
+						case HttpFetchStatus::Timeout:
+							stats.timeouts++;
+							break;
+						case HttpFetchStatus::TooLarge:
+						case HttpFetchStatus::UnsupportedAddress:
+							stats.dropped++;
+							break;
+						case HttpFetchStatus::InvalidResponse:
+						case HttpFetchStatus::UnsupportedEncoding:
+							stats.malformedResponses++;
+							break;
+						case HttpFetchStatus::HttpError:
+							stats.serverErrors++;
+							break;
+						case HttpFetchStatus::ResolverUnavailable:
+							stats.resolverUnavailable++;
+							break;
+						case HttpFetchStatus::NetworkError:
+							stats.errors++;
+							stats.transportErrors++;
+							break;
+						case HttpFetchStatus::Ok:
+							break;
+						}
 					}
-				} else {
-					stats.descriptionErrors++;
-					switch (fetch.status) {
-					case HttpFetchStatus::Timeout:
-						stats.timeouts++;
-						break;
-					case HttpFetchStatus::TooLarge:
-					case HttpFetchStatus::UnsupportedAddress:
-						stats.dropped++;
-						break;
-					case HttpFetchStatus::InvalidResponse:
-					case HttpFetchStatus::UnsupportedEncoding:
-						stats.malformedResponses++;
-						break;
-					case HttpFetchStatus::HttpError:
-						stats.serverErrors++;
-						break;
-					case HttpFetchStatus::ResolverUnavailable:
-						stats.resolverUnavailable++;
-						break;
-					case HttpFetchStatus::NetworkError:
-						stats.errors++;
-						stats.transportErrors++;
-						break;
-					case HttpFetchStatus::Ok:
-						break;
-					}
-				}
 				}
 			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
 			           state.descriptionFetches >= descriptionBudget) {
