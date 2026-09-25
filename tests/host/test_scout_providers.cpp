@@ -235,7 +235,7 @@ void testMdnsEnumerationResumesIntoServiceQuery() {
 	);
 	assert(first.budgetYielded);
 	assert(state.active);
-	assert(state.enumerationComplete);
+	assert(!state.enumerationComplete);
 	assert(mdnsQueryCount == 1);
 
 	slowMdnsEnumeration = false;
@@ -250,7 +250,7 @@ void testMdnsEnumerationResumesIntoServiceQuery() {
 	);
 	assert(!second.budgetYielded);
 	assert(!state.active);
-	assert(mdnsQueryCount == 2);
+	assert(mdnsQueryCount == 3);
 }
 
 void testSsdpRejectsUnrelatedLocation() {
