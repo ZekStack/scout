@@ -317,12 +317,12 @@ struct ScoutImpl {
 		if (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
 		    incoming.providers.ssdp.maxDescriptionBytes > 0) {
 			if (incoming.providers.ssdp.maxDescriptionBytes >
-			    SIZE_MAX - scout_internal::ProviderHttpHeaderBytes - 1U) {
+			    SIZE_MAX - scout_internal::ProviderHttpHeaderBytes - 2U) {
 				releaseBuffers();
 				return false;
 			}
 			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes +
-			                      scout_internal::ProviderHttpHeaderBytes + 1U;
+			                      scout_internal::ProviderHttpHeaderBytes + 2U;
 			httpScratch =
 			    Strata::allocateArray<char>(httpScratchCapacity, incoming.memory.allocation);
 			if (httpScratch == nullptr) {
