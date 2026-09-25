@@ -501,6 +501,42 @@ void testPersistentIdentityClaims() {
 	assert(details.persistentIdentityCount == 2);
 	assert(std::strcmp(details.persistentDeviceId, "cast-1") == 0);
 
+	ScoutDeviceDetails rotating{};
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        rotating,
+	        "_hap._tcp",
+	        "hap-old",
+	        ScoutObservationSource::Mdns,
+	        100,
+	        500
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        rotating,
+	        "_hap._tcp",
+	        "hap-old",
+	        ScoutObservationSource::Mdns,
+	        150,
+	        600
+	    ) == scout_internal::EnrichmentUpsertResult::Unchanged
+	);
+	assert(rotating.persistentIdentities[0].firstSeenAtMs == 100);
+	assert(rotating.persistentIdentities[0].lastSeenAtMs == 150);
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        rotating,
+	        "_hap._tcp",
+	        "hap-new",
+	        ScoutObservationSource::Mdns,
+	        200,
+	        700
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(rotating.persistentIdentities[0].firstSeenAtMs == 200);
+	assert(rotating.persistentIdentities[0].lastSeenAtMs == 200);
+
 	ScoutDeviceDetails sameHap{};
 	(void)scout_internal::upsertPersistentIdentity(
 	    sameHap,
@@ -535,6 +571,56 @@ void testPersistentIdentityClaims() {
 	);
 	assert(details.persistentIdentityCount == 1);
 	assert(std::strcmp(details.persistentIdentities[0].nameSpace, "_googlecast._tcp") == 0);
+}
+
+void testPersistentIdentityMergeTimestamps() {
+	ScoutDeviceDetails source{};
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        source,
+	        "_hap._tcp",
+	        "hap-new",
+	        ScoutObservationSource::Mdns,
+	        100,
+	        900
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        source,
+	        "_hap._tcp",
+	        "hap-new",
+	        ScoutObservationSource::Mdns,
+	        500,
+	        1200
+	    ) == scout_internal::EnrichmentUpsertResult::Unchanged
+	);
+	assert(source.persistentIdentities[0].firstSeenAtMs == 100);
+	assert(source.persistentIdentities[0].lastSeenAtMs == 500);
+
+	ScoutDeviceDetails merged{};
+	scout_internal::mergeDeviceDetails(merged, source);
+	assert(merged.persistentIdentityCount == 1);
+	assert(std::strcmp(merged.persistentIdentities[0].id, "hap-new") == 0);
+	assert(merged.persistentIdentities[0].firstSeenAtMs == 100);
+	assert(merged.persistentIdentities[0].lastSeenAtMs == 500);
+
+	ScoutDeviceDetails replaced{};
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        replaced,
+	        "_hap._tcp",
+	        "hap-old",
+	        ScoutObservationSource::Mdns,
+	        50,
+	        700
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	scout_internal::mergeDeviceDetails(replaced, source);
+	assert(replaced.persistentIdentityCount == 1);
+	assert(std::strcmp(replaced.persistentIdentities[0].id, "hap-new") == 0);
+	assert(replaced.persistentIdentities[0].firstSeenAtMs == 100);
+	assert(replaced.persistentIdentities[0].lastSeenAtMs == 500);
 }
 
 void testSsdpAndUpnpParsing() {
@@ -768,6 +854,7 @@ int main() {
 	testDnsPtrCodec();
 	testDnsACodec();
 	testPersistentIdentityClaims();
+	testPersistentIdentityMergeTimestamps();
 	testSsdpAndUpnpParsing();
 	testNbnsParsing();
 	testIdentityEvidenceAndContradictions();
