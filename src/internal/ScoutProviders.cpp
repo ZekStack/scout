@@ -207,7 +207,8 @@ bool selectDnsServer(
 		}
 	}
 
-#if defined(CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF) && CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+#if defined(CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF) &&                                         \
+    CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
 	(void)target;
 #else
 	if (netif != esp_netif_get_default_netif()) {
@@ -260,9 +261,8 @@ int openBoundUdpSocket(uint32_t localIpv4, uint32_t timeoutMs) {
 	return fd;
 }
 
-DnsPtrAnswer queryPtr(
-    const ProviderTarget &target, uint32_t timeoutMs, const ProviderRunControl *control
-) {
+DnsPtrAnswer
+queryPtr(const ProviderTarget &target, uint32_t timeoutMs, const ProviderRunControl *control) {
 	DnsPtrAnswer result{};
 	if (target.interfaceKey[0] == '\0') {
 		result.status = DnsParseStatus::NetworkError;
@@ -384,12 +384,10 @@ DnsAAnswer queryA(
 		result.status = DnsParseStatus::NetworkError;
 		return result;
 	}
-	const uint16_t transactionId = static_cast<uint16_t>(
-	    (providerNowMs() ^ target.ipv4.value ^ 0xA5A5U) & 0xFFFFU
-	);
+	const uint16_t transactionId =
+	    static_cast<uint16_t>((providerNowMs() ^ target.ipv4.value ^ 0xA5A5U) & 0xFFFFU);
 	uint8_t request[256]{};
-	const size_t requestLength =
-	    buildAQuery(transactionId, hostname, request, sizeof(request));
+	const size_t requestLength = buildAQuery(transactionId, hostname, request, sizeof(request));
 	if (requestLength == 0) {
 		close(fd);
 		result.status = DnsParseStatus::Malformed;
@@ -727,8 +725,12 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 		}
 	}
 	const char *nameEnd = colon != nullptr ? colon : hostEnd;
-	if (nameEnd == hostStart ||
-	    !copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(nameEnd - hostStart))) {
+	if (nameEnd == hostStart || !copyTextN(
+	                                out.host,
+	                                sizeof(out.host),
+	                                hostStart,
+	                                static_cast<size_t>(nameEnd - hostStart)
+	                            )) {
 		return false;
 	}
 	if (colon != nullptr) {
@@ -1344,8 +1346,7 @@ ProviderRunStats runMdnsProvider(
 		state.enumerationComplete = false;
 		state.serviceTypeCount = 0;
 		state.remainingQueries = 0;
-		const size_t serviceTypeCapacity =
-		    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
 		constexpr struct {
 			const char *service;
 			const char *proto;
@@ -1373,8 +1374,7 @@ ProviderRunStats runMdnsProvider(
 	}
 
 	if (!state.enumerationComplete) {
-		const size_t serviceTypeCapacity =
-		    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
 		uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
 		enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
 		if (enumerationTimeout == 0) {
@@ -1434,16 +1434,14 @@ ProviderRunStats runMdnsProvider(
 	}
 
 	if (state.remainingQueries == 0) {
-		state.remainingQueries =
-		    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+		state.remainingQueries = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
 	}
 	stats.plannedUnits = state.remainingQueries;
-	const size_t runQueryCount =
-	    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+	const size_t runQueryCount = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
 	const uint64_t retentionFloorMs =
 	    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
-	uint32_t baseTimeout = config.queryTimeoutMs /
-	                       static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+	uint32_t baseTimeout =
+	    config.queryTimeoutMs / static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
 	baseTimeout = std::max<uint32_t>(1, baseTimeout);
 
 	while (state.remainingQueries > 0) {

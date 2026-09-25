@@ -104,9 +104,7 @@ bool decodeName(
 
 } // namespace
 
-size_t buildAQuery(
-    uint16_t transactionId, const char *hostname, uint8_t *out, size_t capacity
-) {
+size_t buildAQuery(uint16_t transactionId, const char *hostname, uint8_t *out, size_t capacity) {
 	if (hostname == nullptr || hostname[0] == '\0' || out == nullptr || capacity < 18) {
 		return 0;
 	}
@@ -145,10 +143,7 @@ size_t buildAQuery(
 }
 
 DnsAAnswer parseAResponse(
-    const uint8_t *data,
-    size_t length,
-    uint16_t transactionId,
-    const char *expectedHostname
+    const uint8_t *data, size_t length, uint16_t transactionId, const char *expectedHostname
 ) {
 	DnsAAnswer result{};
 	if (data == nullptr || length < 12 || expectedHostname == nullptr ||

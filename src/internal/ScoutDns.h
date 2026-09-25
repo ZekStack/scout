@@ -30,14 +30,9 @@ struct DnsAAnswer {
 	uint32_t ttlSeconds = 0;
 };
 
-size_t buildAQuery(
-    uint16_t transactionId, const char *hostname, uint8_t *out, size_t capacity
-);
+size_t buildAQuery(uint16_t transactionId, const char *hostname, uint8_t *out, size_t capacity);
 DnsAAnswer parseAResponse(
-    const uint8_t *data,
-    size_t length,
-    uint16_t transactionId,
-    const char *expectedHostname
+    const uint8_t *data, size_t length, uint16_t transactionId, const char *expectedHostname
 );
 
 size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity);

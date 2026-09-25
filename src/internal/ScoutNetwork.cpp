@@ -177,9 +177,8 @@ esp_err_t requestArpTcpip(void *rawContext) {
 
 } // namespace
 
-esp_err_t collectInterfaces(
-    InterfaceSnapshot *out, size_t capacity, size_t &count, bool *truncated
-) {
+esp_err_t
+collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count, bool *truncated) {
 	CollectContext context{
 	    .out = out,
 	    .capacity = capacity,
@@ -191,16 +190,20 @@ esp_err_t collectInterfaces(
 		*truncated = result == ESP_OK && context.truncated;
 	}
 	if (result == ESP_OK && out != nullptr && count > 1) {
-		std::sort(out, out + count, [](const InterfaceSnapshot &left, const InterfaceSnapshot &right) {
-			const int keyOrder = std::strcmp(left.key, right.key);
-			if (keyOrder != 0) {
-				return keyOrder < 0;
-			}
-			if (left.ipv4 != right.ipv4) {
-				return left.ipv4 < right.ipv4;
-			}
-			return left.index < right.index;
-		});
+		std::sort(
+		    out,
+		    out + count,
+		    [](const InterfaceSnapshot &left, const InterfaceSnapshot &right) {
+			    const int keyOrder = std::strcmp(left.key, right.key);
+			    if (keyOrder != 0) {
+				    return keyOrder < 0;
+			    }
+			    if (left.ipv4 != right.ipv4) {
+				    return left.ipv4 < right.ipv4;
+			    }
+			    return left.index < right.index;
+		    }
+		);
 	}
 	return result;
 }

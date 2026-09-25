@@ -920,8 +920,7 @@ struct ScoutImpl {
 		for (size_t i = 0; i < identityRelationCountValue; ++i) {
 			const auto storedConfidence =
 			    static_cast<uint8_t>(identityRelations[i].evidence.confidence);
-			if (incomingConfidence > storedConfidence &&
-			    storedConfidence < replacementConfidence) {
+			if (incomingConfidence > storedConfidence && storedConfidence < replacementConfidence) {
 				replacement = i;
 				replacementConfidence = storedConfidence;
 			}
@@ -2174,10 +2173,7 @@ struct ScoutImpl {
 				}
 				expireEnrichmentRecords();
 				const bool continueOui = performOuiProvider(deadlineAt);
-				nextOuiAt.store(
-				    continueOui ? nowMs() : UINT64_MAX,
-				    std::memory_order_release
-				);
+				nextOuiAt.store(continueOui ? nowMs() : UINT64_MAX, std::memory_order_release);
 				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
 				if (continueOui) {
 					budgetYield = true;
@@ -2188,10 +2184,7 @@ struct ScoutImpl {
 
 			if (current >= nextOuiAt.load(std::memory_order_acquire)) {
 				const bool continueOui = performOuiProvider(deadlineAt);
-				nextOuiAt.store(
-				    continueOui ? nowMs() : UINT64_MAX,
-				    std::memory_order_release
-				);
+				nextOuiAt.store(continueOui ? nowMs() : UINT64_MAX, std::memory_order_release);
 				if (continueOui) {
 					budgetYield = true;
 					break;

@@ -394,8 +394,7 @@ EnrichmentUpsertResult upsertPersistentIdentity(
 		return changed ? EnrichmentUpsertResult::Changed : EnrichmentUpsertResult::Unchanged;
 	}
 
-	const bool replacing =
-	    details.persistentIdentityCount >= SCOUT_MAX_PERSISTENT_IDENTITIES;
+	const bool replacing = details.persistentIdentityCount >= SCOUT_MAX_PERSISTENT_IDENTITIES;
 	const size_t index =
 	    replacing ? oldestPersistentIdentityIndex(details) : details.persistentIdentityCount++;
 	auto &identity = details.persistentIdentities[index];
@@ -913,7 +912,10 @@ bool identityDetailsContradict(
 		    );
 		if (leftDetails.persistentDeviceId[0] != '\0' &&
 		    rightDetails.persistentDeviceId[0] != '\0' && persistentNamespacesMatch &&
-		    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
+		    !textEqualsIgnoreCase(
+		        leftDetails.persistentDeviceId,
+		        rightDetails.persistentDeviceId
+		    )) {
 			return true;
 		}
 	}
