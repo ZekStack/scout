@@ -22,7 +22,7 @@ The allocation policy is used for Scout-owned movable storage:
 - compact device registry;
 - lazily allocated rich `ScoutDeviceDetails` records;
 - provider target and identity tables;
-- UPnP HTTP scratch storage;
+- UPnP HTTP scratch storage (configured body limit plus a bounded 4 KiB header allowance);
 - subnet target buffer;
 - ARP lookup scratch buffers.
 
@@ -42,7 +42,9 @@ not control the application-owned task stack that calls `process()`.
 Scout also has one process-lifetime deferred-cleanup task shared by all Scout instances. Its stack
 is fixed to `PreferExternal` because it only exists to reclaim a Scout runtime that is destroyed
 from its own callback context. Its FreeRTOS control block follows Strata's normal internal-memory
-safety rule.
+safety rule. If allocation or startup of that cleanup service fails while destruction is already
+running inside Scout's callback/process frame, Scout deliberately retains the runtime for process
+lifetime rather than releasing storage that is still in use.
 
 ## Safety constraints
 
