@@ -20,6 +20,25 @@ struct DnsPtrAnswer {
 	uint32_t ttlSeconds = 0;
 };
 
+constexpr size_t DnsMaxARecords = 4;
+
+struct DnsAAnswer {
+	DnsParseStatus status = DnsParseStatus::Malformed;
+	uint32_t addresses[DnsMaxARecords] = {};
+	size_t addressCount = 0;
+	uint32_t ttlSeconds = 0;
+};
+
+size_t buildAQuery(
+    uint16_t transactionId, const char *hostname, uint8_t *out, size_t capacity
+);
+DnsAAnswer parseAResponse(
+    const uint8_t *data,
+    size_t length,
+    uint16_t transactionId,
+    const char *expectedHostname
+);
+
 size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity);
 
 DnsPtrAnswer parsePtrResponse(
