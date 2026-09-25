@@ -1,6 +1,8 @@
 #include "internal/ScoutProviders.h"
+#include "internal/ScoutNetwork.h"
 
 #include <esp_netif.h>
+#include <mdns.h>
 #include <esp_timer.h>
 
 #include <arpa/inet.h>
