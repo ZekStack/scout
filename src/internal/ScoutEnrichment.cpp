@@ -380,9 +380,13 @@ EnrichmentUpsertResult upsertPersistentIdentity(
 		if (!textEqualsIgnoreCase(identity.nameSpace, nameSpace)) {
 			continue;
 		}
-		const bool changed = !textEqualsIgnoreCase(identity.id, id) || identity.source != source;
-		if (changed) {
+		const bool idChanged = !textEqualsIgnoreCase(identity.id, id);
+		const bool sourceChanged = identity.source != source;
+		if (idChanged) {
 			copyText(identity.id, sizeof(identity.id), id);
+			identity.firstSeenAtMs = observedAtMs;
+		}
+		if (sourceChanged) {
 			identity.source = source;
 		}
 		identity.lastSeenAtMs = observedAtMs;
@@ -391,7 +395,8 @@ EnrichmentUpsertResult upsertPersistentIdentity(
 			identity.firstSeenAtMs = observedAtMs;
 		}
 		syncLegacyPersistentIdentity(details);
-		return changed ? EnrichmentUpsertResult::Changed : EnrichmentUpsertResult::Unchanged;
+		return idChanged || sourceChanged ? EnrichmentUpsertResult::Changed
+		                                  : EnrichmentUpsertResult::Unchanged;
 	}
 
 	const bool replacing = details.persistentIdentityCount >= SCOUT_MAX_PERSISTENT_IDENTITIES;
@@ -601,6 +606,22 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 			    identity.lastSeenAtMs,
 			    identity.expiresAtMs
 			);
+			const uint64_t sourceFirstSeen =
+			    identity.firstSeenAtMs != 0 ? identity.firstSeenAtMs : identity.lastSeenAtMs;
+			for (size_t targetIndex = 0; targetIndex < target.persistentIdentityCount;
+			     ++targetIndex) {
+				auto &targetIdentity = target.persistentIdentities[targetIndex];
+				if (!textEqualsIgnoreCase(targetIdentity.nameSpace, identity.nameSpace) ||
+				    !textEqualsIgnoreCase(targetIdentity.id, identity.id)) {
+					continue;
+				}
+				if (sourceFirstSeen != 0 &&
+				    (targetIdentity.firstSeenAtMs == 0 ||
+				     sourceFirstSeen < targetIdentity.firstSeenAtMs)) {
+					targetIdentity.firstSeenAtMs = sourceFirstSeen;
+				}
+				break;
+			}
 		}
 	} else {
 		const bool hadPersistentId = target.persistentDeviceId[0] != '\0';
