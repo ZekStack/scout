@@ -1841,24 +1841,21 @@ ProviderRunStats runNbnsProvider(
 	size_t interfaceCount = 0;
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
-		state.active = false;
+		state = {};
 		return stats;
 	}
 	if (interfaceCount == 0) {
-		state.active = false;
+		state = {};
 		return stats;
 	}
 
 	if (!state.active || state.targetLimit == 0 || state.runStartCursor >= targetCount ||
 	    state.targetLimit > targetCount) {
+		state.active = true;
 		state.runStartCursor = state.targetCursor % targetCount;
 		state.targetLimit = std::min(targetCount, config.maxTargetsPerRun);
 		state.interfaceCursor = 0;
-		state.targetOffset = 0;
-		state.active = state.targetLimit > 0;
-	}
-	if (!state.active) {
-		return stats;
+		state.batchOffset = 0;
 	}
 	stats.plannedUnits = state.targetLimit;
 
@@ -1867,39 +1864,54 @@ ProviderRunStats runNbnsProvider(
 			recordProviderStop(stats, control);
 			return stats;
 		}
-
 		const auto &interfaceInfo = interfaces[state.interfaceCursor];
+
+		size_t batchIndices[NbnsBatchSize]{};
+		size_t batchCount = 0;
+		size_t nextOffset = state.batchOffset;
+		while (nextOffset < state.targetLimit && batchCount < NbnsBatchSize) {
+			const size_t targetIndex = (state.runStartCursor + nextOffset) % targetCount;
+			nextOffset++;
+			if (!targetMatchesInterface(targets[targetIndex], interfaceInfo.key)) {
+				continue;
+			}
+			batchIndices[batchCount++] = targetIndex;
+		}
+		if (batchCount == 0) {
+			state.interfaceCursor++;
+			state.batchOffset = 0;
+			continue;
+		}
+
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, socketTimeout);
 		if (fd < 0) {
 			stats.errors++;
-			state.interfaceCursor++;
-			state.targetOffset = 0;
+			stats.transportErrors++;
+			state.batchOffset = nextOffset;
 			continue;
 		}
 
-		for (; state.targetOffset < state.targetLimit; ++state.targetOffset) {
+		bool sendInterrupted = false;
+		for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
 			if (providerShouldStop(control)) {
 				recordProviderStop(stats, control);
-				close(fd);
-				return stats;
+				sendInterrupted = true;
+				break;
 			}
-			const size_t i = (state.runStartCursor + state.targetOffset) % targetCount;
-			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
-				continue;
-			}
-			stats.workUnits++;
+			const size_t targetIndex = batchIndices[batchIndex];
 			uint8_t request[50]{};
 			buildNbnsNodeStatusRequest(
 			    request,
 			    sizeof(request),
-			    static_cast<uint16_t>(0x4000U + (i & 0x3FFFU))
+			    static_cast<uint16_t>(0x4000U + (targetIndex & 0x3FFFU))
 			);
 			sockaddr_in destination{};
 			destination.sin_family = AF_INET;
 			destination.sin_port = htons(137);
-			destination.sin_addr.s_addr = targets[i].ipv4.value;
+			destination.sin_addr.s_addr = targets[targetIndex].ipv4.value;
+			stats.workUnits++;
 			if (sendto(
 			        fd,
 			        request,
@@ -1909,14 +1921,19 @@ ProviderRunStats runNbnsProvider(
 			        sizeof(destination)
 			    ) < 0) {
 				stats.errors++;
+				stats.transportErrors++;
 			}
 		}
-
-		uint64_t deadline = providerNowMs() + config.responseWindowMs;
-		if (control != nullptr && control->deadlineMs != UINT64_MAX) {
-			deadline = std::min(deadline, control->deadlineMs);
+		if (sendInterrupted) {
+			close(fd);
+			return stats;
 		}
-		while (providerNowMs() < deadline && !providerShouldStop(control)) {
+
+		uint64_t responseDeadline = providerNowMs() + config.responseWindowMs;
+		if (control != nullptr && control->deadlineMs != UINT64_MAX) {
+			responseDeadline = std::min(responseDeadline, control->deadlineMs);
+		}
+		while (providerNowMs() < responseDeadline && !providerShouldStop(control)) {
 			uint8_t response[1024]{};
 			sockaddr_in sender{};
 			socklen_t senderLength = sizeof(sender);
@@ -1936,8 +1953,18 @@ ProviderRunStats runNbnsProvider(
 			if (target == nullptr) {
 				continue;
 			}
-			char name[SCOUT_NAME_SIZE] = {};
 			const size_t targetIndex = static_cast<size_t>(target - targets);
+			bool belongsToBatch = false;
+			for (size_t i = 0; i < batchCount; ++i) {
+				if (batchIndices[i] == targetIndex) {
+					belongsToBatch = true;
+					break;
+				}
+			}
+			if (!belongsToBatch) {
+				continue;
+			}
+			char name[SCOUT_NAME_SIZE] = {};
 			const uint16_t expectedTransactionId =
 			    static_cast<uint16_t>(0x4000U + (targetIndex & 0x3FFFU));
 			if (!parseNbnsNodeStatusName(
@@ -1965,11 +1992,17 @@ ProviderRunStats runNbnsProvider(
 		}
 		close(fd);
 
-		state.interfaceCursor++;
-		state.targetOffset = 0;
 		if (providerShouldStop(control)) {
 			recordProviderStop(stats, control);
+			// Do not advance. The same bounded batch is retransmitted after a budget
+			// yield so replies lost with the old socket cannot create permanent gaps.
 			return stats;
+		}
+
+		state.batchOffset = nextOffset;
+		if (state.batchOffset >= state.targetLimit) {
+			state.interfaceCursor++;
+			state.batchOffset = 0;
 		}
 	}
 
@@ -1977,7 +2010,7 @@ ProviderRunStats runNbnsProvider(
 	state.runStartCursor = state.targetCursor;
 	state.targetLimit = 0;
 	state.interfaceCursor = 0;
-	state.targetOffset = 0;
+	state.batchOffset = 0;
 	state.active = false;
 	return stats;
 }
