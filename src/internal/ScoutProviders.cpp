@@ -891,6 +891,7 @@ HttpFetchResult fetchHttpBody(
     const ProviderTarget &origin,
     const ProviderTarget *targets,
     size_t targetCount,
+    uint32_t localIpv4,
     uint32_t timeoutMs,
     char *scratch,
     size_t capacity,
@@ -959,8 +960,8 @@ HttpFetchResult fetchHttpBody(
 	sockaddr_in local{};
 	local.sin_family = AF_INET;
 	local.sin_port = 0;
-	local.sin_addr.s_addr = origin.ipv4.value;
-	if (origin.ipv4.value == 0 ||
+	local.sin_addr.s_addr = localIpv4;
+	if (localIpv4 == 0 ||
 	    bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) != 0) {
 		close(fd);
 		result.status = HttpFetchStatus::NetworkError;
@@ -1699,6 +1700,7 @@ ProviderRunStats runSsdpProvider(
 				    *target,
 				    targets,
 				    targetCount,
+				    interfaceInfo.ipv4,
 				    httpTimeout,
 				    httpScratch,
 				    httpScratchCapacity,
