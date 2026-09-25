@@ -154,6 +154,8 @@ jobs:
   build-examples:
     runs-on: [self-hosted, zekstack-ci]
     needs: [metadata, source-audit, host-tests]
+    env:
+      PLATFORMIO_CORE_DIR: ${{ runner.temp }}/platformio
     strategy:
       fail-fast: false
       matrix:
