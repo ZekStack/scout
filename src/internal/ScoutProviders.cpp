@@ -697,6 +697,7 @@ enum class HttpFetchStatus : uint8_t {
 	TooLarge,
 	UnsupportedEncoding,
 	UnsupportedAddress,
+	ResolverUnavailable,
 };
 
 struct HttpFetchResult {
@@ -706,40 +707,54 @@ struct HttpFetchResult {
 
 bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	out = {};
-	copyText(out.path, sizeof(out.path), "/");
-	if (url == nullptr || std::strncmp(url, "http://", 7) != 0) {
+	if (!copyText(out.path, sizeof(out.path), "/") || url == nullptr ||
+	    std::strncmp(url, "http://", 7) != 0) {
 		return false;
 	}
 	const char *hostStart = url + 7;
+	if (*hostStart == '\0' || *hostStart == '[' || std::strchr(hostStart, '@') != nullptr) {
+		return false;
+	}
 	const char *pathStart = std::strchr(hostStart, '/');
 	const char *hostEnd = pathStart != nullptr ? pathStart : hostStart + std::strlen(hostStart);
 	const char *colon = nullptr;
 	for (const char *cursor = hostStart; cursor < hostEnd; ++cursor) {
 		if (*cursor == ':') {
+			if (colon != nullptr) {
+				return false;
+			}
 			colon = cursor;
-			break;
 		}
 	}
+	const char *nameEnd = colon != nullptr ? colon : hostEnd;
+	if (nameEnd == hostStart ||
+	    !copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(nameEnd - hostStart))) {
+		return false;
+	}
 	if (colon != nullptr) {
-		copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(colon - hostStart));
+		if (colon + 1 == hostEnd) {
+			return false;
+		}
 		unsigned port = 0;
 		for (const char *cursor = colon + 1; cursor < hostEnd; ++cursor) {
 			if (*cursor < '0' || *cursor > '9') {
 				return false;
 			}
-			port = port * 10U + static_cast<unsigned>(*cursor - '0');
+			const unsigned digit = static_cast<unsigned>(*cursor - '0');
+			if (port > (65535U - digit) / 10U) {
+				return false;
+			}
+			port = port * 10U + digit;
 		}
-		if (port == 0 || port > 65535U) {
+		if (port == 0) {
 			return false;
 		}
 		out.port = static_cast<uint16_t>(port);
-	} else {
-		copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(hostEnd - hostStart));
 	}
-	if (pathStart != nullptr) {
-		copyText(out.path, sizeof(out.path), pathStart);
+	if (pathStart != nullptr && !copyText(out.path, sizeof(out.path), pathStart)) {
+		return false;
 	}
-	return out.host[0] != '\0';
+	return true;
 }
 
 enum class SocketIoStatus : uint8_t {
@@ -870,7 +885,14 @@ bool completeContentLengthBody(const char *data, size_t length) {
 }
 
 HttpFetchResult fetchHttpBody(
-    const char *url, uint32_t localIpv4, uint32_t timeoutMs, char *scratch, size_t capacity
+    const char *url,
+    const ProviderTarget &origin,
+    const ProviderTarget *targets,
+    size_t targetCount,
+    uint32_t timeoutMs,
+    char *scratch,
+    size_t capacity,
+    const ProviderRunControl *control
 ) {
 	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2 || timeoutMs == 0) {
@@ -881,37 +903,46 @@ HttpFetchResult fetchHttpBody(
 		return result;
 	}
 
+	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
 	sockaddr_in remote{};
 	remote.sin_family = AF_INET;
 	remote.sin_port = htons(parsed.port);
-	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) != 1) {
-		addrinfo hints{};
-		hints.ai_family = AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
-		hints.ai_protocol = IPPROTO_TCP;
-		addrinfo *addresses = nullptr;
-		if (getaddrinfo(parsed.host, nullptr, &hints, &addresses) != 0 || addresses == nullptr) {
+	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) == 1) {
+		if (!locationAddressAllowed(targets, targetCount, origin, remote.sin_addr.s_addr)) {
 			result.status = HttpFetchStatus::UnsupportedAddress;
 			return result;
 		}
+	} else {
+		const uint64_t now = providerNowMs();
+		if (now >= deadlineMs) {
+			result.status = HttpFetchStatus::Timeout;
+			return result;
+		}
+		const uint32_t dnsTimeout =
+		    static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX, deadlineMs - now));
+		const DnsAAnswer answer = queryA(origin, parsed.host, dnsTimeout, control);
+		if (answer.status != DnsParseStatus::Ok) {
+			result.status = answer.status == DnsParseStatus::ResolverUnavailable
+			                    ? HttpFetchStatus::ResolverUnavailable
+			                : answer.status == DnsParseStatus::Timeout
+			                    ? HttpFetchStatus::Timeout
+			                    : HttpFetchStatus::NetworkError;
+			return result;
+		}
 		bool resolved = false;
-		for (addrinfo *address = addresses; address != nullptr; address = address->ai_next) {
-			if (address->ai_family != AF_INET || address->ai_addr == nullptr ||
-			    address->ai_addrlen < sizeof(sockaddr_in)) {
+		for (size_t i = 0; i < answer.addressCount; ++i) {
+			if (!locationAddressAllowed(targets, targetCount, origin, answer.addresses[i])) {
 				continue;
 			}
-			remote.sin_addr = reinterpret_cast<const sockaddr_in *>(address->ai_addr)->sin_addr;
+			remote.sin_addr.s_addr = answer.addresses[i];
 			resolved = true;
 			break;
 		}
-		freeaddrinfo(addresses);
 		if (!resolved) {
 			result.status = HttpFetchStatus::UnsupportedAddress;
 			return result;
 		}
 	}
-
-	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
 	const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (fd < 0) {
 		result.status = HttpFetchStatus::NetworkError;
@@ -926,8 +957,8 @@ HttpFetchResult fetchHttpBody(
 	sockaddr_in local{};
 	local.sin_family = AF_INET;
 	local.sin_port = 0;
-	local.sin_addr.s_addr = localIpv4;
-	if (localIpv4 == 0 ||
+	local.sin_addr.s_addr = origin.ipv4.value;
+	if (origin.ipv4.value == 0 ||
 	    bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) != 0) {
 		close(fd);
 		result.status = HttpFetchStatus::NetworkError;
