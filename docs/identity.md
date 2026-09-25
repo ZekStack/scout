@@ -33,8 +33,11 @@ Confidence is deliberately conservative:
 A matching hostname by itself is useful context but not proof of one physical device.
 Generic TXT keys such as `deviceid` are retained as metadata but are not promoted to Strong
 identity evidence. Scout currently recognises protocol-specific `id` semantics for selected
-services such as Google Cast and HAP, and records the DNS-SD service/protocol namespace alongside
-the identifier. Equal identifier text from different namespaces therefore does not create a group.
+services such as Google Cast and HAP, and records each DNS-SD service/protocol namespace alongside
+the identifier. A device can retain several bounded persistent identity claims at once, so HAP and
+Google Cast identifiers do not overwrite one another. Equal identifier text from different
+namespaces therefore does not create a group, while different identifiers in the same namespace
+are treated as contradictory evidence.
 
 ## Contradictions
 
@@ -68,10 +71,11 @@ ScoutDeviceInfo (Ethernet MAC) --+
 The original records, endpoints and timestamps remain independently queryable.
 
 Only identity relations retained in the bounded relation table may participate in grouping.
-When that table is full, incoming Strong/Certain evidence may displace retained Weak/Moderate
-evidence, but Scout never forms a group from a relation that it cannot expose. If all retained
-slots already contain Strong/Certain relations, additional strong relations remain ungrouped and
-increment `identityRelationDrops`.
+When that table is full, replacement is strictly confidence-aware: Certain may displace Strong,
+Moderate or Weak; Strong may displace Moderate or Weak; Moderate may displace Weak; equal or weaker
+incoming evidence does not evict an existing relation. Scout never forms a group from a relation
+that it cannot expose. If no lower-confidence slot exists, the incoming relation remains ungrouped
+and increments `identityRelationDrops`.
 
 `SCOUT_MAX_IDENTITY_GROUP_MEMBERS` is a hard semantic bound, not a silent truncation limit.
 A merge that would exceed the bound is rejected and increments
