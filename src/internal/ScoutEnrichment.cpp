@@ -207,8 +207,11 @@ bool decodeXmlText(const char *data, size_t length, char *out, size_t outCapacit
 				char value;
 			};
 			constexpr Entity Entities[] = {
-			    {"&amp;", 5, '&'}, {"&lt;", 4, '<'}, {"&gt;", 4, '>'},
-			    {"&quot;", 6, '"'}, {"&apos;", 6, '\''},
+			    {"&amp;", 5, '&'},
+			    {"&lt;", 4, '<'},
+			    {"&gt;", 4, '>'},
+			    {"&quot;", 6, '"'},
+			    {"&apos;", 6, '\''},
 			};
 			bool matched = false;
 			for (const auto &entity : Entities) {
@@ -250,8 +253,7 @@ bool extractXmlTag(
 		}
 		if (i + 4 <= length && std::memcmp(data + i, "<!--", 4) == 0) {
 			size_t commentEnd = i + 4;
-			while (commentEnd + 3 <= length &&
-			       std::memcmp(data + commentEnd, "-->", 3) != 0) {
+			while (commentEnd + 3 <= length && std::memcmp(data + commentEnd, "-->", 3) != 0) {
 				commentEnd++;
 			}
 			if (commentEnd + 3 > length) {
@@ -329,14 +331,11 @@ bool extractXmlTag(
 			       !std::isspace(static_cast<unsigned char>(data[closeNameEnd]))) {
 				closeNameEnd++;
 			}
-			if (!xmlLocalNameEquals(
-			        data + closeNameStart, closeNameEnd - closeNameStart, tag
-			    )) {
+			if (!xmlLocalNameEquals(data + closeNameStart, closeNameEnd - closeNameStart, tag)) {
 				continue;
 			}
 			size_t closeEnd = closeNameEnd;
-			while (closeEnd < length &&
-			       std::isspace(static_cast<unsigned char>(data[closeEnd]))) {
+			while (closeEnd < length && std::isspace(static_cast<unsigned char>(data[closeEnd]))) {
 				closeEnd++;
 			}
 			if (closeEnd >= length || data[closeEnd] != '>') {
