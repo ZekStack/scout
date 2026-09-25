@@ -251,7 +251,8 @@ void testMergeDeviceInfo() {
 	source.lastConfirmedAtMs = 450;
 	source.observationSources = scoutObservationMask(ScoutObservationSource::ArpProbe);
 	source.observationCount = 3;
-	assert(upsertEndpoint(source, 1, "if1", 1, 500, true));
+	assert(upsertEndpoint(source, 1, "if1", 1, 450, true));
+	assert(!upsertEndpoint(source, 1, "if1", 1, 500, false));
 	assert(upsertEndpoint(source, 2, "if2", 2, 400));
 
 	scout_internal::mergeDeviceInfo(target, source);
@@ -261,7 +262,7 @@ void testMergeDeviceInfo() {
 	assert(target.observationCount == 5);
 	assert(target.endpointCount == 2);
 	assert(target.endpoints[0].lastSeenAtMs == 500);
-	assert(target.endpoints[0].lastConfirmedAtMs == 500);
+	assert(target.endpoints[0].lastConfirmedAtMs == 450);
 }
 
 void testEnrichmentUpsertPreferredNameAndExpiry() {
@@ -426,6 +427,114 @@ void testDnsPtrCodec() {
 	const auto malformed =
 	    scout_internal::parsePtrResponse(response, offset, transactionId, address);
 	assert(malformed.status == scout_internal::DnsParseStatus::Malformed);
+}
+
+void testDnsACodec() {
+	constexpr uint16_t TransactionId = 0xCAFE;
+	uint8_t query[256]{};
+	const size_t queryLength =
+	    scout_internal::buildAQuery(TransactionId, "device.local", query, sizeof(query));
+	assert(queryLength > 20);
+	assert(query[0] == 0xCA && query[1] == 0xFE);
+
+	uint8_t response[320]{};
+	std::memcpy(response, query, queryLength);
+	response[2] = 0x81;
+	response[3] = 0x80;
+	response[6] = 0;
+	response[7] = 1;
+	size_t offset = queryLength;
+	response[offset++] = 0xC0;
+	response[offset++] = 0x0C;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 60;
+	response[offset++] = 0;
+	response[offset++] = 4;
+	response[offset++] = 192;
+	response[offset++] = 168;
+	response[offset++] = 1;
+	response[offset++] = 42;
+
+	const auto parsed =
+	    scout_internal::parseAResponse(response, offset, TransactionId, "device.local");
+	assert(parsed.status == scout_internal::DnsParseStatus::Ok);
+	assert(parsed.addressCount == 1);
+	const uint8_t expectedBytes[4] = {192, 168, 1, 42};
+	uint32_t expected = 0;
+	std::memcpy(&expected, expectedBytes, sizeof(expected));
+	assert(parsed.addresses[0] == expected);
+	assert(parsed.ttlSeconds == 60);
+
+	const auto wrongName =
+	    scout_internal::parseAResponse(response, offset, TransactionId, "other.local");
+	assert(wrongName.status == scout_internal::DnsParseStatus::Malformed);
+}
+
+void testPersistentIdentityClaims() {
+	ScoutDeviceDetails details{};
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        details,
+	        "_hap._tcp",
+	        "hap-1",
+	        ScoutObservationSource::Mdns,
+	        100,
+	        500
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(
+	    scout_internal::upsertPersistentIdentity(
+	        details,
+	        "_googlecast._tcp",
+	        "cast-1",
+	        ScoutObservationSource::Mdns,
+	        110,
+	        800
+	    ) == scout_internal::EnrichmentUpsertResult::Changed
+	);
+	assert(details.persistentIdentityCount == 2);
+	assert(std::strcmp(details.persistentDeviceId, "cast-1") == 0);
+
+	ScoutDeviceDetails sameHap{};
+	(void)scout_internal::upsertPersistentIdentity(
+	    sameHap,
+	    "_hap._tcp",
+	    "hap-1",
+	    ScoutObservationSource::Mdns,
+	    120,
+	    500
+	);
+	ScoutIdentityRelation relation{};
+	const ScoutDeviceInfo first = deviceWithMac(10);
+	const ScoutDeviceInfo second = deviceWithMac(11);
+	assert(scout_internal::identityRelation(first, details, second, sameHap, relation));
+	assert(relation.evidence.type == ScoutIdentityEvidenceType::MdnsPersistentId);
+	assert(relation.evidence.confidence == ScoutIdentityConfidence::Strong);
+
+	ScoutDeviceDetails conflictingHap{};
+	(void)scout_internal::upsertPersistentIdentity(
+	    conflictingHap,
+	    "_hap._tcp",
+	    "hap-2",
+	    ScoutObservationSource::Mdns,
+	    120,
+	    500
+	);
+	assert(scout_internal::identityDetailsContradict(details, conflictingHap));
+
+	const ScoutDeviceChange changes = scout_internal::expireEnrichment(details, 600);
+	assert(
+	    (scoutDeviceChangeMask(changes) &
+	     scoutDeviceChangeMask(ScoutDeviceChange::Identity)) != 0
+	);
+	assert(details.persistentIdentityCount == 1);
+	assert(std::strcmp(details.persistentIdentities[0].nameSpace, "_googlecast._tcp") == 0);
 }
 
 void testSsdpAndUpnpParsing() {
@@ -657,6 +766,8 @@ int main() {
 	testMergeDeviceInfo();
 	testEnrichmentUpsertPreferredNameAndExpiry();
 	testDnsPtrCodec();
+	testDnsACodec();
+	testPersistentIdentityClaims();
 	testSsdpAndUpnpParsing();
 	testNbnsParsing();
 	testIdentityEvidenceAndContradictions();
