@@ -145,6 +145,23 @@ const ProviderTarget *findTarget(
 	return match;
 }
 
+uint64_t interfaceSetSignature(const InterfaceSnapshot *interfaces, size_t count) {
+	constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
+	constexpr uint64_t Prime = 1099511628211ULL;
+	uint64_t hash = OffsetBasis;
+	for (size_t i = 0; i < count; ++i) {
+		for (const char *key = interfaces[i].key; key != nullptr && *key != '\0'; ++key) {
+			hash ^= static_cast<unsigned char>(*key);
+			hash *= Prime;
+		}
+		for (size_t byte = 0; byte < sizeof(interfaces[i].ipv4); ++byte) {
+			hash ^= static_cast<uint8_t>(interfaces[i].ipv4 >> (byte * 8U));
+			hash *= Prime;
+		}
+	}
+	return hash;
+}
+
 uint64_t hashLocation(const char *interfaceKey, const char *location) {
 	constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
 	constexpr uint64_t Prime = 1099511628211ULL;
@@ -1575,12 +1592,20 @@ ProviderRunStats runSsdpProvider(
 		state = {};
 		return stats;
 	}
+	const uint64_t currentInterfaceSignature = interfaceSetSignature(interfaces, interfaceCount);
+	if (state.active && state.interfaceSignature != 0 &&
+	    state.interfaceSignature != currentInterfaceSignature) {
+		state.interfaceCursor = 0;
+		state.remainingInterfaces = interfaceCount;
+		stats.topologyRestarts++;
+	}
 	if (!state.active) {
 		state.active = true;
 		state.remainingInterfaces = interfaceCount;
 		state.descriptionFetches = 0;
 		state.fetchedLocationCount = 0;
 	}
+	state.interfaceSignature = currentInterfaceSignature;
 	state.interfaceCursor %= interfaceCount;
 	const size_t plannedInterfaces = std::min(state.remainingInterfaces, interfaceCount);
 	stats.plannedUnits = plannedInterfaces;
@@ -1887,6 +1912,15 @@ ProviderRunStats runNbnsProvider(
 		state = {};
 		return stats;
 	}
+
+	const uint64_t currentInterfaceSignature = interfaceSetSignature(interfaces, interfaceCount);
+	if (state.active && state.interfaceSignature != 0 &&
+	    state.interfaceSignature != currentInterfaceSignature) {
+		state.interfaceCursor = 0;
+		state.batchOffset = 0;
+		stats.topologyRestarts++;
+	}
+	state.interfaceSignature = currentInterfaceSignature;
 
 	if (!state.active || state.targetLimit == 0 || state.runStartCursor >= targetCount ||
 	    state.targetLimit > targetCount) {
