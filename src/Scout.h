@@ -558,6 +558,7 @@ struct ScoutDiagnostics {
 	uint64_t expiredDeviceCount = 0;
 	uint64_t deduplicatedDeviceCount = 0;
 	uint64_t endpointReassignmentCount = 0;
+	uint64_t endpointLimitReplacements = 0;
 	uint64_t interfaceLimitDrops = 0;
 	uint64_t providerTopologyRestarts = 0;
 	uint64_t ssdpIdentityConflicts = 0;
