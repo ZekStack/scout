@@ -37,9 +37,11 @@ int udpSendCount = 0;
 int streamSocketCount = 0;
 uint32_t lastStreamBind = 0;
 uint32_t receiveDelayMs = 2;
+uint32_t ssdpDatagramDelayMs = 0;
 bool httpDelivered = false;
 int mdnsQueryCount = 0;
 bool slowMdnsEnumeration = false;
+bool interfaceCollectionFails = false;
 size_t interfaceCountForTest = 1;
 std::vector<scout_internal::EnrichmentObservation> observations;
 
@@ -76,9 +78,11 @@ void resetHarness(Scenario nextScenario) {
 	streamSocketCount = 0;
 	lastStreamBind = 0;
 	receiveDelayMs = 2;
+	ssdpDatagramDelayMs = 0;
 	httpDelivered = false;
 	mdnsQueryCount = 0;
 	slowMdnsEnumeration = false;
+	interfaceCollectionFails = false;
 	interfaceCountForTest = 1;
 	observations.clear();
 	ethernetNetif.ipv4 = ipv4("192.168.1.1");
@@ -311,6 +315,111 @@ void testSsdpConflictKeepsUsnIdentityAndLocalBind() {
 	assert(observations[0].serialNumber[0] == '\0');
 }
 
+void testSsdpPreservesObservationWhenDescriptionBudgetExpires() {
+	resetHarness(Scenario::SsdpConflict);
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutSsdpConfig config{};
+	config.enabled = true;
+	config.responseWindowMs = 100;
+	config.httpTimeoutMs = 100;
+	config.maxDescriptionFetchesPerRun = 4;
+	char scratch[4096]{};
+	scout_internal::SsdpProviderState state{};
+
+	ssdpDatagramDelayMs = 15;
+	const scout_internal::ProviderRunControl budget{
+	    nullptr,
+	    nowMs() + 10,
+	    nullptr,
+	};
+	const auto stats = scout_internal::runSsdpProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    scratch,
+	    sizeof(scratch),
+	    &captureObservation,
+	    nullptr,
+	    &budget
+	);
+
+	assert(stats.budgetYielded);
+	assert(streamSocketCount == 0);
+	assert(observations.size() == 1);
+	assert(std::strcmp(observations[0].upnpUdn, "uuid:origin") == 0);
+}
+
+void testSsdpInterfaceFailureClearsContinuationState() {
+	resetHarness(Scenario::SsdpConflict);
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutSsdpConfig config{};
+	config.enabled = true;
+	char scratch[4096]{};
+	scout_internal::SsdpProviderState state{};
+	state.active = true;
+	state.interfaceSignature = 123;
+	state.remainingInterfaces = 1;
+	state.descriptionFetches = 1;
+	state.fetchedLocationHashes[0] = 456;
+	state.fetchedLocationCount = 1;
+
+	interfaceCollectionFails = true;
+	const auto stats = scout_internal::runSsdpProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    scratch,
+	    sizeof(scratch),
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+
+	assert(stats.errors == 1);
+	assert(stats.transportErrors == 1);
+	assert(!state.active);
+	assert(state.remainingInterfaces == 0);
+	assert(state.descriptionFetches == 0);
+	assert(state.fetchedLocationCount == 0);
+}
+
+void testSsdpTopologyRestartResetsDescriptionState() {
+	resetHarness(Scenario::SsdpConflict);
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutSsdpConfig config{};
+	config.enabled = true;
+	config.responseWindowMs = 1;
+	config.httpTimeoutMs = 100;
+	config.maxDescriptionFetchesPerRun = 1;
+	char scratch[4096]{};
+	scout_internal::SsdpProviderState state{};
+	state.active = true;
+	state.interfaceSignature = 1;
+	state.remainingInterfaces = 1;
+	state.descriptionFetches = 1;
+	state.fetchedLocationHashes[0] = 456;
+	state.fetchedLocationCount = 1;
+
+	const auto stats = scout_internal::runSsdpProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    scratch,
+	    sizeof(scratch),
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+
+	assert(stats.topologyRestarts == 1);
+	assert(streamSocketCount == 1);
+	assert(observations.size() == 1);
+	assert(stats.identityConflicts == 1);
+}
+
 void testSsdpDescriptionBudgetSurvivesContinuation() {
 	resetHarness(Scenario::SsdpBudget);
 	interfaceCountForTest = 2;
@@ -412,6 +521,9 @@ ssize_t scout_test_recvfrom(
 	if ((scenario == Scenario::SsdpUnrelated || scenario == Scenario::SsdpConflict ||
 	     scenario == Scenario::SsdpBudget) &&
 	    !datagramDelivered[fd]) {
+		if (ssdpDatagramDelayMs > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(ssdpDatagramDelayMs));
+		}
 		const std::string response = ssdpResponseForFd(fd);
 		assert(response.size() <= length);
 		std::memcpy(buffer, response.data(), response.size());
@@ -538,6 +650,10 @@ esp_err_t collectInterfaces(
 	if (truncated != nullptr) {
 		*truncated = false;
 	}
+	if (interfaceCollectionFails) {
+		count = 0;
+		return ESP_FAIL;
+	}
 	assert(capacity >= interfaceCountForTest);
 	count = interfaceCountForTest;
 	out[0] = {};
@@ -562,6 +678,9 @@ int main() {
 	testMdnsEnumerationResumesIntoServiceQuery();
 	testSsdpRejectsUnrelatedLocation();
 	testSsdpConflictKeepsUsnIdentityAndLocalBind();
+	testSsdpPreservesObservationWhenDescriptionBudgetExpires();
+	testSsdpInterfaceFailureClearsContinuationState();
+	testSsdpTopologyRestartResetsDescriptionState();
 	testSsdpDescriptionBudgetSurvivesContinuation();
 	std::cout << "Scout provider host tests passed\n";
 }
