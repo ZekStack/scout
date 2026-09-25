@@ -1110,7 +1110,8 @@ HttpFetchResult fetchHttpBody(
 			}
 		} else {
 			const size_t currentHeaderLength = static_cast<size_t>(headerEnd - scratch) + 4U;
-			if (currentHeaderLength > ProviderHttpHeaderBytes) {
+			if (currentHeaderLength > ProviderHttpHeaderBytes ||
+			    received - currentHeaderLength > bodyLimit) {
 				close(fd);
 				result.status = HttpFetchStatus::TooLarge;
 				return result;
