@@ -316,7 +316,13 @@ struct ScoutImpl {
 
 		if (incoming.providers.ssdp.enabled && incoming.providers.ssdp.fetchDeviceDescription &&
 		    incoming.providers.ssdp.maxDescriptionBytes > 0) {
-			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes;
+			if (incoming.providers.ssdp.maxDescriptionBytes >
+			    SIZE_MAX - scout_internal::ProviderHttpHeaderBytes - 1U) {
+				releaseBuffers();
+				return false;
+			}
+			httpScratchCapacity = incoming.providers.ssdp.maxDescriptionBytes +
+			                      scout_internal::ProviderHttpHeaderBytes + 1U;
 			httpScratch =
 			    Strata::allocateArray<char>(httpScratchCapacity, incoming.memory.allocation);
 			if (httpScratch == nullptr) {
@@ -684,6 +690,7 @@ struct ScoutImpl {
 				}
 
 				auto &info = devices[index].info;
+				bool endpointReplaced = false;
 				const bool endpointChanged = scout_internal::upsertEndpoint(
 				    info,
 				    interfaceSnapshot.index,
@@ -693,8 +700,12 @@ struct ScoutImpl {
 				    ipv4,
 				    observedAt,
 				    source,
-				    confirmed
+				    confirmed,
+				    &endpointReplaced
 				);
+				if (endpointReplaced) {
+					diag.endpointLimitReplacements++;
+				}
 				if (endpointChanged && !discovered) {
 					bumpTopologyLocked();
 				}
