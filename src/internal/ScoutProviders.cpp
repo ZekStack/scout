@@ -1376,12 +1376,16 @@ ProviderRunStats runMdnsProvider(
 
 	if (!state.enumerationComplete) {
 		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
-		uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
-		enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
+		const uint32_t desiredEnumerationTimeout =
+		    std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
+		const uint32_t enumerationTimeout =
+		    providerRemainingMs(control, desiredEnumerationTimeout);
 		if (enumerationTimeout == 0) {
 			recordProviderStop(stats, control);
 			return stats;
 		}
+		const bool enumerationBudgetLimited =
+		    enumerationTimeout < desiredEnumerationTimeout;
 		mdns_result_t *serviceTypes = nullptr;
 		const esp_err_t enumerationResult = mdns_query_ptr(
 		    "_services._dns-sd",
@@ -1417,6 +1421,10 @@ ProviderRunStats runMdnsProvider(
 			}
 			mdns_query_results_free(serviceTypes);
 		} else if (enumerationResult == ESP_ERR_TIMEOUT) {
+			if (enumerationBudgetLimited && providerShouldStop(control)) {
+				recordProviderStop(stats, control);
+				return stats;
+			}
 			stats.timeouts++;
 		} else {
 			stats.errors++;
