@@ -36,13 +36,14 @@ mutex. Callbacks are never invoked while the registry mutex is held.
 
 Background-task shutdown is cooperative: `deinit()` requests stop, waits for the Scout task to
 reach its external-deletion handoff, and then resets the Strata task from the caller context. In
-caller-driven mode there is no Scout scheduler task to stop, so teardown releases the runtime after
-the current caller-owned work has left the active Scout context.
+caller-driven mode there is no Scout scheduler task to stop; `deinit()` waits for any active
+`process()` call from another task to leave Scout before releasing runtime storage, and closes an
+unfinished incremental scan as cancelled.
 
-Explicit `deinit()` from the task currently executing a Scout callback is rejected with
-`ScoutStatus::Busy`. If a `Scout` object is destroyed from its own callback in background-task
-mode, ownership of the runtime is transferred to a shared Strata-owned cleanup task, which performs
-the normal cooperative shutdown and releases the runtime only after the Scout task has stopped.
+Explicit `deinit()` from Scout's currently active processing context is rejected with
+`ScoutStatus::Busy`. If a `Scout` object is destroyed from its own callback in either execution
+mode, ownership of the runtime is transferred to a shared Strata-owned cleanup task so storage is
+not released while the callback/process frame is still active.
 
 ## Network threading
 
