@@ -2300,12 +2300,19 @@ struct ScoutImpl {
 			vTaskDelay(1);
 		}
 
+		bool enterRunLoop = false;
 		{
 			ScoutLock lock(mutex);
-			if (lock) {
+			if (lock && state == ScoutState::Starting &&
+			    !stopRequested.load(std::memory_order_acquire)) {
 				state = ScoutState::Running;
 				diag.state = state;
+				enterRunLoop = true;
 			}
+		}
+		if (!enterRunLoop) {
+			(void)stopped.give();
+			suspendForever();
 		}
 
 		while (!stopRequested.load(std::memory_order_acquire)) {
@@ -3147,6 +3154,16 @@ void Scout::setOuiLookup(ScoutOuiLookupCallback callback) {
 	ScoutLock lock(_impl->mutex);
 	if (lock) {
 		_impl->ouiLookup = std::move(callback);
+	}
+}
+
+void Scout::setDnsServerLookup(ScoutDnsServerLookupCallback callback) {
+	if (!_impl) {
+		return;
+	}
+	ScoutLock lock(_impl->mutex);
+	if (lock) {
+		_impl->dnsServerLookup = std::move(callback);
 	}
 }
 
