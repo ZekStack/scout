@@ -65,6 +65,16 @@ Arduino/libraries/Strata
 
 Scout does not initialize Wi-Fi or Ethernet. Initialize the network interface in the application before expecting useful discovery results.
 
+For simultaneous interfaces on ESP-IDF builds that use global DNS, applications can provide the
+DNS server that is reachable from each interface:
+
+```cpp
+scout.setDnsServerLookup([](const char *interfaceKey, ScoutIpv4Address &server) {
+    // Fill server.value in lwIP network byte order for this interface.
+    return false;
+});
+```
+
 ```cpp
 #include <Arduino.h>
 #include <Scout.h>
@@ -134,9 +144,11 @@ In caller-driven mode, callbacks execute synchronously in the task that calls `p
 `scanNow()` remains non-blocking in both modes: it queues an immediate scan, and the selected
 execution owner performs it. Active ARP sweeps are incremental, and provider runs receive a
 cooperative cancellation/deadline context so `process()` can yield between bounded pieces of
-work and shutdown does not have to wait for complete provider rotations. ICMP, mDNS, SSDP, NBNS
-and reverse-DNS runs preserve continuation state across budget yields; unfinished work is scheduled
-immediately instead of waiting for the provider's normal interval.
+work and shutdown does not have to wait for complete provider rotations. ICMP, mDNS, SSDP, NBNS,
+reverse-DNS and application OUI work preserve continuation state across budget yields; unfinished
+work is scheduled immediately instead of waiting for the provider's normal interval. Provider
+continuations are invalidated and restarted when the MAC/endpoint topology changes, so a cursor
+never silently resumes against a reordered target list.
 
 `workBudgetMs` is a caller-driven scheduler budget, not a hard real-time guarantee for
 third-party/network APIs. The default is 1000 ms so the default SSDP response window can complete
@@ -215,7 +227,7 @@ MAC address remains the device identity. Scout never merges two different MAC ad
 
 Coverage is separate from device observations.
 
-Scout reports `CoverageLost` when no eligible interface is available or a scan of any eligible interface is skipped or fails. It reports `CoverageRestored` after every eligible interface completes a scan successfully. A skipped or failed interface gives the final `ScanCompleted` event a non-OK status. Every emitted `ScanStarted` has exactly one terminal `ScanCompleted` with the same `scanId`, including cancellation during shutdown.
+Scout reports `CoverageLost` when no eligible interface is available or a scan of any eligible interface is skipped or fails. It reports `CoverageRestored` after every eligible interface completes a scan successfully. If more than Scout's bounded interface capacity are eligible, the known subset may still be scanned but the sweep is marked incomplete and cannot restore coverage. A skipped, failed, or truncated interface set gives the final `ScanCompleted` event a non-OK status. Every emitted `ScanStarted` has exactly one terminal `ScanCompleted` with the same `scanId`, including cancellation during shutdown.
 
 A presence layer built on Scout should suppress offline inference while coverage is unavailable and revalidate known devices after coverage returns.
 
