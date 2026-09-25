@@ -76,6 +76,7 @@ struct ProviderRunControl {
 
 constexpr size_t ProviderMaxMdnsServiceTypes = 64;
 constexpr size_t ProviderMaxSsdpDescriptionFetches = 16;
+constexpr size_t ProviderHttpHeaderBytes = 4U * 1024U;
 
 struct ProviderMdnsServiceType {
 	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
