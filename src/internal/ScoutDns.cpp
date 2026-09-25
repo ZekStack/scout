@@ -108,16 +108,23 @@ size_t buildAQuery(uint16_t transactionId, const char *hostname, uint8_t *out, s
 	if (hostname == nullptr || hostname[0] == '\0' || out == nullptr || capacity < 18) {
 		return 0;
 	}
+	size_t hostnameLength = std::strlen(hostname);
+	if (hostnameLength > 0 && hostname[hostnameLength - 1] == '.') {
+		hostnameLength--;
+	}
+	if (hostnameLength == 0) {
+		return 0;
+	}
 	std::memset(out, 0, capacity);
 	out[0] = static_cast<uint8_t>(transactionId >> 8U);
 	out[1] = static_cast<uint8_t>(transactionId & 0xFFU);
 	out[2] = 0x01;
 	out[5] = 0x01;
-
 	size_t offset = 12;
 	const char *labelStart = hostname;
-	for (const char *cursor = hostname;; ++cursor) {
-		if (*cursor != '.' && *cursor != '\0') {
+	const char *end = hostname + hostnameLength;
+	for (const char *cursor = hostname; cursor <= end; ++cursor) {
+		if (cursor != end && *cursor != '.') {
 			continue;
 		}
 		const size_t labelLength = static_cast<size_t>(cursor - labelStart);
@@ -129,7 +136,7 @@ size_t buildAQuery(uint16_t transactionId, const char *hostname, uint8_t *out, s
 		if (!appendLabel(out, capacity, offset, label)) {
 			return 0;
 		}
-		if (*cursor == '\0') {
+		if (cursor == end) {
 			break;
 		}
 		labelStart = cursor + 1;
@@ -167,11 +174,21 @@ DnsAAnswer parseAResponse(
 		return result;
 	}
 
+	char expected[256]{};
+	size_t expectedLength = std::strlen(expectedHostname);
+	if (expectedLength > 0 && expectedHostname[expectedLength - 1] == '.') {
+		expectedLength--;
+	}
+	if (expectedLength == 0 || expectedLength >= sizeof(expected)) {
+		return result;
+	}
+	std::memcpy(expected, expectedHostname, expectedLength);
+
 	size_t offset = 12;
 	char name[256]{};
 	size_t consumed = 0;
 	if (!decodeName(data, length, offset, name, sizeof(name), consumed, length) ||
-	    offset + consumed + 4 > length || strcasecmp(name, expectedHostname) != 0) {
+	    offset + consumed + 4 > length || strcasecmp(name, expected) != 0) {
 		return result;
 	}
 	if (read16(data + offset + consumed) != 1 || read16(data + offset + consumed + 2) != 1) {
@@ -179,8 +196,23 @@ DnsAAnswer parseAResponse(
 	}
 	offset += consumed + 4;
 
+	struct ARecord {
+		char owner[256] = {};
+		uint32_t address = 0;
+		uint32_t ttl = 0;
+	};
+	struct CnameRecord {
+		char owner[256] = {};
+		char target[256] = {};
+		uint32_t ttl = 0;
+	};
+	constexpr size_t MaxCnameRecords = 8;
+	ARecord aRecords[DnsMaxARecords]{};
+	CnameRecord cnameRecords[MaxCnameRecords]{};
+	size_t aCount = 0;
+	size_t cnameCount = 0;
+
 	const uint16_t answers = read16(data + 6);
-	uint32_t minTtl = UINT32_MAX;
 	for (uint16_t i = 0; i < answers; ++i) {
 		consumed = 0;
 		if (!decodeName(data, length, offset, name, sizeof(name), consumed, length) ||
@@ -196,21 +228,87 @@ DnsAAnswer parseAResponse(
 		if (offset + rdLength > length) {
 			return DnsAAnswer{};
 		}
-		if (type == 1 && klass == 1 && rdLength == 4 && result.addressCount < DnsMaxARecords) {
-			uint32_t address = 0;
-			std::memcpy(&address, data + offset, sizeof(address));
-			result.addresses[result.addressCount++] = address;
-			minTtl = std::min(minTtl, ttl);
+		if (klass == 1 && type == 1 && rdLength == 4 && aCount < DnsMaxARecords) {
+			auto &record = aRecords[aCount++];
+			std::strncpy(record.owner, name, sizeof(record.owner) - 1);
+			std::memcpy(&record.address, data + offset, sizeof(record.address));
+			record.ttl = ttl;
+		} else if (klass == 1 && type == 5) {
+			if (cnameCount >= MaxCnameRecords) {
+				return DnsAAnswer{};
+			}
+			auto &record = cnameRecords[cnameCount];
+			std::strncpy(record.owner, name, sizeof(record.owner) - 1);
+			size_t cnameConsumed = 0;
+			if (!decodeName(
+			        data,
+			        length,
+			        offset,
+			        record.target,
+			        sizeof(record.target),
+			        cnameConsumed,
+			        offset + rdLength
+			    ) ||
+			    cnameConsumed > rdLength || record.target[0] == '\0') {
+				return DnsAAnswer{};
+			}
+			record.ttl = ttl;
+			cnameCount++;
 		}
 		offset += rdLength;
 	}
-	if (result.addressCount == 0) {
-		result.status = DnsParseStatus::NoRecord;
-		return result;
+
+	char current[256]{};
+	std::strncpy(current, expected, sizeof(current) - 1);
+	char visited[MaxCnameRecords + 1][256]{};
+	size_t visitedCount = 0;
+	uint32_t chainTtl = UINT32_MAX;
+	for (size_t hop = 0; hop <= MaxCnameRecords; ++hop) {
+		for (size_t i = 0; i < visitedCount; ++i) {
+			if (strcasecmp(visited[i], current) == 0) {
+				return DnsAAnswer{};
+			}
+		}
+		std::strncpy(visited[visitedCount++], current, sizeof(visited[0]) - 1);
+
+		uint32_t answerTtl = UINT32_MAX;
+		for (size_t i = 0; i < aCount; ++i) {
+			if (strcasecmp(aRecords[i].owner, current) != 0) {
+				continue;
+			}
+			if (result.addressCount < DnsMaxARecords) {
+				result.addresses[result.addressCount++] = aRecords[i].address;
+			}
+			answerTtl = std::min(answerTtl, aRecords[i].ttl);
+		}
+		if (result.addressCount > 0) {
+			result.status = DnsParseStatus::Ok;
+			result.ttlSeconds = std::min(chainTtl, answerTtl);
+			if (result.ttlSeconds == UINT32_MAX) {
+				result.ttlSeconds = 0;
+			}
+			return result;
+		}
+
+		const CnameRecord *alias = nullptr;
+		for (size_t i = 0; i < cnameCount; ++i) {
+			if (strcasecmp(cnameRecords[i].owner, current) != 0) {
+				continue;
+			}
+			if (alias != nullptr && strcasecmp(alias->target, cnameRecords[i].target) != 0) {
+				return DnsAAnswer{};
+			}
+			alias = &cnameRecords[i];
+		}
+		if (alias == nullptr) {
+			result.status = DnsParseStatus::NoRecord;
+			return result;
+		}
+		chainTtl = std::min(chainTtl, alias->ttl);
+		std::strncpy(current, alias->target, sizeof(current) - 1);
+		current[sizeof(current) - 1] = '\0';
 	}
-	result.status = DnsParseStatus::Ok;
-	result.ttlSeconds = minTtl == UINT32_MAX ? 0 : minTtl;
-	return result;
+	return DnsAAnswer{};
 }
 
 size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity) {

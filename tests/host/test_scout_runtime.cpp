@@ -326,6 +326,33 @@ void testRegistryAgingAndDeduplication() {
 	runtime.releaseBuffers();
 }
 
+void testEndpointReplacementDiagnostics() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+	const uint8_t deviceMac[6] = {0x02, 0x31, 0x32, 0x33, 0x34, 0x35};
+
+	for (size_t i = 0; i < SCOUT_MAX_ENDPOINTS_PER_DEVICE + 1; ++i) {
+		interfaceSnapshot.index = static_cast<uint8_t>(i + 1);
+		const uint32_t address = lwip_htonl(0xC0A80101U + static_cast<uint32_t>(i));
+		runtime.observe(
+		    interfaceSnapshot,
+		    address,
+		    deviceMac,
+		    ScoutObservationSource::ArpCache,
+		    false,
+		    1
+		);
+	}
+	assert(runtime.deviceCount == 1);
+	assert(runtime.devices[0].info.endpointCount == SCOUT_MAX_ENDPOINTS_PER_DEVICE);
+	assert(runtime.diag.endpointLimitReplacements == 1);
+	runtime.releaseBuffers();
+}
+
 void testLazyDetailsAllocation() {
 	ScoutImpl runtime;
 	assert(runtime.allocateBuffers(runtime.config));
@@ -1281,6 +1308,7 @@ int main() {
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
+	testEndpointReplacementDiagnostics();
 	testLazyDetailsAllocation();
 	testScalarEnrichmentSourcePrecedence();
 	testStaleProviderObservationAndDiagnostics();

@@ -110,8 +110,12 @@ bool upsertEndpoint(
     uint32_t ipv4,
     uint64_t observedAt,
     ScoutObservationSource source,
-    bool confirmed
+    bool confirmed,
+    bool *replaced
 ) {
+	if (replaced != nullptr) {
+		*replaced = false;
+	}
 	for (size_t i = 0; i < device.endpointCount; ++i) {
 		auto &endpoint = device.endpoints[i];
 		if (endpoint.interfaceIndex != interfaceIndex || endpoint.ipv4.value != ipv4) {
@@ -141,6 +145,9 @@ bool upsertEndpoint(
 
 	size_t targetIndex = device.endpointCount;
 	if (targetIndex >= SCOUT_MAX_ENDPOINTS_PER_DEVICE) {
+		if (replaced != nullptr) {
+			*replaced = true;
+		}
 		targetIndex = 0;
 		for (size_t i = 1; i < device.endpointCount; ++i) {
 			if (device.endpoints[i].lastSeenAtMs < device.endpoints[targetIndex].lastSeenAtMs) {

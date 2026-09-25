@@ -164,32 +164,186 @@ const char *findHeader(const char *data, size_t length, const char *name, size_t
 	return nullptr;
 }
 
+bool xmlLocalNameEquals(const char *name, size_t length, const char *tag) {
+	if (name == nullptr || tag == nullptr || length == 0) {
+		return false;
+	}
+	const char *local = name;
+	size_t localLength = length;
+	for (size_t i = 0; i < length; ++i) {
+		if (name[i] == ':') {
+			local = name + i + 1;
+			localLength = length - i - 1;
+		}
+	}
+	const size_t tagLength = std::strlen(tag);
+	return localLength == tagLength && std::memcmp(local, tag, tagLength) == 0;
+}
+
+bool decodeXmlText(const char *data, size_t length, char *out, size_t outCapacity) {
+	if (data == nullptr || out == nullptr || outCapacity == 0) {
+		return false;
+	}
+	size_t start = 0;
+	while (start < length && std::isspace(static_cast<unsigned char>(data[start]))) {
+		start++;
+	}
+	size_t end = length;
+	while (end > start && std::isspace(static_cast<unsigned char>(data[end - 1]))) {
+		end--;
+	}
+	size_t written = 0;
+	for (size_t i = start; i < end;) {
+		char value = data[i];
+		size_t consumed = 1;
+		if (value == '<') {
+			out[0] = '\0';
+			return false;
+		}
+		if (value == '&') {
+			struct Entity {
+				const char *text;
+				size_t length;
+				char value;
+			};
+			constexpr Entity Entities[] = {
+			    {"&amp;", 5, '&'},
+			    {"&lt;", 4, '<'},
+			    {"&gt;", 4, '>'},
+			    {"&quot;", 6, '"'},
+			    {"&apos;", 6, '\''},
+			};
+			bool matched = false;
+			for (const auto &entity : Entities) {
+				if (i + entity.length <= end &&
+				    std::memcmp(data + i, entity.text, entity.length) == 0) {
+					value = entity.value;
+					consumed = entity.length;
+					matched = true;
+					break;
+				}
+			}
+			if (!matched) {
+				out[0] = '\0';
+				return false;
+			}
+		}
+		if (written + 1 >= outCapacity) {
+			out[0] = '\0';
+			return false;
+		}
+		out[written++] = value;
+		i += consumed;
+	}
+	out[written] = '\0';
+	return true;
+}
+
 bool extractXmlTag(
     const char *data, size_t length, const char *tag, char *out, size_t outCapacity
 ) {
 	if (data == nullptr || tag == nullptr || out == nullptr || outCapacity == 0) {
 		return false;
 	}
-	char open[64] = {};
-	char close[64] = {};
-	if (std::strlen(tag) + 3 >= sizeof(open)) {
-		return false;
-	}
-	std::snprintf(open, sizeof(open), "<%s>", tag);
-	std::snprintf(close, sizeof(close), "</%s>", tag);
-	const size_t openLength = std::strlen(open);
-	const size_t closeLength = std::strlen(close);
-
-	for (size_t i = 0; i + openLength < length; ++i) {
-		if (std::memcmp(data + i, open, openLength) != 0) {
+	out[0] = '\0';
+	for (size_t i = 0; i < length;) {
+		if (data[i] != '<') {
+			i++;
 			continue;
 		}
-		const size_t valueStart = i + openLength;
-		for (size_t j = valueStart; j + closeLength <= length; ++j) {
-			if (std::memcmp(data + j, close, closeLength) == 0) {
-				return copyTextN(out, outCapacity, data + valueStart, j - valueStart);
+		if (i + 4 <= length && std::memcmp(data + i, "<!--", 4) == 0) {
+			size_t commentEnd = i + 4;
+			while (commentEnd + 3 <= length && std::memcmp(data + commentEnd, "-->", 3) != 0) {
+				commentEnd++;
+			}
+			if (commentEnd + 3 > length) {
+				return false;
+			}
+			i = commentEnd + 3;
+			continue;
+		}
+		if (i + 2 <= length && (data[i + 1] == '?' || data[i + 1] == '!')) {
+			size_t cursor = i + 2;
+			for (; cursor < length; ++cursor) {
+				if (data[i + 1] == '?' && cursor + 1 < length && data[cursor] == '?' &&
+				    data[cursor + 1] == '>') {
+					cursor++;
+					break;
+				}
+				if (data[i + 1] == '!' && data[cursor] == '>') {
+					break;
+				}
+			}
+			if (cursor >= length) {
+				return false;
+			}
+			i = cursor + 1;
+			continue;
+		}
+		if (i + 1 >= length || data[i + 1] == '/') {
+			i++;
+			continue;
+		}
+		const size_t nameStart = i + 1;
+		size_t nameEnd = nameStart;
+		while (nameEnd < length && data[nameEnd] != '>' && data[nameEnd] != '/' &&
+		       !std::isspace(static_cast<unsigned char>(data[nameEnd]))) {
+			nameEnd++;
+		}
+		if (nameEnd == nameStart) {
+			return false;
+		}
+		bool quoted = false;
+		char quote = '\0';
+		size_t openEnd = nameEnd;
+		for (; openEnd < length; ++openEnd) {
+			const char ch = data[openEnd];
+			if (quoted) {
+				if (ch == quote) {
+					quoted = false;
+				}
+				continue;
+			}
+			if (ch == '\'' || ch == '"') {
+				quoted = true;
+				quote = ch;
+				continue;
+			}
+			if (ch == '>') {
+				break;
 			}
 		}
+		if (openEnd >= length || quoted) {
+			return false;
+		}
+		if (!xmlLocalNameEquals(data + nameStart, nameEnd - nameStart, tag)) {
+			i = openEnd + 1;
+			continue;
+		}
+		const size_t valueStart = openEnd + 1;
+		for (size_t close = valueStart; close + 3 < length; ++close) {
+			if (data[close] != '<' || data[close + 1] != '/') {
+				continue;
+			}
+			const size_t closeNameStart = close + 2;
+			size_t closeNameEnd = closeNameStart;
+			while (closeNameEnd < length && data[closeNameEnd] != '>' &&
+			       !std::isspace(static_cast<unsigned char>(data[closeNameEnd]))) {
+				closeNameEnd++;
+			}
+			if (!xmlLocalNameEquals(data + closeNameStart, closeNameEnd - closeNameStart, tag)) {
+				continue;
+			}
+			size_t closeEnd = closeNameEnd;
+			while (closeEnd < length && std::isspace(static_cast<unsigned char>(data[closeEnd]))) {
+				closeEnd++;
+			}
+			if (closeEnd >= length || data[closeEnd] != '>') {
+				return false;
+			}
+			return decodeXmlText(data + valueStart, close - valueStart, out, outCapacity);
+		}
+		return false;
 	}
 	return false;
 }

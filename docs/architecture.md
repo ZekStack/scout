@@ -43,7 +43,9 @@ unfinished incremental scan as cancelled.
 Explicit `deinit()` from Scout's currently active processing context is rejected with
 `ScoutStatus::Busy`. If a `Scout` object is destroyed from its own callback in either execution
 mode, ownership of the runtime is transferred to a shared Strata-owned cleanup task so storage is
-not released while the callback/process frame is still active.
+not released while the callback/process frame is still active. If the cleanup service cannot be
+allocated or started under extreme memory pressure, Scout intentionally retains that runtime for
+the remainder of the process rather than risking a use-after-free from the active callback frame.
 
 ## Network threading
 

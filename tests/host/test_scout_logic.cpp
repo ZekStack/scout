@@ -22,7 +22,8 @@ bool upsertEndpoint(
     const char *name,
     uint32_t address,
     uint64_t observedAt,
-    bool confirmed = false
+    bool confirmed = false,
+    bool *replaced = nullptr
 ) {
 	char key[SCOUT_INTERFACE_KEY_SIZE] = {};
 	std::snprintf(key, sizeof(key), "TEST_%u", static_cast<unsigned>(interfaceIndex));
@@ -35,7 +36,8 @@ bool upsertEndpoint(
 	    address,
 	    observedAt,
 	    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache,
-	    confirmed
+	    confirmed,
+	    replaced
 	);
 }
 
@@ -200,7 +202,9 @@ void testEndpointInsertRefreshAndCapacity() {
 	}
 	assert(device.endpointCount == SCOUT_MAX_ENDPOINTS_PER_DEVICE);
 
-	assert(upsertEndpoint(device, 42, "replace", 42, 1000));
+	bool replaced = false;
+	assert(upsertEndpoint(device, 42, "replace", 42, 1000, false, &replaced));
+	assert(replaced);
 	assert(device.endpointCount == SCOUT_MAX_ENDPOINTS_PER_DEVICE);
 	bool foundReplacement = false;
 	bool foundOldest = false;
@@ -474,6 +478,76 @@ void testDnsACodec() {
 	const auto wrongName =
 	    scout_internal::parseAResponse(response, offset, TransactionId, "other.local");
 	assert(wrongName.status == scout_internal::DnsParseStatus::Malformed);
+
+	uint8_t trailingDotQuery[256]{};
+	assert(
+	    scout_internal::buildAQuery(
+	        TransactionId, "device.local.", trailingDotQuery, sizeof(trailingDotQuery)
+	    ) == queryLength
+	);
+	assert(std::memcmp(query, trailingDotQuery, queryLength) == 0);
+	assert(scout_internal::buildAQuery(TransactionId, "bad..local", query, sizeof(query)) == 0);
+
+	uint8_t cnameResponse[384]{};
+	std::memcpy(cnameResponse, trailingDotQuery, queryLength);
+	cnameResponse[2] = 0x81;
+	cnameResponse[3] = 0x80;
+	cnameResponse[6] = 0;
+	cnameResponse[7] = 3;
+	offset = queryLength;
+	auto append16 = [&](uint16_t value) {
+		cnameResponse[offset++] = static_cast<uint8_t>(value >> 8U);
+		cnameResponse[offset++] = static_cast<uint8_t>(value);
+	};
+	auto append32 = [&](uint32_t value) {
+		cnameResponse[offset++] = static_cast<uint8_t>(value >> 24U);
+		cnameResponse[offset++] = static_cast<uint8_t>(value >> 16U);
+		cnameResponse[offset++] = static_cast<uint8_t>(value >> 8U);
+		cnameResponse[offset++] = static_cast<uint8_t>(value);
+	};
+	auto appendAliasName = [&](const char *label) {
+		const size_t labelLength = std::strlen(label);
+		cnameResponse[offset++] = static_cast<uint8_t>(labelLength);
+		std::memcpy(cnameResponse + offset, label, labelLength);
+		offset += labelLength;
+		cnameResponse[offset++] = 0xC0;
+		cnameResponse[offset++] = 0x13;
+	};
+	auto appendHeader = [&](uint16_t type, uint32_t ttl, uint16_t rdLength) {
+		append16(type);
+		append16(1);
+		append32(ttl);
+		append16(rdLength);
+	};
+
+	cnameResponse[offset++] = 0xC0;
+	cnameResponse[offset++] = 0x0C;
+	appendHeader(5, 120, 8);
+	appendAliasName("alias");
+
+	appendAliasName("other");
+	appendHeader(1, 5, 4);
+	cnameResponse[offset++] = 10;
+	cnameResponse[offset++] = 0;
+	cnameResponse[offset++] = 0;
+	cnameResponse[offset++] = 9;
+
+	appendAliasName("alias");
+	appendHeader(1, 60, 4);
+	cnameResponse[offset++] = 192;
+	cnameResponse[offset++] = 168;
+	cnameResponse[offset++] = 1;
+	cnameResponse[offset++] = 43;
+
+	const auto aliased =
+	    scout_internal::parseAResponse(cnameResponse, offset, TransactionId, "device.local.");
+	assert(aliased.status == scout_internal::DnsParseStatus::Ok);
+	assert(aliased.addressCount == 1);
+	const uint8_t aliasBytes[4] = {192, 168, 1, 43};
+	uint32_t aliasAddress = 0;
+	std::memcpy(&aliasAddress, aliasBytes, sizeof(aliasAddress));
+	assert(aliased.addresses[0] == aliasAddress);
+	assert(aliased.ttlSeconds == 60);
 }
 
 void testPersistentIdentityClaims() {
@@ -679,6 +753,26 @@ void testSsdpAndUpnpParsing() {
 	assert(std::strcmp(description.friendlyName, "Living Room TV") == 0);
 	assert(std::strcmp(description.manufacturer, "Example Corp") == 0);
 	assert(std::strcmp(description.udn, "uuid:1234-5678") == 0);
+
+	constexpr char FlexibleXml[] =
+	    "<?xml version=\"1.0\"?><root><device>"
+	    "<upnp:friendlyName xml:lang=\"en\">  Tom &amp; Jerry TV  </upnp:friendlyName>"
+	    "<u:manufacturer data-source=\"device\"> Example &lt;Corp&gt; </u:manufacturer>"
+	    "<u:modelName>Model &quot;X&quot;</u:modelName>"
+	    "<u:UDN> uuid:namespace-device </u:UDN>"
+	    "</device></root>";
+	assert(scout_internal::parseUpnpDescription(
+	    FlexibleXml, sizeof(FlexibleXml) - 1, description
+	));
+	assert(std::strcmp(description.friendlyName, "Tom & Jerry TV") == 0);
+	assert(std::strcmp(description.manufacturer, "Example <Corp>") == 0);
+	assert(std::strcmp(description.modelName, "Model \"X\"") == 0);
+	assert(std::strcmp(description.udn, "uuid:namespace-device") == 0);
+
+	constexpr char MalformedXml[] = "<root><friendlyName>Broken</root>";
+	assert(!scout_internal::parseUpnpDescription(
+	    MalformedXml, sizeof(MalformedXml) - 1, description
+	));
 }
 
 void testNbnsParsing() {
