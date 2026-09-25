@@ -1541,13 +1541,14 @@ ProviderRunStats runSsdpProvider(
 		state = {};
 		return stats;
 	}
-	state.interfaceCursor %= interfaceCount;
-	const size_t plannedInterfaces = state.remainingInterfaces == 0
-	                                     ? interfaceCount
-	                                     : std::min(state.remainingInterfaces, interfaceCount);
-	if (state.remainingInterfaces == 0) {
-		state.remainingInterfaces = plannedInterfaces;
+	if (!state.active) {
+		state.active = true;
+		state.remainingInterfaces = interfaceCount;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
 	}
+	state.interfaceCursor %= interfaceCount;
+	const size_t plannedInterfaces = std::min(state.remainingInterfaces, interfaceCount);
 	stats.plannedUnits = plannedInterfaces;
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
@@ -1559,34 +1560,20 @@ ProviderRunStats runSsdpProvider(
 	destination.sin_port = htons(1900);
 	inet_pton(AF_INET, "239.255.255.250", &destination.sin_addr);
 
-	size_t descriptionFetches = 0;
-	char fetchedLocations[MaxSsdpDescriptionFetches][256]{};
-	char fetchedLocationInterfaces[MaxSsdpDescriptionFetches][SCOUT_INTERFACE_KEY_SIZE]{};
-	size_t fetchedLocationCount = 0;
 	auto rememberLocation = [&](const char *interfaceKey, const char *location) {
 		if (location == nullptr || location[0] == '\0') {
 			return false;
 		}
-		for (size_t i = 0; i < fetchedLocationCount; ++i) {
-			if (textEqualsIgnoreCase(fetchedLocations[i], location) &&
-			    textEqualsIgnoreCase(fetchedLocationInterfaces[i], interfaceKey)) {
+		const uint64_t hash = hashLocation(interfaceKey, location);
+		for (size_t i = 0; i < state.fetchedLocationCount; ++i) {
+			if (state.fetchedLocationHashes[i] == hash) {
 				return false;
 			}
 		}
-		if (fetchedLocationCount >= MaxSsdpDescriptionFetches) {
+		if (state.fetchedLocationCount >= MaxSsdpDescriptionFetches) {
 			return false;
 		}
-		copyText(
-		    fetchedLocations[fetchedLocationCount],
-		    sizeof(fetchedLocations[fetchedLocationCount]),
-		    location
-		);
-		copyText(
-		    fetchedLocationInterfaces[fetchedLocationCount],
-		    sizeof(fetchedLocationInterfaces[fetchedLocationCount]),
-		    interfaceKey
-		);
-		fetchedLocationCount++;
+		state.fetchedLocationHashes[state.fetchedLocationCount++] = hash;
 		return true;
 	};
 	size_t processedInterfaces = 0;
@@ -1704,19 +1691,22 @@ ProviderRunStats runSsdpProvider(
 			const bool newDescriptionLocation =
 			    parsed.location[0] != '\0' && rememberLocation(interfaceInfo.key, parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
-			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
+			    httpScratchCapacity > 1 && state.descriptionFetches < descriptionBudget) {
 				const uint32_t httpTimeout = providerRemainingMs(control, config.httpTimeoutMs);
 				if (httpTimeout == 0) {
 					break;
 				}
 				const HttpFetchResult fetch = fetchHttpBody(
 				    parsed.location,
-				    interfaceInfo.ipv4,
+				    *target,
+				    targets,
+				    targetCount,
 				    httpTimeout,
 				    httpScratch,
-				    httpScratchCapacity
+				    httpScratchCapacity,
+				    control
 				);
-				descriptionFetches++;
+				state.descriptionFetches++;
 				if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
 					UpnpDescriptionInfo description{};
 					if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
@@ -1748,11 +1738,18 @@ ProviderRunStats runSsdpProvider(
 						    description.serialNumber
 						);
 						if (description.udn[0] != '\0') {
-							copyText(
-							    observation.upnpUdn,
-							    sizeof(observation.upnpUdn),
-							    description.udn
-							);
+							if (observation.upnpUdn[0] == '\0') {
+								copyText(
+								    observation.upnpUdn,
+								    sizeof(observation.upnpUdn),
+								    description.udn
+								);
+							} else if (!textEqualsIgnoreCase(
+							               observation.upnpUdn,
+							               description.udn
+							           )) {
+								stats.identityConflicts++;
+							}
 						}
 						appendMetadata(
 						    observation,
@@ -1783,6 +1780,9 @@ ProviderRunStats runSsdpProvider(
 					case HttpFetchStatus::HttpError:
 						stats.serverErrors++;
 						break;
+					case HttpFetchStatus::ResolverUnavailable:
+						stats.resolverUnavailable++;
+						break;
 					case HttpFetchStatus::NetworkError:
 						stats.errors++;
 						stats.transportErrors++;
@@ -1792,7 +1792,7 @@ ProviderRunStats runSsdpProvider(
 					}
 				}
 			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
-			           descriptionFetches >= descriptionBudget) {
+			           state.descriptionFetches >= descriptionBudget) {
 				stats.dropped++;
 			}
 
@@ -1808,8 +1808,12 @@ ProviderRunStats runSsdpProvider(
 	state.remainingInterfaces = processedInterfaces >= state.remainingInterfaces
 	                                ? 0
 	                                : state.remainingInterfaces - processedInterfaces;
-	if (!stats.budgetYielded || stats.cancelled) {
-		state.remainingInterfaces = 0;
+	if (stats.cancelled) {
+		state = {};
+	} else if (!stats.budgetYielded && state.remainingInterfaces == 0) {
+		state.active = false;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
 	}
 	return stats;
 }
