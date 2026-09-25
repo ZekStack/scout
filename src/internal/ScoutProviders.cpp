@@ -1422,14 +1422,12 @@ ProviderRunStats runMdnsProvider(
 		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
 		const uint32_t desiredEnumerationTimeout =
 		    std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
-		const uint32_t enumerationTimeout =
-		    providerRemainingMs(control, desiredEnumerationTimeout);
+		const uint32_t enumerationTimeout = providerRemainingMs(control, desiredEnumerationTimeout);
 		if (enumerationTimeout == 0) {
 			recordProviderStop(stats, control);
 			return stats;
 		}
-		const bool enumerationBudgetLimited =
-		    enumerationTimeout < desiredEnumerationTimeout;
+		const bool enumerationBudgetLimited = enumerationTimeout < desiredEnumerationTimeout;
 		mdns_result_t *serviceTypes = nullptr;
 		const esp_err_t enumerationResult = mdns_query_ptr(
 		    "_services._dns-sd",
