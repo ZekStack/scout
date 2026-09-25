@@ -2326,6 +2326,7 @@ struct ScoutImpl {
 		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX,
 		    std::memory_order_release
 		);
+		nextOuiAt.store(UINT64_MAX, std::memory_order_release);
 		nextEnrichmentExpiryAt.store(startedAt + EnrichmentExpiryPollMs, std::memory_order_release);
 	}
 
@@ -2351,6 +2352,7 @@ struct ScoutImpl {
 		     nextSsdpAt.load(std::memory_order_acquire),
 		     nextNbnsAt.load(std::memory_order_acquire),
 		     nextReverseDnsAt.load(std::memory_order_acquire),
+		     nextOuiAt.load(std::memory_order_acquire),
 		     nextEnrichmentExpiryAt.load(std::memory_order_acquire)}
 		);
 		if (nextWorkAt == UINT64_MAX) {
@@ -2407,8 +2409,29 @@ struct ScoutImpl {
 					break;
 				}
 				expireEnrichmentRecords();
-				performOuiProvider(deadlineAt);
+				const bool continueOui = performOuiProvider(deadlineAt);
+				nextOuiAt.store(
+				    continueOui ? nowMs() : UINT64_MAX,
+				    std::memory_order_release
+				);
 				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
+				if (continueOui) {
+					budgetYield = true;
+					break;
+				}
+				continue;
+			}
+
+			if (current >= nextOuiAt.load(std::memory_order_acquire)) {
+				const bool continueOui = performOuiProvider(deadlineAt);
+				nextOuiAt.store(
+				    continueOui ? nowMs() : UINT64_MAX,
+				    std::memory_order_release
+				);
+				if (continueOui) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 
@@ -2634,12 +2657,18 @@ struct ScoutImpl {
 		identityRelationCountValue = 0;
 		icmpCursor = 0;
 		reverseDnsCursor = 0;
-		mdnsServiceCursor = 0;
 		icmpRunRemaining = 0;
-		mdnsRunRemaining = 0;
 		reverseDnsRunRemaining = 0;
+		icmpTopologyGeneration = 0;
+		reverseDnsTopologyGeneration = 0;
+		mdnsState = {};
 		ssdpState = {};
 		nbnsState = {};
+		ouiCursor = 0;
+		ouiRemaining = 0;
+		ouiTopologyGeneration = 0;
+		ouiActive = false;
+		registryTopologyGeneration = 1;
 		nextScanId = 1;
 		scanProgress = IncrementalScanState{};
 		incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
