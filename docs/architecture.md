@@ -77,7 +77,9 @@ Device records are also time-bounded. `deviceMaxAgeMs` removes records that have
 Heavy names, services and metadata live outside the compact event snapshot in lazily created
 `ScoutDeviceDetails`. Providers run on independent schedules and feed normalized observations
 back through Scout's synchronized registry path. Bounded providers rotate persistent cursors
-across their work sets so a per-run budget cannot permanently starve later targets.
+across their work sets so a per-run budget cannot permanently starve later targets. Continuations
+carry the registry-topology generation that created them; endpoint/device changes invalidate and
+restart positional runs rather than resuming an old cursor against reordered data.
 
 Strong identifiers such as a shared UPnP UDN can create a `ScoutIdentityGroup`; moderate
 evidence such as a matching mDNS hostname is retained only as a relation. Provider-derived
