@@ -39,7 +39,8 @@ bool upsertEndpoint(
     uint32_t ipv4,
     uint64_t observedAt,
     ScoutObservationSource source,
-    bool confirmed
+    bool confirmed,
+    bool *replaced = nullptr
 );
 
 bool removeEndpoint(ScoutDeviceInfo &device, uint8_t interfaceIndex, uint32_t ipv4);
