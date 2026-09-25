@@ -157,15 +157,22 @@ struct ScoutImpl {
 
 	ScoutEventCallback callback;
 	ScoutOuiLookupCallback ouiLookup;
+	ScoutDnsServerLookupCallback dnsServerLookup;
 	ScoutEvent eventScratch[2]{};
 	size_t icmpCursor = 0;
 	size_t reverseDnsCursor = 0;
-	size_t mdnsServiceCursor = 0;
 	size_t icmpRunRemaining = 0;
-	size_t mdnsRunRemaining = 0;
 	size_t reverseDnsRunRemaining = 0;
+	uint64_t icmpTopologyGeneration = 0;
+	uint64_t reverseDnsTopologyGeneration = 0;
+	scout_internal::MdnsProviderState mdnsState{};
 	scout_internal::SsdpProviderState ssdpState{};
 	scout_internal::NbnsProviderState nbnsState{};
+	size_t ouiCursor = 0;
+	size_t ouiRemaining = 0;
+	uint64_t ouiTopologyGeneration = 0;
+	bool ouiActive = false;
+	uint64_t registryTopologyGeneration = 1;
 
 	std::atomic<uint64_t> nextScanAt{UINT64_MAX};
 	std::atomic<uint64_t> nextIcmpAt{UINT64_MAX};
@@ -173,6 +180,7 @@ struct ScoutImpl {
 	std::atomic<uint64_t> nextSsdpAt{UINT64_MAX};
 	std::atomic<uint64_t> nextNbnsAt{UINT64_MAX};
 	std::atomic<uint64_t> nextReverseDnsAt{UINT64_MAX};
+	std::atomic<uint64_t> nextOuiAt{UINT64_MAX};
 	std::atomic<uint64_t> nextEnrichmentExpiryAt{UINT64_MAX};
 	std::atomic<bool> processingActive{false};
 	std::atomic<Strata::FreeRTOS::TaskHandle> processingOwner{nullptr};
@@ -184,6 +192,7 @@ struct ScoutImpl {
 		uint64_t startedAt = 0;
 		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
 		size_t interfaceCount = 0;
+		bool interfacesTruncated = false;
 		size_t interfaceIndex = 0;
 		bool interfacePrepared = false;
 		size_t targetCount = 0;
@@ -471,6 +480,13 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	void bumpTopologyLocked() {
+		registryTopologyGeneration++;
+		if (registryTopologyGeneration == 0) {
+			registryTopologyGeneration = 1;
+		}
+	}
+
 	void removeDeviceAtLocked(size_t index) {
 		if (index >= deviceCount) {
 			return;
@@ -485,6 +501,7 @@ struct ScoutImpl {
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 		identityDirty = true;
+		bumpTopologyLocked();
 	}
 
 	void deduplicateRegistryLocked() {
