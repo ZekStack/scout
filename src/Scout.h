@@ -18,6 +18,7 @@ constexpr size_t SCOUT_MAX_SERVICES_PER_DEVICE = 48;
 constexpr size_t SCOUT_MAX_METADATA_PER_DEVICE = 96;
 constexpr size_t SCOUT_MAX_IDENTITY_GROUP_MEMBERS = 8;
 constexpr size_t SCOUT_MAX_IDENTITY_EVIDENCE = 24;
+constexpr size_t SCOUT_MAX_PERSISTENT_IDENTITIES = 8;
 
 constexpr size_t SCOUT_INTERFACE_NAME_SIZE = 8;
 constexpr size_t SCOUT_INTERFACE_KEY_SIZE = 24;
@@ -317,6 +318,15 @@ struct ScoutVendorInfo {
 	uint64_t expiresAtMs = 0;
 };
 
+struct ScoutPersistentIdentity {
+	char nameSpace[SCOUT_PERSISTENT_NAMESPACE_SIZE] = {};
+	char id[SCOUT_PERSISTENT_ID_SIZE] = {};
+	ScoutObservationSource source = ScoutObservationSource::None;
+	uint64_t firstSeenAtMs = 0;
+	uint64_t lastSeenAtMs = 0;
+	uint64_t expiresAtMs = 0;
+};
+
 struct ScoutDeviceDetails {
 	ScoutDeviceName names[SCOUT_MAX_NAMES_PER_DEVICE]{};
 	size_t nameCount = 0;
@@ -330,6 +340,9 @@ struct ScoutDeviceDetails {
 	ScoutVendorInfo vendor{};
 	bool locallyAdministeredMac = false;
 	bool multicastMac = false;
+
+	ScoutPersistentIdentity persistentIdentities[SCOUT_MAX_PERSISTENT_IDENTITIES]{};
+	size_t persistentIdentityCount = 0;
 
 	char manufacturer[SCOUT_MANUFACTURER_SIZE] = {};
 	char modelName[SCOUT_MODEL_SIZE] = {};
@@ -518,6 +531,8 @@ struct ScoutProviderDiagnostics {
 	uint64_t malformedResponses = 0;
 	uint64_t serverErrors = 0;
 	uint64_t droppedObservations = 0;
+	uint64_t resolverUnavailable = 0;
+	uint64_t identityConflicts = 0;
 	uint64_t budgetYields = 0;
 	uint64_t cancellations = 0;
 };
@@ -543,6 +558,10 @@ struct ScoutDiagnostics {
 	uint64_t expiredDeviceCount = 0;
 	uint64_t deduplicatedDeviceCount = 0;
 	uint64_t endpointReassignmentCount = 0;
+	uint64_t interfaceLimitDrops = 0;
+	uint64_t providerTopologyRestarts = 0;
+	uint64_t ssdpIdentityConflicts = 0;
+	uint64_t dnsResolverUnavailable = 0;
 	uint64_t metadataLimitDrops = 0;
 	uint64_t nameLimitDrops = 0;
 	uint64_t serviceLimitDrops = 0;
@@ -577,6 +596,8 @@ struct ScoutDiagnostics {
 };
 
 using ScoutOuiLookupCallback = std::function<bool(const ScoutMacAddress &, ScoutVendorInfo &)>;
+using ScoutDnsServerLookupCallback =
+    std::function<bool(const char *interfaceKey, ScoutIpv4Address &server)>;
 
 struct ScoutImpl;
 
@@ -616,6 +637,7 @@ class Scout {
 	ScoutDiagnostics diagnostics() const;
 	void onEvent(ScoutEventCallback callback);
 	void setOuiLookup(ScoutOuiLookupCallback callback);
+	void setDnsServerLookup(ScoutDnsServerLookupCallback callback);
 
 	const char *statusToString(ScoutStatus status) const;
 	const char *stateToString(ScoutState state) const;

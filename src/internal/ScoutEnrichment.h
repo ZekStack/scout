@@ -51,6 +51,15 @@ EnrichmentUpsertResult upsertService(ScoutDeviceDetails &details, const ScoutSer
 EnrichmentUpsertResult
 upsertMetadata(ScoutDeviceDetails &details, const ScoutMetadataEntry &metadata);
 
+EnrichmentUpsertResult upsertPersistentIdentity(
+    ScoutDeviceDetails &details,
+    const char *nameSpace,
+    const char *id,
+    ScoutObservationSource source,
+    uint64_t observedAtMs,
+    uint64_t expiresAtMs
+);
+
 bool upsertIpv6(ScoutEndpoint &endpoint, const ScoutIpv6Address &address);
 
 ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs);

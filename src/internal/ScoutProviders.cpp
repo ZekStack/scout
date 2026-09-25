@@ -36,15 +36,13 @@
 namespace scout_internal {
 namespace {
 
-constexpr size_t MaxMdnsServiceTypes = 64;
+constexpr size_t MaxMdnsServiceTypes = ProviderMaxMdnsServiceTypes;
 constexpr size_t MaxProviderTargetsPerRun = 32;
-constexpr size_t MaxSsdpDescriptionFetches = 16;
+constexpr size_t MaxSsdpDescriptionFetches = ProviderMaxSsdpDescriptionFetches;
+constexpr size_t NbnsBatchSize = 8;
 constexpr uint32_t SocketPollMs = 50;
 
-struct MdnsServiceType {
-	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
-	char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
-};
+using MdnsServiceType = ProviderMdnsServiceType;
 
 uint64_t providerNowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -147,6 +145,109 @@ const ProviderTarget *findTarget(
 	return match;
 }
 
+uint64_t interfaceSetSignature(const InterfaceSnapshot *interfaces, size_t count) {
+	constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
+	constexpr uint64_t Prime = 1099511628211ULL;
+	uint64_t hash = OffsetBasis;
+	for (size_t i = 0; i < count; ++i) {
+		for (const char *key = interfaces[i].key; key != nullptr && *key != '\0'; ++key) {
+			hash ^= static_cast<unsigned char>(*key);
+			hash *= Prime;
+		}
+		for (size_t byte = 0; byte < sizeof(interfaces[i].ipv4); ++byte) {
+			hash ^= static_cast<uint8_t>(interfaces[i].ipv4 >> (byte * 8U));
+			hash *= Prime;
+		}
+	}
+	return hash;
+}
+
+uint64_t hashLocation(const char *interfaceKey, const char *location) {
+	constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
+	constexpr uint64_t Prime = 1099511628211ULL;
+	uint64_t hash = OffsetBasis;
+	auto add = [&](const char *value) {
+		if (value == nullptr) {
+			return;
+		}
+		for (; *value != '\0'; ++value) {
+			unsigned char byte = static_cast<unsigned char>(*value);
+			if (byte >= 'A' && byte <= 'Z') {
+				byte = static_cast<unsigned char>(byte - 'A' + 'a');
+			}
+			hash ^= byte;
+			hash *= Prime;
+		}
+	};
+	add(interfaceKey);
+	hash ^= 0xFFU;
+	hash *= Prime;
+	add(location);
+	return hash;
+}
+
+bool locationAddressAllowed(
+    const ProviderTarget *targets,
+    size_t targetCount,
+    const ProviderTarget &origin,
+    uint32_t resolvedIpv4
+) {
+	if (resolvedIpv4 == 0) {
+		return false;
+	}
+	for (size_t i = 0; i < targetCount; ++i) {
+		const auto &candidate = targets[i];
+		if (candidate.ipv4.value != resolvedIpv4 || candidate.mac != origin.mac) {
+			continue;
+		}
+		if (origin.interfaceKey[0] == '\0' || candidate.interfaceKey[0] == '\0' ||
+		    textEqualsIgnoreCase(origin.interfaceKey, candidate.interfaceKey)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool selectDnsServer(
+    const ProviderTarget &target,
+    esp_netif_t *netif,
+    const ProviderRunControl *control,
+    uint32_t &serverIpv4
+) {
+	serverIpv4 = 0;
+	if (control != nullptr && control->dnsServerLookup != nullptr &&
+	    static_cast<bool>(*control->dnsServerLookup)) {
+		ScoutIpv4Address server{};
+		if ((*control->dnsServerLookup)(target.interfaceKey, server) && server.valid()) {
+			serverIpv4 = server.value;
+			return true;
+		}
+	}
+
+#if defined(CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF) &&                                         \
+    CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+	(void)target;
+#else
+	if (netif != esp_netif_get_default_netif()) {
+		return false;
+	}
+#endif
+
+	esp_netif_dns_info_t dnsInfo{};
+	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		dnsInfo = {};
+		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
+	}
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		return false;
+	}
+	serverIpv4 = ip_2_ip4(&dnsInfo.ip)->addr;
+	return true;
+}
+
 bool setSocketTimeout(int socketFd, uint32_t timeoutMs) {
 	struct timeval timeout{
 	    .tv_sec = static_cast<time_t>(timeoutMs / 1000U),
@@ -177,7 +278,8 @@ int openBoundUdpSocket(uint32_t localIpv4, uint32_t timeoutMs) {
 	return fd;
 }
 
-DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
+DnsPtrAnswer
+queryPtr(const ProviderTarget &target, uint32_t timeoutMs, const ProviderRunControl *control) {
 	DnsPtrAnswer result{};
 	if (target.interfaceKey[0] == '\0') {
 		result.status = DnsParseStatus::NetworkError;
@@ -196,16 +298,9 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		return result;
 	}
 
-	esp_netif_dns_info_t dnsInfo{};
-	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
-		dnsInfo = {};
-		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
-	}
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
-		result.status = DnsParseStatus::NetworkError;
+	uint32_t dnsServer = 0;
+	if (!selectDnsServer(target, netif, control, dnsServer)) {
+		result.status = DnsParseStatus::ResolverUnavailable;
 		return result;
 	}
 
@@ -231,7 +326,7 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 	sockaddr_in destination{};
 	destination.sin_family = AF_INET;
 	destination.sin_port = htons(53);
-	destination.sin_addr.s_addr = ip_2_ip4(&dnsInfo.ip)->addr;
+	destination.sin_addr.s_addr = dnsServer;
 
 	if (sendto(
 	        fd,
@@ -272,6 +367,90 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		return result;
 	}
 	return parsePtrResponse(response, static_cast<size_t>(received), transactionId, ipv4Bytes);
+}
+
+DnsAAnswer queryA(
+    const ProviderTarget &target,
+    const char *hostname,
+    uint32_t timeoutMs,
+    const ProviderRunControl *control
+) {
+	DnsAAnswer result{};
+	if (target.interfaceKey[0] == '\0' || hostname == nullptr || hostname[0] == '\0') {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	esp_netif_t *netif = esp_netif_get_handle_from_ifkey(target.interfaceKey);
+	if (netif == nullptr) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	esp_netif_ip_info_t ipInfo{};
+	if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK || ipInfo.ip.addr == 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	uint32_t dnsServer = 0;
+	if (!selectDnsServer(target, netif, control, dnsServer)) {
+		result.status = DnsParseStatus::ResolverUnavailable;
+		return result;
+	}
+
+	const int fd = openBoundUdpSocket(ipInfo.ip.addr, timeoutMs);
+	if (fd < 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	const uint16_t transactionId =
+	    static_cast<uint16_t>((providerNowMs() ^ target.ipv4.value ^ 0xA5A5U) & 0xFFFFU);
+	uint8_t request[256]{};
+	const size_t requestLength = buildAQuery(transactionId, hostname, request, sizeof(request));
+	if (requestLength == 0) {
+		close(fd);
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	sockaddr_in destination{};
+	destination.sin_family = AF_INET;
+	destination.sin_port = htons(53);
+	destination.sin_addr.s_addr = dnsServer;
+	if (sendto(
+	        fd,
+	        request,
+	        requestLength,
+	        0,
+	        reinterpret_cast<const sockaddr *>(&destination),
+	        sizeof(destination)
+	    ) < 0) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	uint8_t response[768]{};
+	sockaddr_in sender{};
+	socklen_t senderLength = sizeof(sender);
+	const int received = recvfrom(
+	    fd,
+	    response,
+	    sizeof(response),
+	    0,
+	    reinterpret_cast<sockaddr *>(&sender),
+	    &senderLength
+	);
+	const int socketError = errno;
+	close(fd);
+	if (received <= 0) {
+		result.status = socketError == EAGAIN || socketError == EWOULDBLOCK
+		                    ? DnsParseStatus::Timeout
+		                    : DnsParseStatus::NetworkError;
+		return result;
+	}
+	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr ||
+	    sender.sin_port != destination.sin_port) {
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	return parseAResponse(response, static_cast<size_t>(received), transactionId, hostname);
 }
 
 void appendMetadata(
@@ -533,6 +712,7 @@ enum class HttpFetchStatus : uint8_t {
 	TooLarge,
 	UnsupportedEncoding,
 	UnsupportedAddress,
+	ResolverUnavailable,
 };
 
 struct HttpFetchResult {
@@ -542,40 +722,85 @@ struct HttpFetchResult {
 
 bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	out = {};
-	copyText(out.path, sizeof(out.path), "/");
-	if (url == nullptr || std::strncmp(url, "http://", 7) != 0) {
+	if (!copyText(out.path, sizeof(out.path), "/") || url == nullptr ||
+	    std::strncmp(url, "http://", 7) != 0) {
 		return false;
 	}
 	const char *hostStart = url + 7;
-	const char *pathStart = std::strchr(hostStart, '/');
-	const char *hostEnd = pathStart != nullptr ? pathStart : hostStart + std::strlen(hostStart);
-	const char *colon = nullptr;
-	for (const char *cursor = hostStart; cursor < hostEnd; ++cursor) {
-		if (*cursor == ':') {
-			colon = cursor;
-			break;
+	if (*hostStart == '\0' || *hostStart == '[') {
+		return false;
+	}
+
+	const char *authorityEnd = hostStart;
+	while (*authorityEnd != '\0' && *authorityEnd != '/' && *authorityEnd != '?' &&
+	       *authorityEnd != '#') {
+		authorityEnd++;
+	}
+	if (authorityEnd == hostStart) {
+		return false;
+	}
+	for (const char *cursor = hostStart; cursor < authorityEnd; ++cursor) {
+		if (*cursor == '@') {
+			return false;
 		}
 	}
+
+	const char *colon = nullptr;
+	for (const char *cursor = hostStart; cursor < authorityEnd; ++cursor) {
+		if (*cursor == ':') {
+			if (colon != nullptr) {
+				return false;
+			}
+			colon = cursor;
+		}
+	}
+	const char *nameEnd = colon != nullptr ? colon : authorityEnd;
+	if (nameEnd == hostStart || !copyTextN(
+	                                out.host,
+	                                sizeof(out.host),
+	                                hostStart,
+	                                static_cast<size_t>(nameEnd - hostStart)
+	                            )) {
+		return false;
+	}
+
 	if (colon != nullptr) {
-		copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(colon - hostStart));
+		if (colon + 1 == authorityEnd) {
+			return false;
+		}
 		unsigned port = 0;
-		for (const char *cursor = colon + 1; cursor < hostEnd; ++cursor) {
+		for (const char *cursor = colon + 1; cursor < authorityEnd; ++cursor) {
 			if (*cursor < '0' || *cursor > '9') {
 				return false;
 			}
-			port = port * 10U + static_cast<unsigned>(*cursor - '0');
+			const unsigned digit = static_cast<unsigned>(*cursor - '0');
+			if (port > (65535U - digit) / 10U) {
+				return false;
+			}
+			port = port * 10U + digit;
 		}
-		if (port == 0 || port > 65535U) {
+		if (port == 0) {
 			return false;
 		}
 		out.port = static_cast<uint16_t>(port);
-	} else {
-		copyTextN(out.host, sizeof(out.host), hostStart, static_cast<size_t>(hostEnd - hostStart));
 	}
-	if (pathStart != nullptr) {
-		copyText(out.path, sizeof(out.path), pathStart);
+
+	if (*authorityEnd == '\0' || *authorityEnd == '#') {
+		return true;
 	}
-	return out.host[0] != '\0';
+	const char *pathEnd = std::strchr(authorityEnd, '#');
+	if (pathEnd == nullptr) {
+		pathEnd = authorityEnd + std::strlen(authorityEnd);
+	}
+	const size_t pathLength = static_cast<size_t>(pathEnd - authorityEnd);
+	if (*authorityEnd == '?') {
+		if (pathLength + 1 >= sizeof(out.path)) {
+			return false;
+		}
+		out.path[0] = '/';
+		return copyTextN(out.path + 1, sizeof(out.path) - 1, authorityEnd, pathLength);
+	}
+	return copyTextN(out.path, sizeof(out.path), authorityEnd, pathLength);
 }
 
 enum class SocketIoStatus : uint8_t {
@@ -706,7 +931,15 @@ bool completeContentLengthBody(const char *data, size_t length) {
 }
 
 HttpFetchResult fetchHttpBody(
-    const char *url, uint32_t localIpv4, uint32_t timeoutMs, char *scratch, size_t capacity
+    const char *url,
+    const ProviderTarget &origin,
+    const ProviderTarget *targets,
+    size_t targetCount,
+    uint32_t localIpv4,
+    uint32_t timeoutMs,
+    char *scratch,
+    size_t capacity,
+    const ProviderRunControl *control
 ) {
 	HttpFetchResult result{};
 	if (scratch == nullptr || capacity < 2 || timeoutMs == 0) {
@@ -717,37 +950,46 @@ HttpFetchResult fetchHttpBody(
 		return result;
 	}
 
+	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
 	sockaddr_in remote{};
 	remote.sin_family = AF_INET;
 	remote.sin_port = htons(parsed.port);
-	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) != 1) {
-		addrinfo hints{};
-		hints.ai_family = AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
-		hints.ai_protocol = IPPROTO_TCP;
-		addrinfo *addresses = nullptr;
-		if (getaddrinfo(parsed.host, nullptr, &hints, &addresses) != 0 || addresses == nullptr) {
+	if (inet_pton(AF_INET, parsed.host, &remote.sin_addr) == 1) {
+		if (!locationAddressAllowed(targets, targetCount, origin, remote.sin_addr.s_addr)) {
 			result.status = HttpFetchStatus::UnsupportedAddress;
 			return result;
 		}
+	} else {
+		const uint64_t now = providerNowMs();
+		if (now >= deadlineMs) {
+			result.status = HttpFetchStatus::Timeout;
+			return result;
+		}
+		const uint32_t dnsTimeout =
+		    static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX, deadlineMs - now));
+		const DnsAAnswer answer = queryA(origin, parsed.host, dnsTimeout, control);
+		if (answer.status != DnsParseStatus::Ok) {
+			result.status = answer.status == DnsParseStatus::ResolverUnavailable
+			                    ? HttpFetchStatus::ResolverUnavailable
+			                : answer.status == DnsParseStatus::Timeout
+			                    ? HttpFetchStatus::Timeout
+			                    : HttpFetchStatus::NetworkError;
+			return result;
+		}
 		bool resolved = false;
-		for (addrinfo *address = addresses; address != nullptr; address = address->ai_next) {
-			if (address->ai_family != AF_INET || address->ai_addr == nullptr ||
-			    address->ai_addrlen < sizeof(sockaddr_in)) {
+		for (size_t i = 0; i < answer.addressCount; ++i) {
+			if (!locationAddressAllowed(targets, targetCount, origin, answer.addresses[i])) {
 				continue;
 			}
-			remote.sin_addr = reinterpret_cast<const sockaddr_in *>(address->ai_addr)->sin_addr;
+			remote.sin_addr.s_addr = answer.addresses[i];
 			resolved = true;
 			break;
 		}
-		freeaddrinfo(addresses);
 		if (!resolved) {
 			result.status = HttpFetchStatus::UnsupportedAddress;
 			return result;
 		}
 	}
-
-	const uint64_t deadlineMs = providerNowMs() + timeoutMs;
 	const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (fd < 0) {
 		result.status = HttpFetchStatus::NetworkError;
@@ -1117,7 +1359,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
-    size_t &serviceCursor,
+    MdnsProviderState &state,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
     void *context,
@@ -1125,6 +1367,10 @@ ProviderRunStats runMdnsProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		state.active = false;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
+		state.remainingQueries = 0;
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1140,94 +1386,137 @@ ProviderRunStats runMdnsProvider(
 		}
 	}
 
-	MdnsServiceType types[MaxMdnsServiceTypes]{};
-	size_t typeCount = 0;
-	const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
-	constexpr struct {
-		const char *service;
-		const char *proto;
-	} CommonServices[] = {
-	    {"_http", "_tcp"},        {"_https", "_tcp"},
-	    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
-	    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
-	    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
-	    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
-	    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
-	    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
-	    {"_hap", "_tcp"},         {"_matter", "_tcp"},
-	    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
-	    {"_esphomelib", "_tcp"},
-	};
-	for (const auto &service : CommonServices) {
-		addServiceType(types, typeCount, serviceTypeCapacity, service.service, service.proto);
+	if (!state.active) {
+		state.active = true;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
+		state.remainingQueries = 0;
+		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		constexpr struct {
+			const char *service;
+			const char *proto;
+		} CommonServices[] = {
+		    {"_http", "_tcp"},        {"_https", "_tcp"},
+		    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
+		    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
+		    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
+		    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
+		    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
+		    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
+		    {"_hap", "_tcp"},         {"_matter", "_tcp"},
+		    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
+		    {"_esphomelib", "_tcp"},
+		};
+		for (const auto &service : CommonServices) {
+			addServiceType(
+			    state.serviceTypes,
+			    state.serviceTypeCount,
+			    serviceTypeCapacity,
+			    service.service,
+			    service.proto
+			);
+		}
 	}
 
-	mdns_result_t *serviceTypes = nullptr;
-	uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
-	enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
-	if (enumerationTimeout == 0) {
-		recordProviderStop(stats, control);
-		return stats;
-	}
-	if (mdns_query_ptr(
-	        "_services._dns-sd",
-	        "_udp",
-	        enumerationTimeout,
-	        serviceTypeCapacity,
-	        &serviceTypes
-	    ) == ESP_OK) {
-		for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
-			const char *descriptor =
-			    result->instance_name != nullptr ? result->instance_name : result->hostname;
-			char service[SCOUT_SERVICE_TYPE_SIZE] = {};
-			char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
-			if (splitServiceDescriptor(
-			        descriptor,
-			        service,
-			        sizeof(service),
-			        proto,
-			        sizeof(proto)
-			    )) {
-				if (!addServiceType(types, typeCount, serviceTypeCapacity, service, proto) &&
-				    typeCount >= serviceTypeCapacity) {
-					stats.dropped++;
+	if (!state.enumerationComplete) {
+		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		const uint32_t desiredEnumerationTimeout =
+		    std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
+		const uint32_t enumerationTimeout = providerRemainingMs(control, desiredEnumerationTimeout);
+		if (enumerationTimeout == 0) {
+			recordProviderStop(stats, control);
+			return stats;
+		}
+		const bool enumerationBudgetLimited = enumerationTimeout < desiredEnumerationTimeout;
+		mdns_result_t *serviceTypes = nullptr;
+		const esp_err_t enumerationResult = mdns_query_ptr(
+		    "_services._dns-sd",
+		    "_udp",
+		    enumerationTimeout,
+		    serviceTypeCapacity,
+		    &serviceTypes
+		);
+		if (enumerationResult == ESP_OK) {
+			for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
+				const char *descriptor =
+				    result->instance_name != nullptr ? result->instance_name : result->hostname;
+				char service[SCOUT_SERVICE_TYPE_SIZE] = {};
+				char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
+				if (splitServiceDescriptor(
+				        descriptor,
+				        service,
+				        sizeof(service),
+				        proto,
+				        sizeof(proto)
+				    )) {
+					if (!addServiceType(
+					        state.serviceTypes,
+					        state.serviceTypeCount,
+					        serviceTypeCapacity,
+					        service,
+					        proto
+					    ) &&
+					    state.serviceTypeCount >= serviceTypeCapacity) {
+						stats.dropped++;
+					}
 				}
 			}
+			mdns_query_results_free(serviceTypes);
+		} else if (enumerationResult == ESP_ERR_TIMEOUT) {
+			if (enumerationBudgetLimited && providerShouldStop(control)) {
+				recordProviderStop(stats, control);
+				return stats;
+			}
+			stats.timeouts++;
+		} else {
+			stats.errors++;
 		}
-		mdns_query_results_free(serviceTypes);
+		state.enumerationComplete = true;
+		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
+			return stats;
+		}
 	}
 
-	const uint32_t queryBudget = config.queryTimeoutMs > enumerationTimeout
-	                                 ? config.queryTimeoutMs - enumerationTimeout
-	                                 : config.queryTimeoutMs;
-	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
-	stats.plannedUnits = queryCount;
-	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
-	uint32_t perQueryTimeout = 1;
-	if (queryCount > 0) {
-		perQueryTimeout = queryBudget / static_cast<uint32_t>(queryCount);
-		if (perQueryTimeout == 0) {
-			perQueryTimeout = 1;
-		}
+	if (state.serviceTypeCount == 0) {
+		state.active = false;
+		state.enumerationComplete = false;
+		return stats;
 	}
-	perQueryTimeout = providerRemainingMs(control, perQueryTimeout);
 
-	size_t processedQueries = 0;
-	for (; processedQueries < queryCount && perQueryTimeout > 0; ++processedQueries) {
+	if (state.remainingQueries == 0) {
+		state.remainingQueries = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+	}
+	stats.plannedUnits = state.remainingQueries;
+	const size_t runQueryCount = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+	const uint64_t retentionFloorMs =
+	    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
+	uint32_t baseTimeout =
+	    config.queryTimeoutMs / static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+	baseTimeout = std::max<uint32_t>(1, baseTimeout);
+
+	while (state.remainingQueries > 0) {
 		if (providerShouldStop(control)) {
 			recordProviderStop(stats, control);
 			break;
 		}
-		stats.workUnits++;
-		const size_t i = typeCount > 0 ? (serviceCursor + processedQueries) % typeCount : 0;
+		const uint32_t perQueryTimeout = providerRemainingMs(control, baseTimeout);
+		if (perQueryTimeout == 0) {
+			recordProviderStop(stats, control);
+			break;
+		}
+		const size_t i = state.serviceCursor % state.serviceTypeCount;
 		mdns_result_t *results = nullptr;
+		stats.workUnits++;
 		const esp_err_t queryResult = mdns_query_ptr(
-		    types[i].service,
-		    types[i].proto,
+		    state.serviceTypes[i].service,
+		    state.serviceTypes[i].proto,
 		    perQueryTimeout,
 		    config.maxResults,
 		    &results
 		);
+		state.serviceCursor = (state.serviceCursor + 1) % state.serviceTypeCount;
+		state.remainingQueries--;
 		if (queryResult != ESP_OK) {
 			if (queryResult == ESP_ERR_TIMEOUT) {
 				stats.timeouts++;
@@ -1250,15 +1539,19 @@ ProviderRunStats runMdnsProvider(
 		}
 		mdns_query_results_free(results);
 	}
+
 	if (providerShouldStop(control)) {
 		recordProviderStop(stats, control);
 	}
-	if (typeCount > 0) {
-		serviceCursor = (serviceCursor + processedQueries) % typeCount;
+	if (!stats.cancelled && state.remainingQueries == 0) {
+		state.active = false;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
 	}
 #else
 	(void)config;
 	(void)context;
+	(void)state;
 	stats.errors = 1;
 #endif
 	return stats;
@@ -1290,20 +1583,31 @@ ProviderRunStats runSsdpProvider(
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
 		stats.transportErrors++;
-		state.remainingInterfaces = 0;
+		state = {};
 		return stats;
 	}
 	if (interfaceCount == 0) {
 		state = {};
 		return stats;
 	}
-	state.interfaceCursor %= interfaceCount;
-	const size_t plannedInterfaces = state.remainingInterfaces == 0
-	                                     ? interfaceCount
-	                                     : std::min(state.remainingInterfaces, interfaceCount);
-	if (state.remainingInterfaces == 0) {
-		state.remainingInterfaces = plannedInterfaces;
+	const uint64_t currentInterfaceSignature = interfaceSetSignature(interfaces, interfaceCount);
+	if (state.active && state.interfaceSignature != 0 &&
+	    state.interfaceSignature != currentInterfaceSignature) {
+		state.interfaceCursor = 0;
+		state.remainingInterfaces = interfaceCount;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
+		stats.topologyRestarts++;
 	}
+	if (!state.active) {
+		state.active = true;
+		state.remainingInterfaces = interfaceCount;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
+	}
+	state.interfaceSignature = currentInterfaceSignature;
+	state.interfaceCursor %= interfaceCount;
+	const size_t plannedInterfaces = std::min(state.remainingInterfaces, interfaceCount);
 	stats.plannedUnits = plannedInterfaces;
 	constexpr char Search[] = "M-SEARCH * HTTP/1.1\r\n"
 	                          "HOST: 239.255.255.250:1900\r\n"
@@ -1315,34 +1619,20 @@ ProviderRunStats runSsdpProvider(
 	destination.sin_port = htons(1900);
 	inet_pton(AF_INET, "239.255.255.250", &destination.sin_addr);
 
-	size_t descriptionFetches = 0;
-	char fetchedLocations[MaxSsdpDescriptionFetches][256]{};
-	char fetchedLocationInterfaces[MaxSsdpDescriptionFetches][SCOUT_INTERFACE_KEY_SIZE]{};
-	size_t fetchedLocationCount = 0;
 	auto rememberLocation = [&](const char *interfaceKey, const char *location) {
 		if (location == nullptr || location[0] == '\0') {
 			return false;
 		}
-		for (size_t i = 0; i < fetchedLocationCount; ++i) {
-			if (textEqualsIgnoreCase(fetchedLocations[i], location) &&
-			    textEqualsIgnoreCase(fetchedLocationInterfaces[i], interfaceKey)) {
+		const uint64_t hash = hashLocation(interfaceKey, location);
+		for (size_t i = 0; i < state.fetchedLocationCount; ++i) {
+			if (state.fetchedLocationHashes[i] == hash) {
 				return false;
 			}
 		}
-		if (fetchedLocationCount >= MaxSsdpDescriptionFetches) {
+		if (state.fetchedLocationCount >= MaxSsdpDescriptionFetches) {
 			return false;
 		}
-		copyText(
-		    fetchedLocations[fetchedLocationCount],
-		    sizeof(fetchedLocations[fetchedLocationCount]),
-		    location
-		);
-		copyText(
-		    fetchedLocationInterfaces[fetchedLocationCount],
-		    sizeof(fetchedLocationInterfaces[fetchedLocationCount]),
-		    interfaceKey
-		);
-		fetchedLocationCount++;
+		state.fetchedLocationHashes[state.fetchedLocationCount++] = hash;
 		return true;
 	};
 	size_t processedInterfaces = 0;
@@ -1460,95 +1750,114 @@ ProviderRunStats runSsdpProvider(
 			const bool newDescriptionLocation =
 			    parsed.location[0] != '\0' && rememberLocation(interfaceInfo.key, parsed.location);
 			if (config.fetchDeviceDescription && newDescriptionLocation && httpScratch != nullptr &&
-			    httpScratchCapacity > 1 && descriptionFetches < descriptionBudget) {
+			    httpScratchCapacity > 1 && state.descriptionFetches < descriptionBudget) {
 				const uint32_t httpTimeout = providerRemainingMs(control, config.httpTimeoutMs);
 				if (httpTimeout == 0) {
-					break;
-				}
-				const HttpFetchResult fetch = fetchHttpBody(
-				    parsed.location,
-				    interfaceInfo.ipv4,
-				    httpTimeout,
-				    httpScratch,
-				    httpScratchCapacity
-				);
-				descriptionFetches++;
-				if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
-					UpnpDescriptionInfo description{};
-					if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
-						addName(
-						    observation,
-						    ScoutNameSource::SsdpFriendlyName,
-						    description.friendlyName,
-						    now,
-						    expiresAt
-						);
-						copyText(
-						    observation.manufacturer,
-						    sizeof(observation.manufacturer),
-						    description.manufacturer
-						);
-						copyText(
-						    observation.modelName,
-						    sizeof(observation.modelName),
-						    description.modelName
-						);
-						copyText(
-						    observation.modelNumber,
-						    sizeof(observation.modelNumber),
-						    description.modelNumber
-						);
-						copyText(
-						    observation.serialNumber,
-						    sizeof(observation.serialNumber),
-						    description.serialNumber
-						);
-						if (description.udn[0] != '\0') {
-							copyText(
-							    observation.upnpUdn,
-							    sizeof(observation.upnpUdn),
-							    description.udn
-							);
-						}
-						appendMetadata(
-						    observation,
-						    ScoutObservationSource::Ssdp,
-						    "upnp.deviceType",
-						    description.deviceType,
-						    now,
-						    expiresAt
-						);
-					} else {
-						stats.malformedResponses++;
-						stats.descriptionErrors++;
-					}
+					recordProviderStop(stats, control);
 				} else {
-					stats.descriptionErrors++;
-					switch (fetch.status) {
-					case HttpFetchStatus::Timeout:
-						stats.timeouts++;
-						break;
-					case HttpFetchStatus::TooLarge:
-					case HttpFetchStatus::UnsupportedAddress:
-						stats.dropped++;
-						break;
-					case HttpFetchStatus::InvalidResponse:
-					case HttpFetchStatus::UnsupportedEncoding:
-						stats.malformedResponses++;
-						break;
-					case HttpFetchStatus::HttpError:
-						stats.serverErrors++;
-						break;
-					case HttpFetchStatus::NetworkError:
-						stats.errors++;
-						stats.transportErrors++;
-						break;
-					case HttpFetchStatus::Ok:
-						break;
+					const HttpFetchResult fetch = fetchHttpBody(
+					    parsed.location,
+					    *target,
+					    targets,
+					    targetCount,
+					    interfaceInfo.ipv4,
+					    httpTimeout,
+					    httpScratch,
+					    httpScratchCapacity,
+					    control
+					);
+					state.descriptionFetches++;
+					if (fetch.status == HttpFetchStatus::Ok && fetch.bodyLength > 0) {
+						UpnpDescriptionInfo description{};
+						if (parseUpnpDescription(httpScratch, fetch.bodyLength, description)) {
+							addName(
+							    observation,
+							    ScoutNameSource::SsdpFriendlyName,
+							    description.friendlyName,
+							    now,
+							    expiresAt
+							);
+							copyText(
+							    observation.manufacturer,
+							    sizeof(observation.manufacturer),
+							    description.manufacturer
+							);
+							copyText(
+							    observation.modelName,
+							    sizeof(observation.modelName),
+							    description.modelName
+							);
+							copyText(
+							    observation.modelNumber,
+							    sizeof(observation.modelNumber),
+							    description.modelNumber
+							);
+							bool descriptionIdentityConflict = false;
+							if (description.udn[0] != '\0') {
+								if (observation.upnpUdn[0] == '\0') {
+									copyText(
+									    observation.upnpUdn,
+									    sizeof(observation.upnpUdn),
+									    description.udn
+									);
+								} else if (!textEqualsIgnoreCase(
+								               observation.upnpUdn,
+								               description.udn
+								           )) {
+									descriptionIdentityConflict = true;
+									stats.identityConflicts++;
+								}
+							}
+							if (!descriptionIdentityConflict) {
+								copyText(
+								    observation.serialNumber,
+								    sizeof(observation.serialNumber),
+								    description.serialNumber
+								);
+							}
+							appendMetadata(
+							    observation,
+							    ScoutObservationSource::Ssdp,
+							    "upnp.deviceType",
+							    description.deviceType,
+							    now,
+							    expiresAt
+							);
+						} else {
+							stats.malformedResponses++;
+							stats.descriptionErrors++;
+						}
+					} else {
+						stats.descriptionErrors++;
+						switch (fetch.status) {
+						case HttpFetchStatus::Timeout:
+							stats.timeouts++;
+							break;
+						case HttpFetchStatus::TooLarge:
+						case HttpFetchStatus::UnsupportedAddress:
+							stats.dropped++;
+							break;
+						case HttpFetchStatus::InvalidResponse:
+						case HttpFetchStatus::UnsupportedEncoding:
+							stats.malformedResponses++;
+							break;
+						case HttpFetchStatus::HttpError:
+							stats.serverErrors++;
+							break;
+						case HttpFetchStatus::ResolverUnavailable:
+							stats.resolverUnavailable++;
+							break;
+						case HttpFetchStatus::NetworkError:
+							stats.errors++;
+							stats.transportErrors++;
+							break;
+						case HttpFetchStatus::Ok:
+							break;
+						}
 					}
 				}
 			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
-			           descriptionFetches >= descriptionBudget) {
+			           state.descriptionFetches >= descriptionBudget) {
 				stats.dropped++;
 			}
 
@@ -1564,8 +1873,12 @@ ProviderRunStats runSsdpProvider(
 	state.remainingInterfaces = processedInterfaces >= state.remainingInterfaces
 	                                ? 0
 	                                : state.remainingInterfaces - processedInterfaces;
-	if (!stats.budgetYielded || stats.cancelled) {
-		state.remainingInterfaces = 0;
+	if (stats.cancelled) {
+		state = {};
+	} else if (state.remainingInterfaces == 0) {
+		state.active = false;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
 	}
 	return stats;
 }
@@ -1593,24 +1906,30 @@ ProviderRunStats runNbnsProvider(
 	size_t interfaceCount = 0;
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
-		state.active = false;
+		state = {};
 		return stats;
 	}
 	if (interfaceCount == 0) {
-		state.active = false;
+		state = {};
 		return stats;
 	}
 
+	const uint64_t currentInterfaceSignature = interfaceSetSignature(interfaces, interfaceCount);
+	if (state.active && state.interfaceSignature != 0 &&
+	    state.interfaceSignature != currentInterfaceSignature) {
+		state.interfaceCursor = 0;
+		state.batchOffset = 0;
+		stats.topologyRestarts++;
+	}
+	state.interfaceSignature = currentInterfaceSignature;
+
 	if (!state.active || state.targetLimit == 0 || state.runStartCursor >= targetCount ||
 	    state.targetLimit > targetCount) {
+		state.active = true;
 		state.runStartCursor = state.targetCursor % targetCount;
 		state.targetLimit = std::min(targetCount, config.maxTargetsPerRun);
 		state.interfaceCursor = 0;
-		state.targetOffset = 0;
-		state.active = state.targetLimit > 0;
-	}
-	if (!state.active) {
-		return stats;
+		state.batchOffset = 0;
 	}
 	stats.plannedUnits = state.targetLimit;
 
@@ -1619,39 +1938,54 @@ ProviderRunStats runNbnsProvider(
 			recordProviderStop(stats, control);
 			return stats;
 		}
-
 		const auto &interfaceInfo = interfaces[state.interfaceCursor];
+
+		size_t batchIndices[NbnsBatchSize]{};
+		size_t batchCount = 0;
+		size_t nextOffset = state.batchOffset;
+		while (nextOffset < state.targetLimit && batchCount < NbnsBatchSize) {
+			const size_t targetIndex = (state.runStartCursor + nextOffset) % targetCount;
+			nextOffset++;
+			if (!targetMatchesInterface(targets[targetIndex], interfaceInfo.key)) {
+				continue;
+			}
+			batchIndices[batchCount++] = targetIndex;
+		}
+		if (batchCount == 0) {
+			state.interfaceCursor++;
+			state.batchOffset = 0;
+			continue;
+		}
+
 		const uint32_t socketTimeout =
 		    std::max<uint32_t>(1, providerRemainingMs(control, SocketPollMs));
 		const int fd = openBoundUdpSocket(interfaceInfo.ipv4, socketTimeout);
 		if (fd < 0) {
 			stats.errors++;
-			state.interfaceCursor++;
-			state.targetOffset = 0;
+			stats.transportErrors++;
+			state.batchOffset = nextOffset;
 			continue;
 		}
 
-		for (; state.targetOffset < state.targetLimit; ++state.targetOffset) {
+		bool sendInterrupted = false;
+		for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
 			if (providerShouldStop(control)) {
 				recordProviderStop(stats, control);
-				close(fd);
-				return stats;
+				sendInterrupted = true;
+				break;
 			}
-			const size_t i = (state.runStartCursor + state.targetOffset) % targetCount;
-			if (!targetMatchesInterface(targets[i], interfaceInfo.key)) {
-				continue;
-			}
-			stats.workUnits++;
+			const size_t targetIndex = batchIndices[batchIndex];
 			uint8_t request[50]{};
 			buildNbnsNodeStatusRequest(
 			    request,
 			    sizeof(request),
-			    static_cast<uint16_t>(0x4000U + (i & 0x3FFFU))
+			    static_cast<uint16_t>(0x4000U + (targetIndex & 0x3FFFU))
 			);
 			sockaddr_in destination{};
 			destination.sin_family = AF_INET;
 			destination.sin_port = htons(137);
-			destination.sin_addr.s_addr = targets[i].ipv4.value;
+			destination.sin_addr.s_addr = targets[targetIndex].ipv4.value;
+			stats.workUnits++;
 			if (sendto(
 			        fd,
 			        request,
@@ -1661,14 +1995,19 @@ ProviderRunStats runNbnsProvider(
 			        sizeof(destination)
 			    ) < 0) {
 				stats.errors++;
+				stats.transportErrors++;
 			}
 		}
-
-		uint64_t deadline = providerNowMs() + config.responseWindowMs;
-		if (control != nullptr && control->deadlineMs != UINT64_MAX) {
-			deadline = std::min(deadline, control->deadlineMs);
+		if (sendInterrupted) {
+			close(fd);
+			return stats;
 		}
-		while (providerNowMs() < deadline && !providerShouldStop(control)) {
+
+		uint64_t responseDeadline = providerNowMs() + config.responseWindowMs;
+		if (control != nullptr && control->deadlineMs != UINT64_MAX) {
+			responseDeadline = std::min(responseDeadline, control->deadlineMs);
+		}
+		while (providerNowMs() < responseDeadline && !providerShouldStop(control)) {
 			uint8_t response[1024]{};
 			sockaddr_in sender{};
 			socklen_t senderLength = sizeof(sender);
@@ -1688,8 +2027,18 @@ ProviderRunStats runNbnsProvider(
 			if (target == nullptr) {
 				continue;
 			}
-			char name[SCOUT_NAME_SIZE] = {};
 			const size_t targetIndex = static_cast<size_t>(target - targets);
+			bool belongsToBatch = false;
+			for (size_t i = 0; i < batchCount; ++i) {
+				if (batchIndices[i] == targetIndex) {
+					belongsToBatch = true;
+					break;
+				}
+			}
+			if (!belongsToBatch) {
+				continue;
+			}
+			char name[SCOUT_NAME_SIZE] = {};
 			const uint16_t expectedTransactionId =
 			    static_cast<uint16_t>(0x4000U + (targetIndex & 0x3FFFU));
 			if (!parseNbnsNodeStatusName(
@@ -1717,11 +2066,17 @@ ProviderRunStats runNbnsProvider(
 		}
 		close(fd);
 
-		state.interfaceCursor++;
-		state.targetOffset = 0;
 		if (providerShouldStop(control)) {
 			recordProviderStop(stats, control);
+			// Do not advance. The same bounded batch is retransmitted after a budget
+			// yield so replies lost with the old socket cannot create permanent gaps.
 			return stats;
+		}
+
+		state.batchOffset = nextOffset;
+		if (state.batchOffset >= state.targetLimit) {
+			state.interfaceCursor++;
+			state.batchOffset = 0;
 		}
 	}
 
@@ -1729,7 +2084,7 @@ ProviderRunStats runNbnsProvider(
 	state.runStartCursor = state.targetCursor;
 	state.targetLimit = 0;
 	state.interfaceCursor = 0;
-	state.targetOffset = 0;
+	state.batchOffset = 0;
 	state.active = false;
 	return stats;
 }
@@ -1768,7 +2123,7 @@ ProviderRunStats runReverseDnsProvider(
 			break;
 		}
 		stats.workUnits++;
-		const DnsPtrAnswer answer = queryPtr(target, timeoutMs);
+		const DnsPtrAnswer answer = queryPtr(target, timeoutMs, control);
 
 		switch (answer.status) {
 		case DnsParseStatus::Ok: {
@@ -1800,8 +2155,12 @@ ProviderRunStats runReverseDnsProvider(
 		case DnsParseStatus::ServerError:
 			stats.serverErrors++;
 			break;
+		case DnsParseStatus::ResolverUnavailable:
+			stats.resolverUnavailable++;
+			break;
 		case DnsParseStatus::NetworkError:
 			stats.errors++;
+			stats.transportErrors++;
 			break;
 		}
 	}

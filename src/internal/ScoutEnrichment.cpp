@@ -66,6 +66,43 @@ size_t oldestMetadataIndex(const ScoutDeviceDetails &details) {
 	return oldest;
 }
 
+size_t oldestPersistentIdentityIndex(const ScoutDeviceDetails &details) {
+	size_t oldest = 0;
+	for (size_t i = 1; i < details.persistentIdentityCount; ++i) {
+		if (details.persistentIdentities[i].lastSeenAtMs <
+		    details.persistentIdentities[oldest].lastSeenAtMs) {
+			oldest = i;
+		}
+	}
+	return oldest;
+}
+
+void syncLegacyPersistentIdentity(ScoutDeviceDetails &details) {
+	details.persistentDeviceId[0] = '\0';
+	details.persistentDeviceNamespace[0] = '\0';
+	details.persistentDeviceIdSource = ScoutObservationSource::None;
+	details.persistentDeviceIdExpiresAtMs = 0;
+	if (details.persistentIdentityCount == 0) {
+		return;
+	}
+	size_t newest = 0;
+	for (size_t i = 1; i < details.persistentIdentityCount; ++i) {
+		if (details.persistentIdentities[i].lastSeenAtMs >
+		    details.persistentIdentities[newest].lastSeenAtMs) {
+			newest = i;
+		}
+	}
+	const auto &identity = details.persistentIdentities[newest];
+	copyText(details.persistentDeviceId, sizeof(details.persistentDeviceId), identity.id);
+	copyText(
+	    details.persistentDeviceNamespace,
+	    sizeof(details.persistentDeviceNamespace),
+	    identity.nameSpace
+	);
+	details.persistentDeviceIdSource = identity.source;
+	details.persistentDeviceIdExpiresAtMs = identity.expiresAtMs;
+}
+
 int namePriority(ScoutNameSource source) {
 	switch (source) {
 	case ScoutNameSource::SsdpFriendlyName:
@@ -326,6 +363,57 @@ upsertMetadata(ScoutDeviceDetails &details, const ScoutMetadataEntry &incoming) 
 	return replacing ? EnrichmentUpsertResult::Replaced : EnrichmentUpsertResult::Changed;
 }
 
+EnrichmentUpsertResult upsertPersistentIdentity(
+    ScoutDeviceDetails &details,
+    const char *nameSpace,
+    const char *id,
+    ScoutObservationSource source,
+    uint64_t observedAtMs,
+    uint64_t expiresAtMs
+) {
+	if (nameSpace == nullptr || nameSpace[0] == '\0' || id == nullptr || id[0] == '\0') {
+		return EnrichmentUpsertResult::Unchanged;
+	}
+
+	for (size_t i = 0; i < details.persistentIdentityCount; ++i) {
+		auto &identity = details.persistentIdentities[i];
+		if (!textEqualsIgnoreCase(identity.nameSpace, nameSpace)) {
+			continue;
+		}
+		const bool idChanged = !textEqualsIgnoreCase(identity.id, id);
+		const bool sourceChanged = identity.source != source;
+		if (idChanged) {
+			copyText(identity.id, sizeof(identity.id), id);
+			identity.firstSeenAtMs = observedAtMs;
+		}
+		if (sourceChanged) {
+			identity.source = source;
+		}
+		identity.lastSeenAtMs = observedAtMs;
+		identity.expiresAtMs = expiresAtMs;
+		if (identity.firstSeenAtMs == 0) {
+			identity.firstSeenAtMs = observedAtMs;
+		}
+		syncLegacyPersistentIdentity(details);
+		return idChanged || sourceChanged ? EnrichmentUpsertResult::Changed
+		                                  : EnrichmentUpsertResult::Unchanged;
+	}
+
+	const bool replacing = details.persistentIdentityCount >= SCOUT_MAX_PERSISTENT_IDENTITIES;
+	const size_t index =
+	    replacing ? oldestPersistentIdentityIndex(details) : details.persistentIdentityCount++;
+	auto &identity = details.persistentIdentities[index];
+	identity = {};
+	copyText(identity.nameSpace, sizeof(identity.nameSpace), nameSpace);
+	copyText(identity.id, sizeof(identity.id), id);
+	identity.source = source;
+	identity.firstSeenAtMs = observedAtMs;
+	identity.lastSeenAtMs = observedAtMs;
+	identity.expiresAtMs = expiresAtMs;
+	syncLegacyPersistentIdentity(details);
+	return replacing ? EnrichmentUpsertResult::Replaced : EnrichmentUpsertResult::Changed;
+}
+
 bool upsertIpv6(ScoutEndpoint &endpoint, const ScoutIpv6Address &address) {
 	if (!address.valid()) {
 		return false;
@@ -403,14 +491,29 @@ ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs) 
 	    details.serialNumberExpiresAtMs,
 	    nowMs
 	);
-	const bool persistentIdExpired = expireTextField(
-	    details.persistentDeviceId,
-	    details.persistentDeviceIdSource,
-	    details.persistentDeviceIdExpiresAtMs,
-	    nowMs
-	);
-	if (persistentIdExpired) {
-		details.persistentDeviceNamespace[0] = '\0';
+	bool persistentIdExpired = false;
+	if (details.persistentIdentityCount > 0) {
+		for (size_t i = 0; i < details.persistentIdentityCount;) {
+			if (expired(details.persistentIdentities[i].expiresAtMs, nowMs)) {
+				removeAt(details.persistentIdentities, details.persistentIdentityCount, i);
+				persistentIdExpired = true;
+			} else {
+				i++;
+			}
+		}
+		if (persistentIdExpired) {
+			syncLegacyPersistentIdentity(details);
+		}
+	} else {
+		persistentIdExpired = expireTextField(
+		    details.persistentDeviceId,
+		    details.persistentDeviceIdSource,
+		    details.persistentDeviceIdExpiresAtMs,
+		    nowMs
+		);
+		if (persistentIdExpired) {
+			details.persistentDeviceNamespace[0] = '\0';
+		}
 	}
 	const bool upnpUdnExpired =
 	    expireTextField(details.upnpUdn, details.upnpUdnSource, details.upnpUdnExpiresAtMs, nowMs);
@@ -492,21 +595,52 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 	    source.serialNumberSource,
 	    source.serialNumberExpiresAtMs
 	);
-	const bool hadPersistentId = target.persistentDeviceId[0] != '\0';
-	mergeText(
-	    target.persistentDeviceId,
-	    target.persistentDeviceIdSource,
-	    target.persistentDeviceIdExpiresAtMs,
-	    source.persistentDeviceId,
-	    source.persistentDeviceIdSource,
-	    source.persistentDeviceIdExpiresAtMs
-	);
-	if (!hadPersistentId && target.persistentDeviceId[0] != '\0') {
-		copyText(
-		    target.persistentDeviceNamespace,
-		    sizeof(target.persistentDeviceNamespace),
-		    source.persistentDeviceNamespace
+	if (source.persistentIdentityCount > 0) {
+		for (size_t i = 0; i < source.persistentIdentityCount; ++i) {
+			const auto &identity = source.persistentIdentities[i];
+			(void)upsertPersistentIdentity(
+			    target,
+			    identity.nameSpace,
+			    identity.id,
+			    identity.source,
+			    identity.lastSeenAtMs,
+			    identity.expiresAtMs
+			);
+			const uint64_t sourceFirstSeen =
+			    identity.firstSeenAtMs != 0 ? identity.firstSeenAtMs : identity.lastSeenAtMs;
+			for (size_t targetIndex = 0; targetIndex < target.persistentIdentityCount;
+			     ++targetIndex) {
+				auto &targetIdentity = target.persistentIdentities[targetIndex];
+				if (!textEqualsIgnoreCase(targetIdentity.nameSpace, identity.nameSpace) ||
+				    !textEqualsIgnoreCase(targetIdentity.id, identity.id)) {
+					continue;
+				}
+				const bool missingFirstSeen = targetIdentity.firstSeenAtMs == 0;
+				const bool sourceFirstSeenIsEarlier =
+				    sourceFirstSeen < targetIdentity.firstSeenAtMs;
+				if (sourceFirstSeen != 0 && (missingFirstSeen || sourceFirstSeenIsEarlier)) {
+					targetIdentity.firstSeenAtMs = sourceFirstSeen;
+				}
+				break;
+			}
+		}
+	} else {
+		const bool hadPersistentId = target.persistentDeviceId[0] != '\0';
+		mergeText(
+		    target.persistentDeviceId,
+		    target.persistentDeviceIdSource,
+		    target.persistentDeviceIdExpiresAtMs,
+		    source.persistentDeviceId,
+		    source.persistentDeviceIdSource,
+		    source.persistentDeviceIdExpiresAtMs
 		);
+		if (!hadPersistentId && target.persistentDeviceId[0] != '\0') {
+			copyText(
+			    target.persistentDeviceNamespace,
+			    sizeof(target.persistentDeviceNamespace),
+			    source.persistentDeviceNamespace
+			);
+		}
 	}
 	mergeText(
 	    target.upnpUdn,
@@ -779,14 +913,33 @@ bool identityDetailsContradict(
 		return true;
 	}
 
-	const bool persistentNamespacesMatch =
-	    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
-	     rightDetails.persistentDeviceNamespace[0] == '\0') ||
-	    sameNonEmpty(leftDetails.persistentDeviceNamespace, rightDetails.persistentDeviceNamespace);
-	if (leftDetails.persistentDeviceId[0] != '\0' && rightDetails.persistentDeviceId[0] != '\0' &&
-	    persistentNamespacesMatch &&
-	    !textEqualsIgnoreCase(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
-		return true;
+	if (leftDetails.persistentIdentityCount > 0 || rightDetails.persistentIdentityCount > 0) {
+		for (size_t left = 0; left < leftDetails.persistentIdentityCount; ++left) {
+			for (size_t right = 0; right < rightDetails.persistentIdentityCount; ++right) {
+				const auto &a = leftDetails.persistentIdentities[left];
+				const auto &b = rightDetails.persistentIdentities[right];
+				if (sameNonEmpty(a.nameSpace, b.nameSpace) && a.id[0] != '\0' && b.id[0] != '\0' &&
+				    !textEqualsIgnoreCase(a.id, b.id)) {
+					return true;
+				}
+			}
+		}
+	} else {
+		const bool persistentNamespacesMatch =
+		    (leftDetails.persistentDeviceNamespace[0] == '\0' &&
+		     rightDetails.persistentDeviceNamespace[0] == '\0') ||
+		    sameNonEmpty(
+		        leftDetails.persistentDeviceNamespace,
+		        rightDetails.persistentDeviceNamespace
+		    );
+		if (leftDetails.persistentDeviceId[0] != '\0' &&
+		    rightDetails.persistentDeviceId[0] != '\0' && persistentNamespacesMatch &&
+		    !textEqualsIgnoreCase(
+		        leftDetails.persistentDeviceId,
+		        rightDetails.persistentDeviceId
+		    )) {
+			return true;
+		}
 	}
 
 	const bool trustedSerialPair =
@@ -834,11 +987,26 @@ bool identityRelation(
 		};
 		return true;
 	}
-	if (sameNonEmpty(
-	        leftDetails.persistentDeviceNamespace,
-	        rightDetails.persistentDeviceNamespace
-	    ) &&
-	    sameNonEmpty(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
+	if (leftDetails.persistentIdentityCount > 0 && rightDetails.persistentIdentityCount > 0) {
+		for (size_t left = 0; left < leftDetails.persistentIdentityCount; ++left) {
+			for (size_t right = 0; right < rightDetails.persistentIdentityCount; ++right) {
+				const auto &a = leftDetails.persistentIdentities[left];
+				const auto &b = rightDetails.persistentIdentities[right];
+				if (sameNonEmpty(a.nameSpace, b.nameSpace) && sameNonEmpty(a.id, b.id)) {
+					out.evidence = {
+					    .type = ScoutIdentityEvidenceType::MdnsPersistentId,
+					    .confidence = ScoutIdentityConfidence::Strong,
+					    .source = ScoutObservationSource::Mdns,
+					};
+					return true;
+				}
+			}
+		}
+	} else if (sameNonEmpty(
+	               leftDetails.persistentDeviceNamespace,
+	               rightDetails.persistentDeviceNamespace
+	           ) &&
+	           sameNonEmpty(leftDetails.persistentDeviceId, rightDetails.persistentDeviceId)) {
 		out.evidence = {
 		    .type = ScoutIdentityEvidenceType::MdnsPersistentId,
 		    .confidence = ScoutIdentityConfidence::Strong,

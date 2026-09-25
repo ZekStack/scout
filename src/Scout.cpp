@@ -157,15 +157,22 @@ struct ScoutImpl {
 
 	ScoutEventCallback callback;
 	ScoutOuiLookupCallback ouiLookup;
+	ScoutDnsServerLookupCallback dnsServerLookup;
 	ScoutEvent eventScratch[2]{};
 	size_t icmpCursor = 0;
 	size_t reverseDnsCursor = 0;
-	size_t mdnsServiceCursor = 0;
 	size_t icmpRunRemaining = 0;
-	size_t mdnsRunRemaining = 0;
 	size_t reverseDnsRunRemaining = 0;
+	uint64_t icmpTopologyGeneration = 0;
+	uint64_t reverseDnsTopologyGeneration = 0;
+	scout_internal::MdnsProviderState mdnsState{};
 	scout_internal::SsdpProviderState ssdpState{};
 	scout_internal::NbnsProviderState nbnsState{};
+	size_t ouiCursor = 0;
+	size_t ouiRemaining = 0;
+	uint64_t ouiTopologyGeneration = 0;
+	bool ouiActive = false;
+	uint64_t registryTopologyGeneration = 1;
 
 	std::atomic<uint64_t> nextScanAt{UINT64_MAX};
 	std::atomic<uint64_t> nextIcmpAt{UINT64_MAX};
@@ -173,6 +180,7 @@ struct ScoutImpl {
 	std::atomic<uint64_t> nextSsdpAt{UINT64_MAX};
 	std::atomic<uint64_t> nextNbnsAt{UINT64_MAX};
 	std::atomic<uint64_t> nextReverseDnsAt{UINT64_MAX};
+	std::atomic<uint64_t> nextOuiAt{UINT64_MAX};
 	std::atomic<uint64_t> nextEnrichmentExpiryAt{UINT64_MAX};
 	std::atomic<bool> processingActive{false};
 	std::atomic<Strata::FreeRTOS::TaskHandle> processingOwner{nullptr};
@@ -184,6 +192,7 @@ struct ScoutImpl {
 		uint64_t startedAt = 0;
 		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
 		size_t interfaceCount = 0;
+		bool interfacesTruncated = false;
 		size_t interfaceIndex = 0;
 		bool interfacePrepared = false;
 		size_t targetCount = 0;
@@ -376,20 +385,6 @@ struct ScoutImpl {
 		}
 	}
 
-	bool waitInterruptible(uint32_t durationMs) {
-		const uint64_t startedAt = nowMs();
-		while (!stopRequested.load()) {
-			const uint64_t elapsed = nowMs() - startedAt;
-			if (elapsed >= durationMs) {
-				return true;
-			}
-			const uint32_t remaining =
-			    static_cast<uint32_t>(std::min<uint64_t>(durationMs - elapsed, StopPollMs));
-			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(remaining, 1)));
-		}
-		return false;
-	}
-
 	void recordNetworkError(uint64_t scanId, const char *message) {
 		emitSimple(ScoutEventType::Error, ScoutStatus::InternalError, scanId, message);
 	}
@@ -471,6 +466,13 @@ struct ScoutImpl {
 		return SIZE_MAX;
 	}
 
+	void bumpTopologyLocked() {
+		registryTopologyGeneration++;
+		if (registryTopologyGeneration == 0) {
+			registryTopologyGeneration = 1;
+		}
+	}
+
 	void removeDeviceAtLocked(size_t index) {
 		if (index >= deviceCount) {
 			return;
@@ -485,6 +487,7 @@ struct ScoutImpl {
 		deviceCount--;
 		diag.deviceCount = deviceCount;
 		identityDirty = true;
+		bumpTopologyLocked();
 	}
 
 	void deduplicateRegistryLocked() {
@@ -539,6 +542,7 @@ struct ScoutImpl {
 							    left.ipv4.value
 							);
 							diag.endpointReassignmentCount++;
+							bumpTopologyLocked();
 							changed = true;
 							break;
 						}
@@ -644,6 +648,7 @@ struct ScoutImpl {
 					info.observationCount = 1;
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
+					bumpTopologyLocked();
 				}
 			} else {
 				auto &info = devices[index].info;
@@ -666,6 +671,7 @@ struct ScoutImpl {
 				                                     ipv4
 				                                 )) {
 					diag.endpointReassignmentCount++;
+					bumpTopologyLocked();
 					auto &event = events[eventCount++];
 					event.type = ScoutEventType::DeviceChanged;
 					event.status = ScoutStatus::Ok;
@@ -689,6 +695,9 @@ struct ScoutImpl {
 				    source,
 				    confirmed
 				);
+				if (endpointChanged && !discovered) {
+					bumpTopologyLocked();
+				}
 
 				if (discovered) {
 					auto &event = events[eventCount++];
@@ -767,6 +776,11 @@ struct ScoutImpl {
 		target.malformedResponses += run.malformedResponses;
 		target.serverErrors += run.serverErrors;
 		target.droppedObservations += run.dropped;
+		target.resolverUnavailable += run.resolverUnavailable;
+		target.identityConflicts += run.identityConflicts;
+		diag.dnsResolverUnavailable += run.resolverUnavailable;
+		diag.ssdpIdentityConflicts += run.identityConflicts;
+		diag.providerTopologyRestarts += run.topologyRestarts;
 		if (run.budgetYielded) {
 			target.budgetYields++;
 		}
@@ -902,17 +916,12 @@ struct ScoutImpl {
 		}
 
 		const auto incomingConfidence = static_cast<uint8_t>(relation.evidence.confidence);
-		const auto strongConfidence = static_cast<uint8_t>(ScoutIdentityConfidence::Strong);
 		size_t replacement = SIZE_MAX;
 		uint8_t replacementConfidence = static_cast<uint8_t>(0xFFU);
 		for (size_t i = 0; i < identityRelationCountValue; ++i) {
 			const auto storedConfidence =
 			    static_cast<uint8_t>(identityRelations[i].evidence.confidence);
-			const bool canReplace =
-			    incomingConfidence >= strongConfidence
-			        ? storedConfidence < strongConfidence
-			        : incomingConfidence > storedConfidence && storedConfidence < strongConfidence;
-			if (canReplace && storedConfidence < replacementConfidence) {
+			if (incomingConfidence > storedConfidence && storedConfidence < replacementConfidence) {
 				replacement = i;
 				replacementConfidence = storedConfidence;
 			}
@@ -1269,27 +1278,17 @@ struct ScoutImpl {
 					    details.serialNumberExpiresAtMs,
 					    ScoutDeviceChange::Identity
 					);
-					updateText(
-					    details.persistentDeviceId,
-					    sizeof(details.persistentDeviceId),
-					    observation.persistentDeviceId,
-					    details.persistentDeviceIdSource,
-					    details.persistentDeviceIdExpiresAtMs,
-					    ScoutDeviceChange::Identity
-					);
 					if (observation.persistentDeviceId[0] != '\0' &&
 					    observation.persistentDeviceNamespace[0] != '\0') {
-						const bool namespaceChanged = std::strncmp(
-						                                  details.persistentDeviceNamespace,
-						                                  observation.persistentDeviceNamespace,
-						                                  sizeof(details.persistentDeviceNamespace)
-						                              ) != 0;
-						scout_internal::copyText(
-						    details.persistentDeviceNamespace,
-						    sizeof(details.persistentDeviceNamespace),
-						    observation.persistentDeviceNamespace
+						const auto result = scout_internal::upsertPersistentIdentity(
+						    details,
+						    observation.persistentDeviceNamespace,
+						    observation.persistentDeviceId,
+						    observation.source,
+						    observedAt,
+						    observation.identityExpiresAtMs
 						);
-						if (namespaceChanged) {
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
 							changes |= ScoutDeviceChange::Identity;
 						}
 					}
@@ -1415,13 +1414,37 @@ struct ScoutImpl {
 		}
 	}
 
+	uint64_t topologyGenerationSnapshot() {
+		ScoutLock lock(mutex);
+		return lock ? registryTopologyGeneration : 0;
+	}
+
+	ScoutDnsServerLookupCallback dnsServerLookupSnapshot() {
+		ScoutLock lock(mutex);
+		return lock ? dnsServerLookup : ScoutDnsServerLookupCallback{};
+	}
+
+	void recordTopologyRestart() {
+		ScoutLock lock(mutex);
+		if (lock) {
+			diag.providerTopologyRestarts++;
+		}
+	}
+
 	bool performIcmpProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (icmpRunRemaining > 0 && icmpTopologyGeneration != generation) {
+			icmpCursor = 0;
+			icmpRunRemaining = 0;
+			recordTopologyRestart();
+		}
+		icmpTopologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
 		ScoutIcmpConfig runConfig = config.providers.icmp;
 		if (icmpRunRemaining > 0) {
 			runConfig.maxTargetsPerRun = icmpRunRemaining;
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runIcmpProvider(
 		    providerTargets,
 		    count,
@@ -1434,11 +1457,8 @@ struct ScoutImpl {
 		if (icmpRunRemaining == 0) {
 			icmpRunRemaining = stats.plannedUnits;
 		}
-		if (stats.workUnits >= icmpRunRemaining) {
-			icmpRunRemaining = 0;
-		} else {
-			icmpRunRemaining -= stats.workUnits;
-		}
+		icmpRunRemaining =
+		    stats.workUnits >= icmpRunRemaining ? 0 : icmpRunRemaining - stats.workUnits;
 		const bool continueRun = stats.budgetYielded && !stats.cancelled && icmpRunRemaining > 0;
 		if (!continueRun) {
 			icmpRunRemaining = 0;
@@ -1449,41 +1469,45 @@ struct ScoutImpl {
 	}
 
 	bool performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
-		const size_t count = snapshotProviderTargets();
-		ScoutMdnsConfig runConfig = config.providers.mdns;
-		if (mdnsRunRemaining > 0) {
-			runConfig.maxServiceQueriesPerRun = mdnsRunRemaining;
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (mdnsState.active && mdnsState.topologyGeneration != generation) {
+			const size_t cursor = mdnsState.serviceCursor;
+			mdnsState = {};
+			mdnsState.serviceCursor = cursor;
+			recordTopologyRestart();
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		mdnsState.topologyGeneration = generation;
+		const size_t count = snapshotProviderTargets();
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runMdnsProvider(
 		    providerTargets,
 		    count,
-		    mdnsServiceCursor,
-		    runConfig,
+		    mdnsState,
+		    config.providers.mdns,
 		    &ScoutImpl::providerSink,
 		    this,
 		    &control
 		);
-		if (mdnsRunRemaining == 0) {
-			mdnsRunRemaining = stats.plannedUnits;
-		}
-		if (stats.workUnits >= mdnsRunRemaining) {
-			mdnsRunRemaining = 0;
-		} else {
-			mdnsRunRemaining -= stats.workUnits;
-		}
-		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsRunRemaining > 0;
-		if (!continueRun) {
-			mdnsRunRemaining = 0;
-		}
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsState.active;
 		accumulateProviderStats(diag.mdns, stats);
 		flushIdentityIfDirty();
 		return continueRun;
 	}
 
 	bool performSsdpProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (ssdpState.active && ssdpState.topologyGeneration != generation) {
+			ssdpState = {};
+			recordTopologyRestart();
+		}
+		ssdpState.topologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		ScoutDnsServerLookupCallback dnsLookup = dnsServerLookupSnapshot();
+		const scout_internal::ProviderRunControl control{
+		    &stopRequested,
+		    deadlineAt,
+		    dnsLookup ? &dnsLookup : nullptr,
+		};
 		const auto stats = scout_internal::runSsdpProvider(
 		    providerTargets,
 		    count,
@@ -1495,16 +1519,24 @@ struct ScoutImpl {
 		    this,
 		    &control
 		);
-		const bool continueRun =
-		    stats.budgetYielded && !stats.cancelled && ssdpState.remainingInterfaces > 0;
+		const bool continueRun = stats.budgetYielded && !stats.cancelled && ssdpState.active &&
+		                         ssdpState.remainingInterfaces > 0;
 		accumulateProviderStats(diag.ssdp, stats);
 		flushIdentityIfDirty();
 		return continueRun;
 	}
 
 	bool performNbnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (nbnsState.active && nbnsState.topologyGeneration != generation) {
+			const size_t cursor = nbnsState.targetCursor;
+			nbnsState = {};
+			nbnsState.targetCursor = cursor;
+			recordTopologyRestart();
+		}
+		nbnsState.topologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt, nullptr};
 		const auto stats = scout_internal::runNbnsProvider(
 		    providerTargets,
 		    count,
@@ -1521,12 +1553,24 @@ struct ScoutImpl {
 	}
 
 	bool performReverseDnsProvider(uint64_t deadlineAt = UINT64_MAX) {
+		const uint64_t generation = topologyGenerationSnapshot();
+		if (reverseDnsRunRemaining > 0 && reverseDnsTopologyGeneration != generation) {
+			reverseDnsCursor = 0;
+			reverseDnsRunRemaining = 0;
+			recordTopologyRestart();
+		}
+		reverseDnsTopologyGeneration = generation;
 		const size_t count = snapshotProviderTargets();
 		ScoutReverseDnsConfig runConfig = config.providers.reverseDns;
 		if (reverseDnsRunRemaining > 0) {
 			runConfig.maxTargetsPerRun = reverseDnsRunRemaining;
 		}
-		const scout_internal::ProviderRunControl control{&stopRequested, deadlineAt};
+		ScoutDnsServerLookupCallback dnsLookup = dnsServerLookupSnapshot();
+		const scout_internal::ProviderRunControl control{
+		    &stopRequested,
+		    deadlineAt,
+		    dnsLookup ? &dnsLookup : nullptr,
+		};
 		const auto stats = scout_internal::runReverseDnsProvider(
 		    providerTargets,
 		    count,
@@ -1552,41 +1596,71 @@ struct ScoutImpl {
 		return continueRun;
 	}
 
-	void performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
+	bool performOuiProvider(uint64_t deadlineAt = UINT64_MAX) {
 		if (!config.providers.oui) {
-			return;
+			ouiActive = false;
+			ouiRemaining = 0;
+			return false;
 		}
 		ScoutOuiLookupCallback resolver;
+		uint64_t generation = 0;
+		size_t currentDeviceCount = 0;
 		{
 			ScoutLock lock(mutex);
 			if (!lock) {
-				return;
+				return false;
 			}
 			resolver = ouiLookup;
+			generation = registryTopologyGeneration;
+			currentDeviceCount = deviceCount;
 		}
-		if (!resolver) {
-			return;
+		if (!resolver || currentDeviceCount == 0) {
+			ouiActive = false;
+			ouiRemaining = 0;
+			return false;
+		}
+		if (ouiActive && ouiTopologyGeneration != generation) {
+			ouiActive = false;
+			ouiRemaining = 0;
+			recordTopologyRestart();
+		}
+		if (!ouiActive) {
+			ouiActive = true;
+			ouiCursor = 0;
+			ouiRemaining = currentDeviceCount;
+			ouiTopologyGeneration = generation;
 		}
 
-		uint64_t observations = 0;
-		for (size_t index = 0;; ++index) {
-			if (stopRequested.load(std::memory_order_acquire) ||
-			    (deadlineAt != UINT64_MAX && nowMs() >= deadlineAt)) {
+		scout_internal::ProviderRunStats stats{};
+		stats.plannedUnits = ouiRemaining;
+		while (ouiRemaining > 0) {
+			if (stopRequested.load(std::memory_order_acquire)) {
+				stats.cancelled = true;
 				break;
 			}
+			if (deadlineAt != UINT64_MAX && nowMs() >= deadlineAt) {
+				stats.budgetYielded = true;
+				break;
+			}
+
 			ScoutMacAddress mac{};
 			bool shouldLookup = false;
 			{
 				ScoutLock lock(mutex);
-				if (!lock || index >= deviceCount) {
+				if (!lock || deviceCount == 0) {
+					ouiRemaining = 0;
 					break;
 				}
+				const size_t index = ouiCursor % deviceCount;
+				ouiCursor = (ouiCursor + 1) % deviceCount;
+				ouiRemaining--;
 				const auto &record = devices[index];
 				mac = record.info.mac;
 				const bool knownVendor = record.details && record.details->vendor.known;
 				shouldLookup = !knownVendor && !scout_internal::macIsLocallyAdministered(mac) &&
 				               !scout_internal::macIsMulticast(mac);
 			}
+			stats.workUnits++;
 			if (!shouldLookup) {
 				continue;
 			}
@@ -1628,156 +1702,22 @@ struct ScoutImpl {
 				event.device = devices[currentIndex].info;
 				event.message = "device vendor enriched";
 				emitChange = true;
-				observations++;
+				stats.observations++;
 			}
 			if (emitChange) {
 				emit(event);
 			}
 		}
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.oui.runs++;
-				diag.oui.observations += observations;
-			}
+
+		const bool continueRun =
+		    stats.budgetYielded && !stats.cancelled && ouiActive && ouiRemaining > 0;
+		if (!continueRun) {
+			ouiActive = false;
+			ouiRemaining = 0;
 		}
+		accumulateProviderStats(diag.oui, stats);
 		flushIdentityIfDirty();
-	}
-
-	ScoutStatus
-	scanInterface(const scout_internal::InterfaceSnapshot &interfaceSnapshot, uint64_t scanId) {
-		const size_t targetCount = buildTargets(interfaceSnapshot);
-		if (targetCount == SIZE_MAX) {
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::InvalidConfig,
-			    scanId,
-			    "subnet exceeds maxHostsPerSubnet"
-			);
-			return ScoutStatus::InvalidConfig;
-		}
-		if (targetCount == 0) {
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::NetworkUnavailable,
-			    scanId,
-			    "subnet has no ARP targets"
-			);
-			return ScoutStatus::NetworkUnavailable;
-		}
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.hostsConsidered += targetCount;
-			}
-		}
-
-		const size_t batchSize = mappingCapacity;
-		bool hadRequestFailures = false;
-		for (size_t offset = 0; offset < targetCount && !stopRequested.load();
-		     offset += batchSize) {
-			const size_t count = std::min(batchSize, targetCount - offset);
-			const uint32_t *batch = targets + offset;
-
-			const esp_err_t beforeResult = scout_internal::lookupArpMappings(
-			    interfaceSnapshot.index,
-			    batch,
-			    count,
-			    beforeMappings
-			);
-			if (beforeResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to inspect ARP cache");
-				return ScoutStatus::InternalError;
-			}
-
-			scout_internal::ArpRequestStats requestStats;
-			const esp_err_t requestResult =
-			    scout_internal::requestArp(interfaceSnapshot.index, batch, count, requestStats);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.arpRequestsSent += requestStats.sent;
-					diag.arpRequestFailures += requestStats.failed;
-				}
-			}
-			hadRequestFailures |= requestStats.failed > 0;
-			if (requestResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to send ARP requests");
-				return ScoutStatus::InternalError;
-			}
-
-			if (!waitInterruptible(config.arpResponseWaitMs)) {
-				return ScoutStatus::Cancelled;
-			}
-
-			const esp_err_t afterResult = scout_internal::lookupArpMappings(
-			    interfaceSnapshot.index,
-			    batch,
-			    count,
-			    afterMappings
-			);
-			if (afterResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to read ARP results");
-				return ScoutStatus::InternalError;
-			}
-
-			for (size_t i = 0; i < count; ++i) {
-				if (!afterMappings[i].found) {
-					continue;
-				}
-
-				const bool wasCached =
-				    beforeMappings[i].found &&
-				    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
-				const bool confirmed = !wasCached;
-				const ScoutObservationSource source =
-				    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache;
-
-				{
-					ScoutLock lock(mutex);
-					if (lock) {
-						diag.arpCacheHits++;
-						if (confirmed) {
-							diag.arpProbeDiscoveries++;
-						}
-					}
-				}
-
-				observe(
-				    interfaceSnapshot,
-				    batch[i],
-				    afterMappings[i].mac,
-				    source,
-				    confirmed,
-				    scanId
-				);
-			}
-
-			if (config.interBatchDelayMs > 0 && !waitInterruptible(config.interBatchDelayMs)) {
-				return ScoutStatus::Cancelled;
-			}
-		}
-		if (stopRequested.load()) {
-			return ScoutStatus::Cancelled;
-		}
-		if (hadRequestFailures) {
-			recordNetworkError(scanId, "one or more ARP requests failed");
-			return ScoutStatus::InternalError;
-		}
-		return ScoutStatus::Ok;
+		return continueRun;
 	}
 
 	void finishScan(uint64_t scanId, uint64_t startedAt, ScoutStatus status, const char *message) {
@@ -1791,110 +1731,6 @@ struct ScoutImpl {
 			}
 		}
 		emitSimple(ScoutEventType::ScanCompleted, status, scanId, message);
-	}
-
-	void performScan() {
-		const uint64_t scanId = nextScanId++;
-		const uint64_t startedAt = nowMs();
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.scanCount++;
-			}
-		}
-		emitSimple(ScoutEventType::ScanStarted, ScoutStatus::Ok, scanId, "scan started");
-
-		maintainRegistry(scanId);
-		if (stopRequested.load()) {
-			finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
-			return;
-		}
-
-		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
-		size_t interfaceCount = 0;
-		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
-		    interfaces,
-		    scout_internal::MaxInterfaces,
-		    interfaceCount
-		);
-		if (interfaceResult != ESP_OK) {
-			updateCoverage(false, 0, scanId);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			recordNetworkError(scanId, "failed to enumerate network interfaces");
-			finishScan(
-			    scanId,
-			    startedAt,
-			    ScoutStatus::InternalError,
-			    "scan failed while enumerating network interfaces"
-			);
-			return;
-		}
-
-		if (interfaceCount == 0) {
-			updateCoverage(false, 0, scanId);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::NetworkUnavailable,
-			    scanId,
-			    "no eligible ARP-capable interface"
-			);
-			finishScan(
-			    scanId,
-			    startedAt,
-			    ScoutStatus::NetworkUnavailable,
-			    "scan completed without an eligible interface"
-			);
-			return;
-		}
-
-		ScoutStatus scanStatus = ScoutStatus::Ok;
-		for (size_t i = 0; i < interfaceCount; ++i) {
-			if (stopRequested.load()) {
-				scanStatus = ScoutStatus::Cancelled;
-				break;
-			}
-
-			const ScoutStatus interfaceStatus = scanInterface(interfaces[i], scanId);
-			if (interfaceStatus == ScoutStatus::Cancelled) {
-				scanStatus = ScoutStatus::Cancelled;
-				break;
-			}
-			if (interfaceStatus == ScoutStatus::InternalError ||
-			    (scanStatus == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
-				scanStatus = interfaceStatus;
-			}
-		}
-
-		if (stopRequested.load()) {
-			scanStatus = ScoutStatus::Cancelled;
-		}
-
-		if (scanStatus != ScoutStatus::Cancelled) {
-			// A partial or failed sweep cannot support absence inference.
-			updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
-		}
-
-		finishScan(
-		    scanId,
-		    startedAt,
-		    scanStatus,
-		    scanStatus == ScoutStatus::Ok ? "scan completed"
-		    : scanStatus == ScoutStatus::Cancelled
-		        ? "scan cancelled"
-		        : "scan completed with skipped or failed interfaces"
-		);
 	}
 
 	void advanceIncrementalInterface(ScoutStatus interfaceStatus) {
@@ -1952,7 +1788,8 @@ struct ScoutImpl {
 		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
 		    scanProgress.interfaces,
 		    scout_internal::MaxInterfaces,
-		    scanProgress.interfaceCount
+		    scanProgress.interfaceCount,
+		    &scanProgress.interfacesTruncated
 		);
 		if (interfaceResult != ESP_OK) {
 			updateCoverage(false, 0, scanProgress.scanId);
@@ -1972,6 +1809,23 @@ struct ScoutImpl {
 			scanProgress.active = false;
 			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 			return false;
+		}
+
+		if (scanProgress.interfacesTruncated) {
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.interfaceLimitDrops++;
+					diag.skippedScanCount++;
+				}
+			}
+			scanProgress.status = ScoutStatus::InvalidConfig;
+			emitSimple(
+			    ScoutEventType::ScanSkipped,
+			    ScoutStatus::InvalidConfig,
+			    scanProgress.scanId,
+			    "eligible interface count exceeds Scout limit"
+			);
 		}
 
 		if (scanProgress.interfaceCount == 0) {
@@ -2027,6 +1881,7 @@ struct ScoutImpl {
 				        : "scan completed with skipped or failed interfaces"
 				);
 				scanProgress.active = false;
+				incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 				return true;
 			}
 
@@ -2236,6 +2091,7 @@ struct ScoutImpl {
 		    config.providers.reverseDns.enabled ? startedAt : UINT64_MAX,
 		    std::memory_order_release
 		);
+		nextOuiAt.store(UINT64_MAX, std::memory_order_release);
 		nextEnrichmentExpiryAt.store(startedAt + EnrichmentExpiryPollMs, std::memory_order_release);
 	}
 
@@ -2261,6 +2117,7 @@ struct ScoutImpl {
 		     nextSsdpAt.load(std::memory_order_acquire),
 		     nextNbnsAt.load(std::memory_order_acquire),
 		     nextReverseDnsAt.load(std::memory_order_acquire),
+		     nextOuiAt.load(std::memory_order_acquire),
 		     nextEnrichmentExpiryAt.load(std::memory_order_acquire)}
 		);
 		if (nextWorkAt == UINT64_MAX) {
@@ -2317,8 +2174,23 @@ struct ScoutImpl {
 					break;
 				}
 				expireEnrichmentRecords();
-				performOuiProvider(deadlineAt);
+				const bool continueOui = performOuiProvider(deadlineAt);
+				nextOuiAt.store(continueOui ? nowMs() : UINT64_MAX, std::memory_order_release);
 				nextScanAt.store(nowMs() + config.scanIntervalMs, std::memory_order_release);
+				if (continueOui) {
+					budgetYield = true;
+					break;
+				}
+				continue;
+			}
+
+			if (current >= nextOuiAt.load(std::memory_order_acquire)) {
+				const bool continueOui = performOuiProvider(deadlineAt);
+				nextOuiAt.store(continueOui ? nowMs() : UINT64_MAX, std::memory_order_release);
+				if (continueOui) {
+					budgetYield = true;
+					break;
+				}
 				continue;
 			}
 
@@ -2423,12 +2295,19 @@ struct ScoutImpl {
 			vTaskDelay(1);
 		}
 
+		bool enterRunLoop = false;
 		{
 			ScoutLock lock(mutex);
-			if (lock) {
+			if (lock && state == ScoutState::Starting &&
+			    !stopRequested.load(std::memory_order_acquire)) {
 				state = ScoutState::Running;
 				diag.state = state;
+				enterRunLoop = true;
 			}
+		}
+		if (!enterRunLoop) {
+			(void)stopped.give();
+			suspendForever();
 		}
 
 		while (!stopRequested.load(std::memory_order_acquire)) {
@@ -2544,12 +2423,18 @@ struct ScoutImpl {
 		identityRelationCountValue = 0;
 		icmpCursor = 0;
 		reverseDnsCursor = 0;
-		mdnsServiceCursor = 0;
 		icmpRunRemaining = 0;
-		mdnsRunRemaining = 0;
 		reverseDnsRunRemaining = 0;
+		icmpTopologyGeneration = 0;
+		reverseDnsTopologyGeneration = 0;
+		mdnsState = {};
 		ssdpState = {};
 		nbnsState = {};
+		ouiCursor = 0;
+		ouiRemaining = 0;
+		ouiTopologyGeneration = 0;
+		ouiActive = false;
+		registryTopologyGeneration = 1;
 		nextScanId = 1;
 		scanProgress = IncrementalScanState{};
 		incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
@@ -3264,6 +3149,16 @@ void Scout::setOuiLookup(ScoutOuiLookupCallback callback) {
 	ScoutLock lock(_impl->mutex);
 	if (lock) {
 		_impl->ouiLookup = std::move(callback);
+	}
+}
+
+void Scout::setDnsServerLookup(ScoutDnsServerLookupCallback callback) {
+	if (!_impl) {
+		return;
+	}
+	ScoutLock lock(_impl->mutex);
+	if (lock) {
+		_impl->dnsServerLookup = std::move(callback);
 	}
 }
 

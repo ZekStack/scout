@@ -20,9 +20,11 @@ The default provider set is intentionally useful on a PSRAM-equipped ESP32:
 
 Providers have independent schedules. Bounded providers use persistent continuation state so
 per-run work budgets rotate across targets, service types and network interfaces instead of
-permanently favoring the first entries. SSDP and NBNS resume unfinished interface/target work on
-the next caller-driven `process()` call before returning to their normal intervals. A large
-registry therefore does not imply that all network protocols are run during every ARP sweep.
+permanently favoring the first entries. mDNS, SSDP, NBNS, reverse DNS, ICMP and application OUI
+work resume unfinished logical runs on the next caller-driven `process()` call. If the
+MAC/endpoint topology changes while a positional run is paused, Scout restarts that logical run
+instead of applying an old cursor to a newly ordered target snapshot. A large registry therefore
+does not imply that all network protocols are run during every ARP sweep.
 
 For scalar details that multiple providers can report, Scout uses deterministic source precedence
 instead of last-writer-wins updates. SSDP/UPnP outranks mDNS for manufacturer/model-style fields,
@@ -147,10 +149,15 @@ response. Target correlation is exact for a known interface: Scout does not fall
 different MAC merely because another interface currently has the same private IPv4 address.
 
 For numeric IPv4 `LOCATION` hosts, `httpTimeoutMs` is an end-to-end deadline covering TCP
-connect, request send and response receive. Hostname-based locations are also supported: Scout
-resolves the host through lwIP before opening the interface-bound TCP connection, then applies the
-same HTTP deadline. Hostname resolution follows the platform resolver's own blocking behavior, so
-it is not a hard real-time part of the caller-driven work budget.
+connect, request send and response receive. Hostname-based locations are resolved with Scout's
+bounded UDP A-query client under the same provider deadline; Scout does not call `getaddrinfo()`
+from the caller-driven path. A description address is accepted only when it resolves to a
+currently known endpoint owned by the MAC that sent the SSDP response. This prevents a responder
+from redirecting Scout's description fetch to an unrelated LAN host.
+
+The UDN extracted from the SSDP `USN` remains authoritative when it is present. A description UDN
+may fill a missing value, but a conflicting description UDN does not overwrite the USN identity
+and increments the SSDP identity-conflict diagnostic.
 
 Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface, so repeated
 advertisements from one device cannot consume the whole description-fetch budget without
@@ -193,9 +200,12 @@ endpoint without extending the MAC record's retention lifetime.
 
 ## Reverse DNS
 
-Reverse DNS does not use libc `getnameinfo()`. Scout builds an IPv4 PTR query directly, selects
-the DNS server configured for the endpoint's ESP-NETIF, binds the UDP socket to that interface's
-local IPv4 address, and enforces `ScoutReverseDnsConfig::timeoutMs` through socket timeouts.
+Reverse DNS does not use libc `getnameinfo()`. Scout builds an IPv4 PTR query directly, binds
+the UDP socket to the endpoint's local interface address, and enforces the provider deadline
+through socket timeouts. ESP-IDF stores DNS per ESP-NETIF only when
+`CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF` is enabled. With the default global-DNS
+configuration, Scout uses the global DNS server only on the default interface; an application can
+supply interface-specific DNS through `setDnsServerLookup()` for other simultaneous interfaces.
 
 The DNS codec validates transaction IDs, response codes, record bounds and compressed DNS names.
 PTR TTL controls the learned name lifetime; `maxAgeMs` is only a fallback when the response TTL
