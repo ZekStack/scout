@@ -184,23 +184,28 @@ void testScanStatusAndCoverage() {
 		}
 		return false;
 	};
+	const auto runScan = [&] {
+		while (!runtime.processIncrementalScan(UINT64_MAX)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+	};
 
 	networkMode.store(NetworkMode::None);
-	runtime.performScan();
+	runScan();
 	assert(hasEvent(ScoutEventType::ScanSkipped, ScoutStatus::NetworkUnavailable));
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::NetworkUnavailable));
 	assertTerminalScanPair(events);
 	events.clear();
 
 	networkMode.store(NetworkMode::InterfaceError);
-	runtime.performScan();
+	runScan();
 	assert(hasEvent(ScoutEventType::Error, ScoutStatus::InternalError));
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InternalError));
 	assertTerminalScanPair(events);
 	events.clear();
 
 	networkMode.store(NetworkMode::LargeSubnet);
-	runtime.performScan();
+	runScan();
 	assert(hasEvent(ScoutEventType::ScanSkipped, ScoutStatus::InvalidConfig));
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InvalidConfig));
 	assertTerminalScanPair(events);
@@ -209,7 +214,7 @@ void testScanStatusAndCoverage() {
 	events.clear();
 
 	networkMode.store(NetworkMode::SmallSubnet);
-	runtime.performScan();
+	runScan();
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::Ok));
 	assertTerminalScanPair(events);
 	assert(runtime.diag.coverageAvailable);
@@ -217,7 +222,7 @@ void testScanStatusAndCoverage() {
 	events.clear();
 
 	networkMode.store(NetworkMode::PartialRequestFailure);
-	runtime.performScan();
+	runScan();
 	assert(hasEvent(ScoutEventType::ScanCompleted, ScoutStatus::InternalError));
 	assertTerminalScanPair(events);
 	assert(!runtime.diag.coverageAvailable);
