@@ -385,20 +385,6 @@ struct ScoutImpl {
 		}
 	}
 
-	bool waitInterruptible(uint32_t durationMs) {
-		const uint64_t startedAt = nowMs();
-		while (!stopRequested.load()) {
-			const uint64_t elapsed = nowMs() - startedAt;
-			if (elapsed >= durationMs) {
-				return true;
-			}
-			const uint32_t remaining =
-			    static_cast<uint32_t>(std::min<uint64_t>(durationMs - elapsed, StopPollMs));
-			(void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::max<uint32_t>(remaining, 1)));
-		}
-		return false;
-	}
-
 	void recordNetworkError(uint64_t scanId, const char *message) {
 		emitSimple(ScoutEventType::Error, ScoutStatus::InternalError, scanId, message);
 	}
@@ -1734,142 +1720,6 @@ struct ScoutImpl {
 		return continueRun;
 	}
 
-	ScoutStatus
-	scanInterface(const scout_internal::InterfaceSnapshot &interfaceSnapshot, uint64_t scanId) {
-		const size_t targetCount = buildTargets(interfaceSnapshot);
-		if (targetCount == SIZE_MAX) {
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::InvalidConfig,
-			    scanId,
-			    "subnet exceeds maxHostsPerSubnet"
-			);
-			return ScoutStatus::InvalidConfig;
-		}
-		if (targetCount == 0) {
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::NetworkUnavailable,
-			    scanId,
-			    "subnet has no ARP targets"
-			);
-			return ScoutStatus::NetworkUnavailable;
-		}
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.hostsConsidered += targetCount;
-			}
-		}
-
-		const size_t batchSize = mappingCapacity;
-		bool hadRequestFailures = false;
-		for (size_t offset = 0; offset < targetCount && !stopRequested.load();
-		     offset += batchSize) {
-			const size_t count = std::min(batchSize, targetCount - offset);
-			const uint32_t *batch = targets + offset;
-
-			const esp_err_t beforeResult = scout_internal::lookupArpMappings(
-			    interfaceSnapshot.index,
-			    batch,
-			    count,
-			    beforeMappings
-			);
-			if (beforeResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to inspect ARP cache");
-				return ScoutStatus::InternalError;
-			}
-
-			scout_internal::ArpRequestStats requestStats;
-			const esp_err_t requestResult =
-			    scout_internal::requestArp(interfaceSnapshot.index, batch, count, requestStats);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.arpRequestsSent += requestStats.sent;
-					diag.arpRequestFailures += requestStats.failed;
-				}
-			}
-			hadRequestFailures |= requestStats.failed > 0;
-			if (requestResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to send ARP requests");
-				return ScoutStatus::InternalError;
-			}
-
-			if (!waitInterruptible(config.arpResponseWaitMs)) {
-				return ScoutStatus::Cancelled;
-			}
-
-			const esp_err_t afterResult = scout_internal::lookupArpMappings(
-			    interfaceSnapshot.index,
-			    batch,
-			    count,
-			    afterMappings
-			);
-			if (afterResult != ESP_OK) {
-				recordNetworkError(scanId, "failed to read ARP results");
-				return ScoutStatus::InternalError;
-			}
-
-			for (size_t i = 0; i < count; ++i) {
-				if (!afterMappings[i].found) {
-					continue;
-				}
-
-				const bool wasCached =
-				    beforeMappings[i].found &&
-				    scout_internal::macEquals(beforeMappings[i].mac, afterMappings[i].mac);
-				const bool confirmed = !wasCached;
-				const ScoutObservationSource source =
-				    confirmed ? ScoutObservationSource::ArpProbe : ScoutObservationSource::ArpCache;
-
-				{
-					ScoutLock lock(mutex);
-					if (lock) {
-						diag.arpCacheHits++;
-						if (confirmed) {
-							diag.arpProbeDiscoveries++;
-						}
-					}
-				}
-
-				observe(
-				    interfaceSnapshot,
-				    batch[i],
-				    afterMappings[i].mac,
-				    source,
-				    confirmed,
-				    scanId
-				);
-			}
-
-			if (config.interBatchDelayMs > 0 && !waitInterruptible(config.interBatchDelayMs)) {
-				return ScoutStatus::Cancelled;
-			}
-		}
-		if (stopRequested.load()) {
-			return ScoutStatus::Cancelled;
-		}
-		if (hadRequestFailures) {
-			recordNetworkError(scanId, "one or more ARP requests failed");
-			return ScoutStatus::InternalError;
-		}
-		return ScoutStatus::Ok;
-	}
-
 	void finishScan(uint64_t scanId, uint64_t startedAt, ScoutStatus status, const char *message) {
 		{
 			ScoutLock lock(mutex);
@@ -1881,110 +1731,6 @@ struct ScoutImpl {
 			}
 		}
 		emitSimple(ScoutEventType::ScanCompleted, status, scanId, message);
-	}
-
-	void performScan() {
-		const uint64_t scanId = nextScanId++;
-		const uint64_t startedAt = nowMs();
-
-		{
-			ScoutLock lock(mutex);
-			if (lock) {
-				diag.scanCount++;
-			}
-		}
-		emitSimple(ScoutEventType::ScanStarted, ScoutStatus::Ok, scanId, "scan started");
-
-		maintainRegistry(scanId);
-		if (stopRequested.load()) {
-			finishScan(scanId, startedAt, ScoutStatus::Cancelled, "scan cancelled");
-			return;
-		}
-
-		scout_internal::InterfaceSnapshot interfaces[scout_internal::MaxInterfaces]{};
-		size_t interfaceCount = 0;
-		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
-		    interfaces,
-		    scout_internal::MaxInterfaces,
-		    interfaceCount
-		);
-		if (interfaceResult != ESP_OK) {
-			updateCoverage(false, 0, scanId);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			recordNetworkError(scanId, "failed to enumerate network interfaces");
-			finishScan(
-			    scanId,
-			    startedAt,
-			    ScoutStatus::InternalError,
-			    "scan failed while enumerating network interfaces"
-			);
-			return;
-		}
-
-		if (interfaceCount == 0) {
-			updateCoverage(false, 0, scanId);
-			{
-				ScoutLock lock(mutex);
-				if (lock) {
-					diag.skippedScanCount++;
-				}
-			}
-			emitSimple(
-			    ScoutEventType::ScanSkipped,
-			    ScoutStatus::NetworkUnavailable,
-			    scanId,
-			    "no eligible ARP-capable interface"
-			);
-			finishScan(
-			    scanId,
-			    startedAt,
-			    ScoutStatus::NetworkUnavailable,
-			    "scan completed without an eligible interface"
-			);
-			return;
-		}
-
-		ScoutStatus scanStatus = ScoutStatus::Ok;
-		for (size_t i = 0; i < interfaceCount; ++i) {
-			if (stopRequested.load()) {
-				scanStatus = ScoutStatus::Cancelled;
-				break;
-			}
-
-			const ScoutStatus interfaceStatus = scanInterface(interfaces[i], scanId);
-			if (interfaceStatus == ScoutStatus::Cancelled) {
-				scanStatus = ScoutStatus::Cancelled;
-				break;
-			}
-			if (interfaceStatus == ScoutStatus::InternalError ||
-			    (scanStatus == ScoutStatus::Ok && interfaceStatus != ScoutStatus::Ok)) {
-				scanStatus = interfaceStatus;
-			}
-		}
-
-		if (stopRequested.load()) {
-			scanStatus = ScoutStatus::Cancelled;
-		}
-
-		if (scanStatus != ScoutStatus::Cancelled) {
-			// A partial or failed sweep cannot support absence inference.
-			updateCoverage(scanStatus == ScoutStatus::Ok, interfaceCount, scanId);
-		}
-
-		finishScan(
-		    scanId,
-		    startedAt,
-		    scanStatus,
-		    scanStatus == ScoutStatus::Ok ? "scan completed"
-		    : scanStatus == ScoutStatus::Cancelled
-		        ? "scan cancelled"
-		        : "scan completed with skipped or failed interfaces"
-		);
 	}
 
 	void advanceIncrementalInterface(ScoutStatus interfaceStatus) {
@@ -2042,7 +1788,8 @@ struct ScoutImpl {
 		const esp_err_t interfaceResult = scout_internal::collectInterfaces(
 		    scanProgress.interfaces,
 		    scout_internal::MaxInterfaces,
-		    scanProgress.interfaceCount
+		    scanProgress.interfaceCount,
+		    &scanProgress.interfacesTruncated
 		);
 		if (interfaceResult != ESP_OK) {
 			updateCoverage(false, 0, scanProgress.scanId);
@@ -2062,6 +1809,23 @@ struct ScoutImpl {
 			scanProgress.active = false;
 			incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 			return false;
+		}
+
+		if (scanProgress.interfacesTruncated) {
+			{
+				ScoutLock lock(mutex);
+				if (lock) {
+					diag.interfaceLimitDrops++;
+					diag.skippedScanCount++;
+				}
+			}
+			scanProgress.status = ScoutStatus::InvalidConfig;
+			emitSimple(
+			    ScoutEventType::ScanSkipped,
+			    ScoutStatus::InvalidConfig,
+			    scanProgress.scanId,
+			    "eligible interface count exceeds Scout limit"
+			);
 		}
 
 		if (scanProgress.interfaceCount == 0) {
