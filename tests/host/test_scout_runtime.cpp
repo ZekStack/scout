@@ -802,6 +802,7 @@ void testCallerDrivenExecution() {
 		}
 	}
 	assertTerminalScanPair(events);
+	assert(scout.timeUntilNextWork() > 0);
 
 	const ScoutDiagnostics after = scout.diagnostics();
 	assert(after.processCalls > 1);
