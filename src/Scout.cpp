@@ -780,6 +780,7 @@ struct ScoutImpl {
 		target.identityConflicts += run.identityConflicts;
 		diag.dnsResolverUnavailable += run.resolverUnavailable;
 		diag.ssdpIdentityConflicts += run.identityConflicts;
+		diag.providerTopologyRestarts += run.topologyRestarts;
 		if (run.budgetYielded) {
 			target.budgetYields++;
 		}
