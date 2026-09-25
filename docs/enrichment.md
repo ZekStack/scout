@@ -55,6 +55,10 @@ remains `Strata::Placement::PreferExternal`. If a rich-details allocation fails,
 registry remains valid and Scout records an enrichment allocation failure instead of failing the
 whole runtime.
 
+When a device already owns all 16 endpoint slots, a newly observed endpoint replaces the
+least-recently-seen endpoint. `ScoutDiagnostics::endpointLimitReplacements` records that bounded
+replacement so capacity pressure is visible without turning it into an operational error.
+
 These are storage bounds, not work budgets. Providers separately limit work performed per
 run so a large registry does not monopolize the Scout task.
 
@@ -143,7 +147,11 @@ Scout accepts SSDP responses only when the start line is a syntactically valid H
 HTTP/1.1 `200` response. Literal `null` / `(null)` header sentinels are treated as absent,
 and overflowing `max-age` values are ignored so the configured fallback lifetime is used.
 
-The response body is bounded by `maxDescriptionBytes`; Scout does not retain arbitrary XML.
+The response body is bounded by `maxDescriptionBytes`; HTTP headers use a separate bounded 4 KiB
+allowance, so headers do not consume the configured description-body budget. Chunked transfer
+encoding remains unsupported and is rejected explicitly. Scout does not retain arbitrary XML.
+The bounded UPnP field parser accepts namespace-prefixed scalar tags, tag attributes and the five
+standard XML entities without constructing a DOM.
 Description TCP sockets are bound to the same local IPv4 interface that received the SSDP
 response. Target correlation is exact for a known interface: Scout does not fall back to a
 different MAC merely because another interface currently has the same private IPv4 address.
@@ -153,7 +161,10 @@ connect, request send and response receive. Hostname-based locations are resolve
 bounded UDP A-query client under the same provider deadline; Scout does not call `getaddrinfo()`
 from the caller-driven path. A description address is accepted only when it resolves to a
 currently known endpoint owned by the MAC that sent the SSDP response. This prevents a responder
-from redirecting Scout's description fetch to an unrelated LAN host.
+from redirecting Scout's description fetch to an unrelated LAN host. Hostnames with a trailing
+root dot are accepted, and A responses may follow up to eight CNAME hops with loop detection. The
+result TTL is the minimum across the accepted alias chain and selected A record. Truncated UDP DNS
+responses remain rejected rather than falling back to DNS-over-TCP.
 
 The UDN extracted from the SSDP `USN` remains authoritative when it is present. A description UDN
 may fill a missing value, but a conflicting description UDN does not overwrite the USN identity
