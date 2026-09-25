@@ -556,6 +556,7 @@ struct ScoutImpl {
 							    left.ipv4.value
 							);
 							diag.endpointReassignmentCount++;
+							bumpTopologyLocked();
 							changed = true;
 							break;
 						}
@@ -661,6 +662,7 @@ struct ScoutImpl {
 					info.observationCount = 1;
 					diag.deviceCount = deviceCount;
 					diag.peakDeviceCount = std::max(diag.peakDeviceCount, deviceCount);
+					bumpTopologyLocked();
 				}
 			} else {
 				auto &info = devices[index].info;
@@ -683,6 +685,7 @@ struct ScoutImpl {
 				                                     ipv4
 				                                 )) {
 					diag.endpointReassignmentCount++;
+					bumpTopologyLocked();
 					auto &event = events[eventCount++];
 					event.type = ScoutEventType::DeviceChanged;
 					event.status = ScoutStatus::Ok;
@@ -706,6 +709,9 @@ struct ScoutImpl {
 				    source,
 				    confirmed
 				);
+				if (endpointChanged && !discovered) {
+					bumpTopologyLocked();
+				}
 
 				if (discovered) {
 					auto &event = events[eventCount++];
@@ -784,6 +790,10 @@ struct ScoutImpl {
 		target.malformedResponses += run.malformedResponses;
 		target.serverErrors += run.serverErrors;
 		target.droppedObservations += run.dropped;
+		target.resolverUnavailable += run.resolverUnavailable;
+		target.identityConflicts += run.identityConflicts;
+		diag.dnsResolverUnavailable += run.resolverUnavailable;
+		diag.ssdpIdentityConflicts += run.identityConflicts;
 		if (run.budgetYielded) {
 			target.budgetYields++;
 		}
@@ -1286,27 +1296,17 @@ struct ScoutImpl {
 					    details.serialNumberExpiresAtMs,
 					    ScoutDeviceChange::Identity
 					);
-					updateText(
-					    details.persistentDeviceId,
-					    sizeof(details.persistentDeviceId),
-					    observation.persistentDeviceId,
-					    details.persistentDeviceIdSource,
-					    details.persistentDeviceIdExpiresAtMs,
-					    ScoutDeviceChange::Identity
-					);
 					if (observation.persistentDeviceId[0] != '\0' &&
 					    observation.persistentDeviceNamespace[0] != '\0') {
-						const bool namespaceChanged = std::strncmp(
-						                                  details.persistentDeviceNamespace,
-						                                  observation.persistentDeviceNamespace,
-						                                  sizeof(details.persistentDeviceNamespace)
-						                              ) != 0;
-						scout_internal::copyText(
-						    details.persistentDeviceNamespace,
-						    sizeof(details.persistentDeviceNamespace),
-						    observation.persistentDeviceNamespace
+						const auto result = scout_internal::upsertPersistentIdentity(
+						    details,
+						    observation.persistentDeviceNamespace,
+						    observation.persistentDeviceId,
+						    observation.source,
+						    observedAt,
+						    observation.identityExpiresAtMs
 						);
-						if (namespaceChanged) {
+						if (result != scout_internal::EnrichmentUpsertResult::Unchanged) {
 							changes |= ScoutDeviceChange::Identity;
 						}
 					}
