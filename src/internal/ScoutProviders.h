@@ -56,6 +56,8 @@ struct ProviderRunStats {
 	uint64_t malformedResponses = 0;
 	uint64_t serverErrors = 0;
 	uint64_t dropped = 0;
+	uint64_t resolverUnavailable = 0;
+	uint64_t identityConflicts = 0;
 	size_t plannedUnits = 0;
 	size_t workUnits = 0;
 	bool budgetYielded = false;
@@ -68,20 +70,45 @@ using EnrichmentSink =
 struct ProviderRunControl {
 	const std::atomic<bool> *stopRequested = nullptr;
 	uint64_t deadlineMs = UINT64_MAX;
+	const ScoutDnsServerLookupCallback *dnsServerLookup = nullptr;
+};
+
+constexpr size_t ProviderMaxMdnsServiceTypes = 64;
+constexpr size_t ProviderMaxSsdpDescriptionFetches = 16;
+
+struct ProviderMdnsServiceType {
+	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
+	char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
+};
+
+struct MdnsProviderState {
+	bool active = false;
+	uint64_t topologyGeneration = 0;
+	bool enumerationComplete = false;
+	ProviderMdnsServiceType serviceTypes[ProviderMaxMdnsServiceTypes]{};
+	size_t serviceTypeCount = 0;
+	size_t serviceCursor = 0;
+	size_t remainingQueries = 0;
 };
 
 struct SsdpProviderState {
+	bool active = false;
+	uint64_t topologyGeneration = 0;
 	size_t interfaceCursor = 0;
 	size_t remainingInterfaces = 0;
+	size_t descriptionFetches = 0;
+	uint64_t fetchedLocationHashes[ProviderMaxSsdpDescriptionFetches]{};
+	size_t fetchedLocationCount = 0;
 };
 
 struct NbnsProviderState {
+	bool active = false;
+	uint64_t topologyGeneration = 0;
 	size_t targetCursor = 0;
 	size_t runStartCursor = 0;
 	size_t targetLimit = 0;
 	size_t interfaceCursor = 0;
-	size_t targetOffset = 0;
-	bool active = false;
+	size_t batchOffset = 0;
 };
 
 ProviderRunStats runIcmpProvider(
@@ -97,7 +124,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
-    size_t &serviceCursor,
+    MdnsProviderState &state,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
     void *context,
