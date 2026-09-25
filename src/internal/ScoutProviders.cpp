@@ -937,12 +937,13 @@ HttpFetchResult fetchHttpBody(
     size_t targetCount,
     uint32_t localIpv4,
     uint32_t timeoutMs,
+    size_t bodyLimit,
     char *scratch,
     size_t capacity,
     const ProviderRunControl *control
 ) {
 	HttpFetchResult result{};
-	if (scratch == nullptr || capacity < 2 || timeoutMs == 0) {
+	if (scratch == nullptr || capacity < 2 || timeoutMs == 0 || bodyLimit == 0) {
 		return result;
 	}
 	ParsedHttpUrl parsed{};
@@ -1100,6 +1101,21 @@ HttpFetchResult fetchHttpBody(
 		}
 		received += static_cast<size_t>(count);
 		scratch[received] = '\0';
+		const char *headerEnd = std::strstr(scratch, "\r\n\r\n");
+		if (headerEnd == nullptr) {
+			if (received > ProviderHttpHeaderBytes) {
+				close(fd);
+				result.status = HttpFetchStatus::TooLarge;
+				return result;
+			}
+		} else {
+			const size_t currentHeaderLength = static_cast<size_t>(headerEnd - scratch) + 4U;
+			if (currentHeaderLength > ProviderHttpHeaderBytes) {
+				close(fd);
+				result.status = HttpFetchStatus::TooLarge;
+				return result;
+			}
+		}
 		if (hasChunkedTransferEncoding(scratch, received)) {
 			close(fd);
 			result.status = HttpFetchStatus::UnsupportedEncoding;
@@ -1139,6 +1155,10 @@ HttpFetchResult fetchHttpBody(
 	}
 	body += 4;
 	const size_t headerLength = static_cast<size_t>(body - scratch);
+	if (headerLength > ProviderHttpHeaderBytes) {
+		result.status = HttpFetchStatus::TooLarge;
+		return result;
+	}
 
 	for (size_t i = 0; i + 18 < headerLength; ++i) {
 		if ((i == 0 || scratch[i - 1] == '\n') &&
@@ -1157,6 +1177,10 @@ HttpFetchResult fetchHttpBody(
 	}
 
 	const size_t bodyLength = received >= headerLength ? received - headerLength : 0;
+	if (bodyLength > bodyLimit) {
+		result.status = HttpFetchStatus::TooLarge;
+		return result;
+	}
 	bool hasContentLength = false;
 	size_t declaredLength = 0;
 	for (size_t i = 0; i + 15 < headerLength; ++i) {
@@ -1191,6 +1215,10 @@ HttpFetchResult fetchHttpBody(
 		}
 	}
 	if (hasContentLength) {
+		if (declaredLength > bodyLimit) {
+			result.status = HttpFetchStatus::TooLarge;
+			return result;
+		}
 		if (declaredLength > bodyLength) {
 			result.status = declaredLength >= capacity ? HttpFetchStatus::TooLarge
 			                                           : HttpFetchStatus::InvalidResponse;
@@ -1762,6 +1790,7 @@ ProviderRunStats runSsdpProvider(
 					    targetCount,
 					    interfaceInfo.ipv4,
 					    httpTimeout,
+					    config.maxDescriptionBytes,
 					    httpScratch,
 					    httpScratchCapacity,
 					    control
