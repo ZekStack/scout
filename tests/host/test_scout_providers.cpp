@@ -26,6 +26,7 @@ enum class Scenario {
 	SsdpUnrelated,
 	SsdpConflict,
 	SsdpBudget,
+	SsdpBodyLimit,
 };
 
 Scenario scenario = Scenario::None;
@@ -39,6 +40,8 @@ uint32_t lastStreamBind = 0;
 uint32_t receiveDelayMs = 2;
 uint32_t ssdpDatagramDelayMs = 0;
 bool httpDelivered = false;
+size_t httpBodyPayloadSize = 0;
+size_t httpHeaderPadding = 0;
 int mdnsQueryCount = 0;
 bool slowMdnsEnumeration = false;
 bool interfaceCollectionFails = false;
@@ -80,6 +83,8 @@ void resetHarness(Scenario nextScenario) {
 	receiveDelayMs = 2;
 	ssdpDatagramDelayMs = 0;
 	httpDelivered = false;
+	httpBodyPayloadSize = 0;
+	httpHeaderPadding = 0;
 	mdnsQueryCount = 0;
 	slowMdnsEnumeration = false;
 	interfaceCollectionFails = false;
@@ -123,7 +128,7 @@ std::string ssdpResponseForFd(int fd) {
 		       "ST: upnp:rootdevice\r\n"
 		       "CACHE-CONTROL: max-age=60\r\n\r\n";
 	}
-	if (scenario == Scenario::SsdpConflict) {
+	if (scenario == Scenario::SsdpConflict || scenario == Scenario::SsdpBodyLimit) {
 		return "HTTP/1.1 200 OK\r\n"
 		       "LOCATION: http://192.168.1.42/device.xml\r\n"
 		       "USN: uuid:origin::upnp:rootdevice\r\n"
@@ -164,8 +169,16 @@ std::string httpResponse() {
 		       "<manufacturer>Maker</manufacturer><serialNumber>SERIAL-1</serialNumber>"
 		       "<UDN>uuid:one</UDN></device></root>";
 	}
-	return "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
-	       "\r\nConnection: close\r\n\r\n" + body;
+	if (scenario == Scenario::SsdpBodyLimit && httpBodyPayloadSize > 0) {
+		assert(body.size() <= httpBodyPayloadSize);
+		body.append(httpBodyPayloadSize - body.size(), ' ');
+	}
+	std::string headers = "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
+	                      "\r\nConnection: close\r\n";
+	if (httpHeaderPadding > 0) {
+		headers += "X-Padding: " + std::string(httpHeaderPadding, 'x') + "\r\n";
+	}
+	return headers + "\r\n" + body;
 }
 
 void testNbnsRetriesBudgetInterruptedBatch() {
@@ -350,6 +363,53 @@ void testSsdpPreservesObservationWhenDescriptionBudgetExpires() {
 	assert(std::strcmp(observations[0].upnpUdn, "uuid:origin") == 0);
 }
 
+void testSsdpDescriptionBodyLimitExcludesHeaders() {
+	resetHarness(Scenario::SsdpBodyLimit);
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutSsdpConfig config{};
+	config.enabled = true;
+	config.responseWindowMs = 1;
+	config.httpTimeoutMs = 100;
+	config.maxDescriptionBytes = 256;
+	httpBodyPayloadSize = config.maxDescriptionBytes;
+	httpHeaderPadding = 512;
+	char scratch[scout_internal::ProviderHttpHeaderBytes + 257]{};
+	scout_internal::SsdpProviderState state{};
+
+	const auto accepted = scout_internal::runSsdpProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    scratch,
+	    sizeof(scratch),
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+	assert(accepted.descriptionErrors == 0);
+	assert(observations.size() == 1);
+	assert(observations[0].nameCount == 1);
+
+	resetHarness(Scenario::SsdpBodyLimit);
+	httpBodyPayloadSize = config.maxDescriptionBytes + 1;
+	state = {};
+	const auto rejected = scout_internal::runSsdpProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    scratch,
+	    sizeof(scratch),
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+	assert(rejected.descriptionErrors == 1);
+	assert(observations.size() == 1);
+	assert(observations[0].nameCount == 0);
+}
+
 void testSsdpInterfaceFailureClearsContinuationState() {
 	resetHarness(Scenario::SsdpConflict);
 	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
@@ -519,7 +579,7 @@ ssize_t scout_test_recvfrom(
 		return -1;
 	}
 	if ((scenario == Scenario::SsdpUnrelated || scenario == Scenario::SsdpConflict ||
-	     scenario == Scenario::SsdpBudget) &&
+	     scenario == Scenario::SsdpBudget || scenario == Scenario::SsdpBodyLimit) &&
 	    !datagramDelivered[fd]) {
 		if (ssdpDatagramDelayMs > 0) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(ssdpDatagramDelayMs));
@@ -679,6 +739,7 @@ int main() {
 	testSsdpRejectsUnrelatedLocation();
 	testSsdpConflictKeepsUsnIdentityAndLocalBind();
 	testSsdpPreservesObservationWhenDescriptionBudgetExpires();
+	testSsdpDescriptionBodyLimitExcludesHeaders();
 	testSsdpInterfaceFailureClearsContinuationState();
 	testSsdpTopologyRestartResetsDescriptionState();
 	testSsdpDescriptionBudgetSurvivesContinuation();
