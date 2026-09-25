@@ -615,9 +615,11 @@ void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &so
 				    !textEqualsIgnoreCase(targetIdentity.id, identity.id)) {
 					continue;
 				}
-				if (sourceFirstSeen != 0 &&
+				const bool earlierFirstSeen =
+				    sourceFirstSeen != 0 &&
 				    (targetIdentity.firstSeenAtMs == 0 ||
-				     sourceFirstSeen < targetIdentity.firstSeenAtMs)) {
+				     sourceFirstSeen < targetIdentity.firstSeenAtMs);
+				if (earlierFirstSeen) {
 					targetIdentity.firstSeenAtMs = sourceFirstSeen;
 				}
 				break;
