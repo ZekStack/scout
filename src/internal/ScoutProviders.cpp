@@ -710,13 +710,26 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 		return false;
 	}
 	const char *hostStart = url + 7;
-	if (*hostStart == '\0' || *hostStart == '[' || std::strchr(hostStart, '@') != nullptr) {
+	if (*hostStart == '\0' || *hostStart == '[') {
 		return false;
 	}
-	const char *pathStart = std::strchr(hostStart, '/');
-	const char *hostEnd = pathStart != nullptr ? pathStart : hostStart + std::strlen(hostStart);
+
+	const char *authorityEnd = hostStart;
+	while (*authorityEnd != '\0' && *authorityEnd != '/' && *authorityEnd != '?' &&
+	       *authorityEnd != '#') {
+		authorityEnd++;
+	}
+	if (authorityEnd == hostStart) {
+		return false;
+	}
+	for (const char *cursor = hostStart; cursor < authorityEnd; ++cursor) {
+		if (*cursor == '@') {
+			return false;
+		}
+	}
+
 	const char *colon = nullptr;
-	for (const char *cursor = hostStart; cursor < hostEnd; ++cursor) {
+	for (const char *cursor = hostStart; cursor < authorityEnd; ++cursor) {
 		if (*cursor == ':') {
 			if (colon != nullptr) {
 				return false;
@@ -724,7 +737,7 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 			colon = cursor;
 		}
 	}
-	const char *nameEnd = colon != nullptr ? colon : hostEnd;
+	const char *nameEnd = colon != nullptr ? colon : authorityEnd;
 	if (nameEnd == hostStart || !copyTextN(
 	                                out.host,
 	                                sizeof(out.host),
@@ -733,12 +746,13 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 	                            )) {
 		return false;
 	}
+
 	if (colon != nullptr) {
-		if (colon + 1 == hostEnd) {
+		if (colon + 1 == authorityEnd) {
 			return false;
 		}
 		unsigned port = 0;
-		for (const char *cursor = colon + 1; cursor < hostEnd; ++cursor) {
+		for (const char *cursor = colon + 1; cursor < authorityEnd; ++cursor) {
 			if (*cursor < '0' || *cursor > '9') {
 				return false;
 			}
@@ -753,10 +767,23 @@ bool parseHttpUrl(const char *url, ParsedHttpUrl &out) {
 		}
 		out.port = static_cast<uint16_t>(port);
 	}
-	if (pathStart != nullptr && !copyText(out.path, sizeof(out.path), pathStart)) {
-		return false;
+
+	if (*authorityEnd == '\0' || *authorityEnd == '#') {
+		return true;
 	}
-	return true;
+	const char *pathEnd = std::strchr(authorityEnd, '#');
+	if (pathEnd == nullptr) {
+		pathEnd = authorityEnd + std::strlen(authorityEnd);
+	}
+	const size_t pathLength = static_cast<size_t>(pathEnd - authorityEnd);
+	if (*authorityEnd == '?') {
+		if (pathLength + 1 >= sizeof(out.path)) {
+			return false;
+		}
+		out.path[0] = '/';
+		return copyTextN(out.path + 1, sizeof(out.path) - 1, authorityEnd, pathLength);
+	}
+	return copyTextN(out.path, sizeof(out.path), authorityEnd, pathLength);
 }
 
 enum class SocketIoStatus : uint8_t {
