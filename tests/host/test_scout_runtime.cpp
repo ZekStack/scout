@@ -995,7 +995,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *,
     size_t,
-    size_t &,
+    MdnsProviderState &,
     const ScoutMdnsConfig &,
     EnrichmentSink,
     void *,
@@ -1046,7 +1046,7 @@ ProviderRunStats runNbnsProvider(
 		stats.budgetYielded = true;
 		state.active = true;
 		state.targetLimit = 2;
-		state.targetOffset = 1;
+		state.batchOffset = 1;
 	} else {
 		state = {};
 	}
@@ -1065,7 +1065,10 @@ ProviderRunStats runReverseDnsProvider(
 	return {};
 }
 
-esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count) {
+esp_err_t collectInterfaces(
+    InterfaceSnapshot *out, size_t capacity, size_t &count, bool *truncated
+) {
+	if (truncated != nullptr) { *truncated = false; }
 	const auto mode = networkMode.load();
 	if (mode == NetworkMode::InterfaceError) {
 		count = 0;
