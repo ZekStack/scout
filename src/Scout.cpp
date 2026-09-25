@@ -1880,6 +1880,7 @@ struct ScoutImpl {
 				        : "scan completed with skipped or failed interfaces"
 				);
 				scanProgress.active = false;
+				incrementalScanWakeAt.store(UINT64_MAX, std::memory_order_release);
 				return true;
 			}
 
