@@ -2049,7 +2049,7 @@ ProviderRunStats runReverseDnsProvider(
 			break;
 		}
 		stats.workUnits++;
-		const DnsPtrAnswer answer = queryPtr(target, timeoutMs);
+		const DnsPtrAnswer answer = queryPtr(target, timeoutMs, control);
 
 		switch (answer.status) {
 		case DnsParseStatus::Ok: {
@@ -2081,8 +2081,12 @@ ProviderRunStats runReverseDnsProvider(
 		case DnsParseStatus::ServerError:
 			stats.serverErrors++;
 			break;
+		case DnsParseStatus::ResolverUnavailable:
+			stats.resolverUnavailable++;
+			break;
 		case DnsParseStatus::NetworkError:
 			stats.errors++;
+			stats.transportErrors++;
 			break;
 		}
 	}
