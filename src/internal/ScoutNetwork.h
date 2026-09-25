@@ -30,7 +30,9 @@ struct ArpRequestStats {
 	size_t failed = 0;
 };
 
-esp_err_t collectInterfaces(InterfaceSnapshot *out, size_t capacity, size_t &count);
+esp_err_t collectInterfaces(
+    InterfaceSnapshot *out, size_t capacity, size_t &count, bool *truncated = nullptr
+);
 
 esp_err_t lookupArpMappings(
     uint8_t interfaceIndex, const uint32_t *ipv4Addresses, size_t count, ArpMapping *out
