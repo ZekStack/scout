@@ -1182,9 +1182,11 @@ ProviderRunStats runSsdpProvider(
 	stats.workUnits = 1;
 	if (testSsdpYieldNext.exchange(false)) {
 		stats.budgetYielded = true;
+		state.active = true;
 		state.interfaceCursor = 1;
 		state.remainingInterfaces = 1;
 	} else {
+		state.active = false;
 		state.remainingInterfaces = 0;
 	}
 	return stats;
