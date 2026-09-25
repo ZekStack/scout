@@ -260,7 +260,9 @@ int openBoundUdpSocket(uint32_t localIpv4, uint32_t timeoutMs) {
 	return fd;
 }
 
-DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
+DnsPtrAnswer queryPtr(
+    const ProviderTarget &target, uint32_t timeoutMs, const ProviderRunControl *control
+) {
 	DnsPtrAnswer result{};
 	if (target.interfaceKey[0] == '\0') {
 		result.status = DnsParseStatus::NetworkError;
@@ -279,16 +281,9 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		return result;
 	}
 
-	esp_netif_dns_info_t dnsInfo{};
-	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
-		dnsInfo = {};
-		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
-	}
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
-		result.status = DnsParseStatus::NetworkError;
+	uint32_t dnsServer = 0;
+	if (!selectDnsServer(target, netif, control, dnsServer)) {
+		result.status = DnsParseStatus::ResolverUnavailable;
 		return result;
 	}
 
@@ -314,7 +309,7 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 	sockaddr_in destination{};
 	destination.sin_family = AF_INET;
 	destination.sin_port = htons(53);
-	destination.sin_addr.s_addr = ip_2_ip4(&dnsInfo.ip)->addr;
+	destination.sin_addr.s_addr = dnsServer;
 
 	if (sendto(
 	        fd,
@@ -355,6 +350,92 @@ DnsPtrAnswer queryPtr(const ProviderTarget &target, uint32_t timeoutMs) {
 		return result;
 	}
 	return parsePtrResponse(response, static_cast<size_t>(received), transactionId, ipv4Bytes);
+}
+
+DnsAAnswer queryA(
+    const ProviderTarget &target,
+    const char *hostname,
+    uint32_t timeoutMs,
+    const ProviderRunControl *control
+) {
+	DnsAAnswer result{};
+	if (target.interfaceKey[0] == '\0' || hostname == nullptr || hostname[0] == '\0') {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	esp_netif_t *netif = esp_netif_get_handle_from_ifkey(target.interfaceKey);
+	if (netif == nullptr) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	esp_netif_ip_info_t ipInfo{};
+	if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK || ipInfo.ip.addr == 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	uint32_t dnsServer = 0;
+	if (!selectDnsServer(target, netif, control, dnsServer)) {
+		result.status = DnsParseStatus::ResolverUnavailable;
+		return result;
+	}
+
+	const int fd = openBoundUdpSocket(ipInfo.ip.addr, timeoutMs);
+	if (fd < 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	const uint16_t transactionId = static_cast<uint16_t>(
+	    (providerNowMs() ^ target.ipv4.value ^ 0xA5A5U) & 0xFFFFU
+	);
+	uint8_t request[256]{};
+	const size_t requestLength =
+	    buildAQuery(transactionId, hostname, request, sizeof(request));
+	if (requestLength == 0) {
+		close(fd);
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	sockaddr_in destination{};
+	destination.sin_family = AF_INET;
+	destination.sin_port = htons(53);
+	destination.sin_addr.s_addr = dnsServer;
+	if (sendto(
+	        fd,
+	        request,
+	        requestLength,
+	        0,
+	        reinterpret_cast<const sockaddr *>(&destination),
+	        sizeof(destination)
+	    ) < 0) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	uint8_t response[768]{};
+	sockaddr_in sender{};
+	socklen_t senderLength = sizeof(sender);
+	const int received = recvfrom(
+	    fd,
+	    response,
+	    sizeof(response),
+	    0,
+	    reinterpret_cast<sockaddr *>(&sender),
+	    &senderLength
+	);
+	const int socketError = errno;
+	close(fd);
+	if (received <= 0) {
+		result.status = socketError == EAGAIN || socketError == EWOULDBLOCK
+		                    ? DnsParseStatus::Timeout
+		                    : DnsParseStatus::NetworkError;
+		return result;
+	}
+	if (sender.sin_addr.s_addr != destination.sin_addr.s_addr ||
+	    sender.sin_port != destination.sin_port) {
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	return parseAResponse(response, static_cast<size_t>(received), transactionId, hostname);
 }
 
 void appendMetadata(
