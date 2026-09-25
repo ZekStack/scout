@@ -1312,7 +1312,7 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *targets,
     size_t targetCount,
-    size_t &serviceCursor,
+    MdnsProviderState &state,
     const ScoutMdnsConfig &config,
     EnrichmentSink sink,
     void *context,
@@ -1320,6 +1320,10 @@ ProviderRunStats runMdnsProvider(
 ) {
 	ProviderRunStats stats{};
 	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
+		state.active = false;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
+		state.remainingQueries = 0;
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1335,94 +1339,135 @@ ProviderRunStats runMdnsProvider(
 		}
 	}
 
-	MdnsServiceType types[MaxMdnsServiceTypes]{};
-	size_t typeCount = 0;
-	const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
-	constexpr struct {
-		const char *service;
-		const char *proto;
-	} CommonServices[] = {
-	    {"_http", "_tcp"},        {"_https", "_tcp"},
-	    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
-	    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
-	    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
-	    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
-	    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
-	    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
-	    {"_hap", "_tcp"},         {"_matter", "_tcp"},
-	    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
-	    {"_esphomelib", "_tcp"},
-	};
-	for (const auto &service : CommonServices) {
-		addServiceType(types, typeCount, serviceTypeCapacity, service.service, service.proto);
+	if (!state.active) {
+		state.active = true;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
+		state.remainingQueries = 0;
+		const size_t serviceTypeCapacity =
+		    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		constexpr struct {
+			const char *service;
+			const char *proto;
+		} CommonServices[] = {
+		    {"_http", "_tcp"},        {"_https", "_tcp"},
+		    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
+		    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
+		    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
+		    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
+		    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
+		    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
+		    {"_hap", "_tcp"},         {"_matter", "_tcp"},
+		    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
+		    {"_esphomelib", "_tcp"},
+		};
+		for (const auto &service : CommonServices) {
+			addServiceType(
+			    state.serviceTypes,
+			    state.serviceTypeCount,
+			    serviceTypeCapacity,
+			    service.service,
+			    service.proto
+			);
+		}
 	}
 
-	mdns_result_t *serviceTypes = nullptr;
-	uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
-	enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
-	if (enumerationTimeout == 0) {
-		recordProviderStop(stats, control);
-		return stats;
-	}
-	if (mdns_query_ptr(
-	        "_services._dns-sd",
-	        "_udp",
-	        enumerationTimeout,
-	        serviceTypeCapacity,
-	        &serviceTypes
-	    ) == ESP_OK) {
-		for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
-			const char *descriptor =
-			    result->instance_name != nullptr ? result->instance_name : result->hostname;
-			char service[SCOUT_SERVICE_TYPE_SIZE] = {};
-			char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
-			if (splitServiceDescriptor(
-			        descriptor,
-			        service,
-			        sizeof(service),
-			        proto,
-			        sizeof(proto)
-			    )) {
-				if (!addServiceType(types, typeCount, serviceTypeCapacity, service, proto) &&
-				    typeCount >= serviceTypeCapacity) {
-					stats.dropped++;
+	if (!state.enumerationComplete) {
+		const size_t serviceTypeCapacity =
+		    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+		uint32_t enumerationTimeout = std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
+		enumerationTimeout = providerRemainingMs(control, enumerationTimeout);
+		if (enumerationTimeout == 0) {
+			recordProviderStop(stats, control);
+			return stats;
+		}
+		mdns_result_t *serviceTypes = nullptr;
+		const esp_err_t enumerationResult = mdns_query_ptr(
+		    "_services._dns-sd",
+		    "_udp",
+		    enumerationTimeout,
+		    serviceTypeCapacity,
+		    &serviceTypes
+		);
+		if (enumerationResult == ESP_OK) {
+			for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
+				const char *descriptor =
+				    result->instance_name != nullptr ? result->instance_name : result->hostname;
+				char service[SCOUT_SERVICE_TYPE_SIZE] = {};
+				char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
+				if (splitServiceDescriptor(
+				        descriptor,
+				        service,
+				        sizeof(service),
+				        proto,
+				        sizeof(proto)
+				    )) {
+					if (!addServiceType(
+					        state.serviceTypes,
+					        state.serviceTypeCount,
+					        serviceTypeCapacity,
+					        service,
+					        proto
+					    ) &&
+					    state.serviceTypeCount >= serviceTypeCapacity) {
+						stats.dropped++;
+					}
 				}
 			}
+			mdns_query_results_free(serviceTypes);
+		} else if (enumerationResult == ESP_ERR_TIMEOUT) {
+			stats.timeouts++;
+		} else {
+			stats.errors++;
 		}
-		mdns_query_results_free(serviceTypes);
-	}
-
-	const uint32_t queryBudget = config.queryTimeoutMs > enumerationTimeout
-	                                 ? config.queryTimeoutMs - enumerationTimeout
-	                                 : config.queryTimeoutMs;
-	const size_t queryCount = std::min(typeCount, config.maxServiceQueriesPerRun);
-	stats.plannedUnits = queryCount;
-	const uint64_t retentionFloorMs = mdnsRetentionFloorMs(config, typeCount, queryCount);
-	uint32_t perQueryTimeout = 1;
-	if (queryCount > 0) {
-		perQueryTimeout = queryBudget / static_cast<uint32_t>(queryCount);
-		if (perQueryTimeout == 0) {
-			perQueryTimeout = 1;
+		state.enumerationComplete = true;
+		if (providerShouldStop(control)) {
+			recordProviderStop(stats, control);
+			return stats;
 		}
 	}
-	perQueryTimeout = providerRemainingMs(control, perQueryTimeout);
 
-	size_t processedQueries = 0;
-	for (; processedQueries < queryCount && perQueryTimeout > 0; ++processedQueries) {
+	if (state.serviceTypeCount == 0) {
+		state.active = false;
+		state.enumerationComplete = false;
+		return stats;
+	}
+
+	if (state.remainingQueries == 0) {
+		state.remainingQueries =
+		    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+	}
+	stats.plannedUnits = state.remainingQueries;
+	const size_t runQueryCount =
+	    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+	const uint64_t retentionFloorMs =
+	    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
+	uint32_t baseTimeout = config.queryTimeoutMs /
+	                       static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+	baseTimeout = std::max<uint32_t>(1, baseTimeout);
+
+	while (state.remainingQueries > 0) {
 		if (providerShouldStop(control)) {
 			recordProviderStop(stats, control);
 			break;
 		}
-		stats.workUnits++;
-		const size_t i = typeCount > 0 ? (serviceCursor + processedQueries) % typeCount : 0;
+		const uint32_t perQueryTimeout = providerRemainingMs(control, baseTimeout);
+		if (perQueryTimeout == 0) {
+			recordProviderStop(stats, control);
+			break;
+		}
+		const size_t i = state.serviceCursor % state.serviceTypeCount;
 		mdns_result_t *results = nullptr;
+		stats.workUnits++;
 		const esp_err_t queryResult = mdns_query_ptr(
-		    types[i].service,
-		    types[i].proto,
+		    state.serviceTypes[i].service,
+		    state.serviceTypes[i].proto,
 		    perQueryTimeout,
 		    config.maxResults,
 		    &results
 		);
+		state.serviceCursor = (state.serviceCursor + 1) % state.serviceTypeCount;
+		state.remainingQueries--;
 		if (queryResult != ESP_OK) {
 			if (queryResult == ESP_ERR_TIMEOUT) {
 				stats.timeouts++;
@@ -1445,15 +1490,19 @@ ProviderRunStats runMdnsProvider(
 		}
 		mdns_query_results_free(results);
 	}
+
 	if (providerShouldStop(control)) {
 		recordProviderStop(stats, control);
 	}
-	if (typeCount > 0) {
-		serviceCursor = (serviceCursor + processedQueries) % typeCount;
+	if (!stats.budgetYielded && !stats.cancelled && state.remainingQueries == 0) {
+		state.active = false;
+		state.enumerationComplete = false;
+		state.serviceTypeCount = 0;
 	}
 #else
 	(void)config;
 	(void)context;
+	(void)state;
 	stats.errors = 1;
 #endif
 	return stats;
