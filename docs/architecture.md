@@ -20,11 +20,30 @@ The consuming application decides how many missed confirmations imply offline, h
 
 ## Runtime ownership
 
-Scout owns one long-lived FreeRTOS task through Strata::FreeRTOS::Task.
+Scout supports two execution modes with the same discovery and registry semantics.
 
-The task owns scanning and registry mutation. Buffer and task publication, teardown, and public snapshot queries are protected with a Strata recursive mutex. Shutdown is cooperative: deinit requests stop, waits for the Scout task to reach its external-deletion handoff, and then resets the Strata task from the caller context.
+In `ScoutExecutionMode::BackgroundTask`, Scout owns one long-lived scheduler task through
+`Strata::FreeRTOS::Task`. That task performs scans, provider work, registry mutation and event
+delivery.
 
-Callbacks are never invoked while the Scout registry mutex is held. Explicit `deinit()` is rejected from the Scout task because Strata task storage must be reset from another task context. If a `Scout` object is destroyed from its own callback, ownership of the runtime is transferred to a shared Strata-owned cleanup task, which performs the normal cooperative shutdown and releases the runtime only after the Scout task has stopped.
+In `ScoutExecutionMode::CallerDriven`, Scout creates no scheduler task. The application calls
+`process()` from the task that should own discovery work, and Scout performs scans, provider work,
+registry mutation and event delivery synchronously from that caller-owned task. `scanNow()` only
+queues immediate work in both modes.
+
+Runtime publication, teardown and public snapshot queries are protected with a Strata recursive
+mutex. Callbacks are never invoked while the registry mutex is held.
+
+Background-task shutdown is cooperative: `deinit()` requests stop, waits for the Scout task to
+reach its external-deletion handoff, and then resets the Strata task from the caller context. In
+caller-driven mode there is no Scout scheduler task to stop; `deinit()` waits for any active
+`process()` call from another task to leave Scout before releasing runtime storage, and closes an
+unfinished incremental scan as cancelled.
+
+Explicit `deinit()` from Scout's currently active processing context is rejected with
+`ScoutStatus::Busy`. If a `Scout` object is destroyed from its own callback in either execution
+mode, ownership of the runtime is transferred to a shared Strata-owned cleanup task so storage is
+not released while the callback/process frame is still active.
 
 ## Network threading
 
