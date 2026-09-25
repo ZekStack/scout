@@ -91,6 +91,23 @@ void assertTerminalScanPair(const std::vector<ScoutEvent> &events) {
 	assert(started->scanId == completed->scanId);
 }
 
+void testWorkerDoesNotRestartStoppingState() {
+	ScoutImpl runtime;
+	runtime.state = ScoutState::Stopping;
+	runtime.diag.state = ScoutState::Stopping;
+	runtime.stopRequested.store(true);
+	runtime.startReady.store(true);
+	bool suspended = false;
+	try {
+		runtime.run();
+	} catch (const Strata::FreeRTOS::TaskSuspended &) {
+		suspended = true;
+	}
+	assert(suspended);
+	assert(runtime.state == ScoutState::Stopping);
+	assert(runtime.diag.state == ScoutState::Stopping);
+}
+
 void testLifecycleSnapshots() {
 	Scout scout;
 	ScoutConfig config;
@@ -1260,6 +1277,7 @@ size_t recommendedArpBatchSize(size_t requested) { return requested; }
 } // namespace scout_internal
 
 int main() {
+	testWorkerDoesNotRestartStoppingState();
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
