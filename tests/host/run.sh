@@ -38,3 +38,14 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
 
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
   "${BUILD_DIR}/scout-runtime-tests"
+
+"${CXX}" -I"${ROOT_DIR}/tests/host/provider_stubs" -I"${ROOT_DIR}/tests/host/runtime_stubs" \
+  "${CXX_FLAGS[@]}" -pthread \
+  "${ROOT_DIR}/src/internal/ScoutEnrichment.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutDns.cpp" \
+  "${ROOT_DIR}/src/internal/ScoutProviders.cpp" \
+  "${ROOT_DIR}/tests/host/test_scout_providers.cpp" \
+  -o "${BUILD_DIR}/scout-provider-tests"
+
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+  "${BUILD_DIR}/scout-provider-tests"
