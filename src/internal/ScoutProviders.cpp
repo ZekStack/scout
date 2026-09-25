@@ -1545,7 +1545,7 @@ ProviderRunStats runMdnsProvider(
 	if (providerShouldStop(control)) {
 		recordProviderStop(stats, control);
 	}
-	if (!stats.budgetYielded && !stats.cancelled && state.remainingQueries == 0) {
+	if (!stats.cancelled && state.remainingQueries == 0) {
 		state.active = false;
 		state.enumerationComplete = false;
 		state.serviceTypeCount = 0;
@@ -1874,7 +1874,7 @@ ProviderRunStats runSsdpProvider(
 	                                : state.remainingInterfaces - processedInterfaces;
 	if (stats.cancelled) {
 		state = {};
-	} else if (!stats.budgetYielded && state.remainingInterfaces == 0) {
+	} else if (state.remainingInterfaces == 0) {
 		state.active = false;
 		state.descriptionFetches = 0;
 		state.fetchedLocationCount = 0;
