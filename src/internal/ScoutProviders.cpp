@@ -1583,7 +1583,7 @@ ProviderRunStats runSsdpProvider(
 	if (collectInterfaces(interfaces, MaxInterfaces, interfaceCount) != ESP_OK) {
 		stats.errors++;
 		stats.transportErrors++;
-		state.remainingInterfaces = 0;
+		state = {};
 		return stats;
 	}
 	if (interfaceCount == 0) {
@@ -1595,6 +1595,8 @@ ProviderRunStats runSsdpProvider(
 	    state.interfaceSignature != currentInterfaceSignature) {
 		state.interfaceCursor = 0;
 		state.remainingInterfaces = interfaceCount;
+		state.descriptionFetches = 0;
+		state.fetchedLocationCount = 0;
 		stats.topologyRestarts++;
 	}
 	if (!state.active) {
@@ -1751,9 +1753,9 @@ ProviderRunStats runSsdpProvider(
 			    httpScratchCapacity > 1 && state.descriptionFetches < descriptionBudget) {
 				const uint32_t httpTimeout = providerRemainingMs(control, config.httpTimeoutMs);
 				if (httpTimeout == 0) {
-					break;
-				}
-				const HttpFetchResult fetch = fetchHttpBody(
+					recordProviderStop(stats, control);
+				} else {
+					const HttpFetchResult fetch = fetchHttpBody(
 				    parsed.location,
 				    *target,
 				    targets,
@@ -1852,6 +1854,7 @@ ProviderRunStats runSsdpProvider(
 					case HttpFetchStatus::Ok:
 						break;
 					}
+				}
 				}
 			} else if (config.fetchDeviceDescription && newDescriptionLocation &&
 			           state.descriptionFetches >= descriptionBudget) {
