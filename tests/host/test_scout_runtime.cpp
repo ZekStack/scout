@@ -11,8 +11,10 @@
 #include <vector>
 
 namespace scout_internal {
+std::atomic<int> testMdnsRuns{0};
 std::atomic<int> testSsdpRuns{0};
 std::atomic<int> testNbnsRuns{0};
+std::atomic<bool> testMdnsYieldNext{false};
 std::atomic<bool> testSsdpYieldNext{false};
 std::atomic<bool> testNbnsYieldNext{false};
 } // namespace scout_internal
@@ -49,6 +51,7 @@ enum class NetworkMode {
 	SmallSubnet,
 	LargeSubnet,
 	PartialRequestFailure,
+	TruncatedInterfaces,
 };
 std::atomic<NetworkMode> networkMode{NetworkMode::None};
 
@@ -802,6 +805,148 @@ void testCallerDrivenExecution() {
 	assert(scout.deinit().status == ScoutStatus::Ok);
 }
 
+void testMdnsBudgetContinuation() {
+	networkMode.store(NetworkMode::None);
+	scout_internal::testMdnsRuns.store(0);
+	scout_internal::testMdnsYieldNext.store(true);
+
+	Scout scout;
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.execution.workBudgetMs = 25;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = true;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	assert(scout.init(config).status == ScoutStatus::Ok);
+
+	assert(scout.process(25).status == ScoutStatus::Ok);
+	assert(scout_internal::testMdnsRuns.load() == 1);
+	assert(scout.timeUntilNextWork() == 0);
+	assert(scout.process(25).status == ScoutStatus::Ok);
+	assert(scout_internal::testMdnsRuns.load() == 2);
+	assert(scout.timeUntilNextWork() > 0);
+	assert(scout.diagnostics().mdns.budgetYields == 1);
+	assert(scout.deinit().status == ScoutStatus::Ok);
+}
+
+void testOuiBudgetContinuation() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.deviceCount = 3;
+	runtime.diag.deviceCount = 3;
+	for (size_t i = 0; i < runtime.deviceCount; ++i) {
+		auto &info = runtime.devices[i].info;
+		info.mac = ScoutMacAddress{{0x00, 0x21, 0x22, 0x23, 0x24, static_cast<uint8_t>(i + 1)}};
+		info.key.kind = ScoutIdentityKind::Mac;
+		info.key.mac = info.mac;
+	}
+	std::atomic<int> lookups{0};
+	runtime.ouiLookup = [&](const ScoutMacAddress &, ScoutVendorInfo &vendor) {
+		lookups.fetch_add(1);
+		std::this_thread::sleep_for(std::chrono::milliseconds(3));
+		vendor.known = true;
+		std::strcpy(vendor.name, "Example");
+		return true;
+	};
+
+	const bool continuation = runtime.performOuiProvider(nowMs() + 1);
+	assert(continuation);
+	assert(runtime.ouiActive);
+	assert(runtime.performOuiProvider(UINT64_MAX) == false);
+	assert(lookups.load() == 3);
+	for (size_t i = 0; i < runtime.deviceCount; ++i) {
+		assert(runtime.devices[i].details);
+		assert(runtime.devices[i].details->vendor.known);
+	}
+	runtime.releaseBuffers();
+}
+
+void testTopologyContinuationRestart() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.registryTopologyGeneration = 2;
+	runtime.ssdpState.active = true;
+	runtime.ssdpState.topologyGeneration = 1;
+	runtime.ssdpState.remainingInterfaces = 1;
+	scout_internal::testSsdpRuns.store(0);
+	(void)runtime.performSsdpProvider(UINT64_MAX);
+	assert(runtime.diag.providerTopologyRestarts == 1);
+	assert(scout_internal::testSsdpRuns.load() == 1);
+	runtime.releaseBuffers();
+}
+
+void testIdentityRelationEvictsLowerConfidence() {
+	ScoutImpl runtime;
+	ScoutConfig config = runtime.config;
+	config.maxIdentityRelations = 1;
+	assert(runtime.allocateBuffers(config));
+
+	ScoutIdentityRelation strong{};
+	strong.first = ScoutDeviceKey{.kind = ScoutIdentityKind::Mac, .mac = ScoutMacAddress{{0, 1, 2, 3, 4, 1}}};
+	strong.second = ScoutDeviceKey{.kind = ScoutIdentityKind::Mac, .mac = ScoutMacAddress{{0, 1, 2, 3, 4, 2}}};
+	strong.evidence.confidence = ScoutIdentityConfidence::Strong;
+	strong.evidence.type = ScoutIdentityEvidenceType::MdnsPersistentId;
+	assert(runtime.storeIdentityRelation(strong));
+
+	ScoutIdentityRelation certain = strong;
+	certain.second.mac = ScoutMacAddress{{0, 1, 2, 3, 4, 3}};
+	certain.evidence.confidence = ScoutIdentityConfidence::Certain;
+	certain.evidence.type = ScoutIdentityEvidenceType::UpnpUdn;
+	assert(runtime.storeIdentityRelation(certain));
+	assert(runtime.identityRelationCountValue == 1);
+	assert(runtime.identityRelations[0].evidence.confidence == ScoutIdentityConfidence::Certain);
+	runtime.releaseBuffers();
+}
+
+void testTruncatedInterfacesDisableCoverage() {
+	networkMode.store(NetworkMode::TruncatedInterfaces);
+	Scout scout;
+	ScoutConfig config;
+	config.execution.mode = ScoutExecutionMode::CallerDriven;
+	config.scanOnInit = false;
+	config.providers.icmp.enabled = false;
+	config.providers.mdns.enabled = false;
+	config.providers.ssdp.enabled = false;
+	config.providers.nbns.enabled = false;
+	config.providers.reverseDns.enabled = false;
+	config.arpResponseWaitMs = 1;
+	config.interBatchDelayMs = 0;
+	std::vector<ScoutEvent> events;
+	scout.onEvent([&](const ScoutEvent &event) { events.push_back(event); });
+	assert(scout.init(config).status == ScoutStatus::Ok);
+	assert(scout.scanNow().status == ScoutStatus::Ok);
+	while (true) {
+		assert(scout.process(25).status == ScoutStatus::Ok);
+		bool completed = false;
+		for (const auto &event : events) {
+			completed = completed || event.type == ScoutEventType::ScanCompleted;
+		}
+		if (completed) {
+			break;
+		}
+		const uint32_t waitMs = scout.timeUntilNextWork();
+		if (waitMs != UINT32_MAX && waitMs > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+		}
+	}
+	const ScoutDiagnostics diagnostics = scout.diagnostics();
+	assert(!diagnostics.coverageAvailable);
+	assert(diagnostics.interfaceLimitDrops == 1);
+	bool sawTruncation = false;
+	for (const auto &event : events) {
+		if (event.type == ScoutEventType::ScanSkipped &&
+		    event.status == ScoutStatus::InvalidConfig) {
+			sawTruncation = true;
+		}
+	}
+	assert(sawTruncation);
+	assert(scout.deinit().status == ScoutStatus::Ok);
+	networkMode.store(NetworkMode::None);
+}
+
 void testProviderBudgetContinuation() {
 	networkMode.store(NetworkMode::None);
 	scout_internal::testSsdpRuns.store(0);
@@ -995,13 +1140,24 @@ ProviderRunStats runIcmpProvider(
 ProviderRunStats runMdnsProvider(
     const ProviderTarget *,
     size_t,
-    MdnsProviderState &,
+    MdnsProviderState &state,
     const ScoutMdnsConfig &,
     EnrichmentSink,
     void *,
     const ProviderRunControl *
 ) {
-	return {};
+	ProviderRunStats stats{};
+	testMdnsRuns.fetch_add(1);
+	if (testMdnsYieldNext.exchange(false)) {
+		stats.budgetYielded = true;
+		state.active = true;
+		state.enumerationComplete = true;
+		state.remainingQueries = 1;
+	} else {
+		state.active = false;
+		state.remainingQueries = 0;
+	}
+	return stats;
 }
 
 ProviderRunStats runSsdpProvider(
@@ -1068,8 +1224,8 @@ ProviderRunStats runReverseDnsProvider(
 esp_err_t collectInterfaces(
     InterfaceSnapshot *out, size_t capacity, size_t &count, bool *truncated
 ) {
-	if (truncated != nullptr) { *truncated = false; }
 	const auto mode = networkMode.load();
+	if (truncated != nullptr) { *truncated = mode == NetworkMode::TruncatedInterfaces; }
 	if (mode == NetworkMode::InterfaceError) {
 		count = 0;
 		return ESP_FAIL;
@@ -1110,6 +1266,11 @@ int main() {
 	testIdentityRelationCapacityDoesNotCreateUnbackedGroups();
 	testIdentityGroupMemberLimitIsExplicit();
 	testCallerDrivenExecution();
+	testMdnsBudgetContinuation();
+	testOuiBudgetContinuation();
+	testTopologyContinuationRestart();
+	testIdentityRelationEvictsLowerConfidence();
+	testTruncatedInterfacesDisableCoverage();
 	testProviderBudgetContinuation();
 	testCallerDrivenDeinitCompletesActiveScan();
 	testProcessRejectsBackgroundMode();
