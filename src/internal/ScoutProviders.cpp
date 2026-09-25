@@ -36,15 +36,13 @@
 namespace scout_internal {
 namespace {
 
-constexpr size_t MaxMdnsServiceTypes = 64;
+constexpr size_t MaxMdnsServiceTypes = ProviderMaxMdnsServiceTypes;
 constexpr size_t MaxProviderTargetsPerRun = 32;
-constexpr size_t MaxSsdpDescriptionFetches = 16;
+constexpr size_t MaxSsdpDescriptionFetches = ProviderMaxSsdpDescriptionFetches;
+constexpr size_t NbnsBatchSize = 8;
 constexpr uint32_t SocketPollMs = 50;
 
-struct MdnsServiceType {
-	char service[SCOUT_SERVICE_TYPE_SIZE] = {};
-	char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
-};
+using MdnsServiceType = ProviderMdnsServiceType;
 
 uint64_t providerNowMs() {
 	return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -145,6 +143,91 @@ const ProviderTarget *findTarget(
 		match = &targets[i];
 	}
 	return match;
+}
+
+uint64_t hashLocation(const char *interfaceKey, const char *location) {
+	constexpr uint64_t OffsetBasis = 1469598103934665603ULL;
+	constexpr uint64_t Prime = 1099511628211ULL;
+	uint64_t hash = OffsetBasis;
+	auto add = [&](const char *value) {
+		if (value == nullptr) {
+			return;
+		}
+		for (; *value != '\0'; ++value) {
+			unsigned char byte = static_cast<unsigned char>(*value);
+			if (byte >= 'A' && byte <= 'Z') {
+				byte = static_cast<unsigned char>(byte - 'A' + 'a');
+			}
+			hash ^= byte;
+			hash *= Prime;
+		}
+	};
+	add(interfaceKey);
+	hash ^= 0xFFU;
+	hash *= Prime;
+	add(location);
+	return hash;
+}
+
+bool locationAddressAllowed(
+    const ProviderTarget *targets,
+    size_t targetCount,
+    const ProviderTarget &origin,
+    uint32_t resolvedIpv4
+) {
+	if (resolvedIpv4 == 0) {
+		return false;
+	}
+	for (size_t i = 0; i < targetCount; ++i) {
+		const auto &candidate = targets[i];
+		if (candidate.ipv4.value != resolvedIpv4 || candidate.mac != origin.mac) {
+			continue;
+		}
+		if (origin.interfaceKey[0] == '\0' || candidate.interfaceKey[0] == '\0' ||
+		    textEqualsIgnoreCase(origin.interfaceKey, candidate.interfaceKey)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool selectDnsServer(
+    const ProviderTarget &target,
+    esp_netif_t *netif,
+    const ProviderRunControl *control,
+    uint32_t &serverIpv4
+) {
+	serverIpv4 = 0;
+	if (control != nullptr && control->dnsServerLookup != nullptr &&
+	    static_cast<bool>(*control->dnsServerLookup)) {
+		ScoutIpv4Address server{};
+		if ((*control->dnsServerLookup)(target.interfaceKey, server) && server.valid()) {
+			serverIpv4 = server.value;
+			return true;
+		}
+	}
+
+#if defined(CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF) && CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+	(void)target;
+#else
+	if (netif != esp_netif_get_default_netif()) {
+		return false;
+	}
+#endif
+
+	esp_netif_dns_info_t dnsInfo{};
+	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		dnsInfo = {};
+		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
+	}
+	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
+	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+		return false;
+	}
+	serverIpv4 = ip_2_ip4(&dnsInfo.ip)->addr;
+	return true;
 }
 
 bool setSocketTimeout(int socketFd, uint32_t timeoutMs) {
