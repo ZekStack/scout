@@ -209,7 +209,7 @@ void mergeDeviceInfo(ScoutDeviceInfo &target, const ScoutDeviceInfo &source) {
 		    sourceEndpoint.ipv4.value,
 		    sourceEndpoint.lastSeenAtMs,
 		    static_cast<ScoutObservationSource>(sourceEndpoint.observationSources),
-		    sourceEndpoint.lastConfirmedAtMs != 0
+		    false
 		);
 		auto *targetEndpoint =
 		    findEndpoint(target, sourceEndpoint.interfaceIndex, sourceEndpoint.ipv4.value);
