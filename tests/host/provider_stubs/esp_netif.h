@@ -28,6 +28,19 @@ inline bool ip4_addr_isany_val(const ip4_addr_t &address) {
 	return address.addr == 0;
 }
 
+constexpr uint8_t ESP_IPADDR_TYPE_V4 = 0;
+
+struct esp_ip4_addr_t {
+	uint32_t addr = 0;
+};
+
+struct esp_ip_addr_t {
+	union {
+		esp_ip4_addr_t ip4;
+	} u_addr{};
+	uint8_t type = ESP_IPADDR_TYPE_V4;
+};
+
 struct esp_netif_t {
 	const char *key = nullptr;
 	uint32_t ipv4 = 0;
@@ -42,7 +55,7 @@ struct esp_netif_ip_info_t {
 };
 
 struct esp_netif_dns_info_t {
-	ip_addr_t ip{};
+	esp_ip_addr_t ip{};
 };
 
 enum esp_netif_dns_type_t {
