@@ -193,6 +193,35 @@ jobs:
             fi
           done
 
+  build-hybrid-p4:
+    runs-on: [self-hosted, zekstack-ci]
+    needs: [metadata, source-audit, host-tests]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Isolate PlatformIO state
+        run: echo "PLATFORMIO_CORE_DIR=${RUNNER_TEMP}/platformio-hybrid-p4" >> "${GITHUB_ENV}"
+
+      - name: Install PIOArduino Core
+        run: python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
+
+      - name: Build hybrid ESP32-P4 smoke example
+        run: |
+          pio ci examples/Basic \
+            --board esp32-p4-evboard \
+            --lib="." \
+            --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+            --project-option "framework=arduino,espidf" \
+            --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
+            --project-option "build_unflags=-std=gnu++11" \
+            --project-option "build_flags=-std=gnu++20"
+
   arduino-cli:
     runs-on: [self-hosted, zekstack-ci]
     needs: [metadata, source-audit, host-tests]
