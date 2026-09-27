@@ -664,8 +664,8 @@ esp_netif_get_dns_info(esp_netif_t *netif, esp_netif_dns_type_t, esp_netif_dns_i
 	if (netif == nullptr || info == nullptr || netif->dns == 0) {
 		return ESP_FAIL;
 	}
-	info->ip.type = 4;
-	info->ip.ip4.addr = netif->dns;
+	info->ip.type = ESP_IPADDR_TYPE_V4;
+	info->ip.u_addr.ip4.addr = netif->dns;
 	return ESP_OK;
 }
 

@@ -235,16 +235,17 @@ bool selectDnsServer(
 
 	esp_netif_dns_info_t dnsInfo{};
 	esp_err_t dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+	auto validIpv4Dns = [](const esp_netif_dns_info_t &info) {
+		return info.ip.type == ESP_IPADDR_TYPE_V4 && info.ip.u_addr.ip4.addr != 0;
+	};
+	if (dnsResult != ESP_OK || !validIpv4Dns(dnsInfo)) {
 		dnsInfo = {};
 		dnsResult = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
 	}
-	if (dnsResult != ESP_OK || !IP_IS_V4_VAL(dnsInfo.ip) ||
-	    ip4_addr_isany_val(*ip_2_ip4(&dnsInfo.ip))) {
+	if (dnsResult != ESP_OK || !validIpv4Dns(dnsInfo)) {
 		return false;
 	}
-	serverIpv4 = ip_2_ip4(&dnsInfo.ip)->addr;
+	serverIpv4 = dnsInfo.ip.u_addr.ip4.addr;
 	return true;
 }
 
@@ -1319,8 +1320,7 @@ ProviderRunStats runIcmpProvider(
 		pingConfig.task_stack_size = config.taskStackBytes;
 		pingConfig.task_prio = config.taskPriority;
 		pingConfig.interface = target.interfaceIndex;
-		pingConfig.target_addr.type = IPADDR_TYPE_V4;
-		pingConfig.target_addr.u_addr.ip4.addr = target.ipv4.value;
+		ip_addr_set_ip4_u32(&pingConfig.target_addr, target.ipv4.value);
 
 		esp_ping_callbacks_t callbacks{};
 		callbacks.on_ping_success = onPingSuccess;
