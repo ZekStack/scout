@@ -211,6 +211,9 @@ jobs:
       - name: Install PIOArduino Core
         run: python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
 
+      - name: Install PIOArduino ESP32 Platform
+        run: pio pkg install -g -p "${PIOARDUINO_PLATFORM_URL}"
+
       - name: Build hybrid ESP32-P4 smoke example
         run: |
           pio ci examples/Basic \
