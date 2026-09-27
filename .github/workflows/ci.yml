@@ -225,7 +225,24 @@ jobs:
           mkdir -p "$project_dir/src" "$project_dir/lib/Scout"
 
           rsync -a --delete --exclude ".git" --exclude ".pio" ./ "$project_dir/lib/Scout/"
-          cp examples/Basic/Basic.ino "$project_dir/src/main.cpp"
+
+          cat > "$project_dir/sdkconfig.defaults" <<'EOF'
+          CONFIG_FREERTOS_HZ=1000
+          # CONFIG_AUTOSTART_ARDUINO is not set
+          EOF
+
+          cat > "$project_dir/src/main.cpp" <<'EOF'
+          #include <Arduino.h>
+          #include <Scout.h>
+
+          Scout scout;
+
+          extern "C" void app_main() {
+              Serial.begin(115200);
+              const ScoutDiagnostics diagnostics = scout.diagnostics();
+              (void)diagnostics;
+          }
+          EOF
 
           cat > "$project_dir/platformio.ini" <<EOF
           [env:esp32-p4-evboard]
@@ -234,8 +251,13 @@ jobs:
           framework = arduino, espidf
           lib_deps =
               https://github.com/ZekStack/strata.git#${STRATA_VERSION}
-          build_unflags = -std=gnu++11
-          build_flags = -std=gnu++20
+          build_unflags =
+              -std=gnu++11
+              -std=gnu++17
+              -std=gnu++2a
+              -std=gnu++2b
+          build_flags =
+              -std=gnu++20
           EOF
 
           pio run --project-dir "$project_dir" -e esp32-p4-evboard
