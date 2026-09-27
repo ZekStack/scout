@@ -218,14 +218,27 @@ jobs:
 
       - name: Build hybrid ESP32-P4 smoke example
         run: |
-          pio ci examples/Basic \
-            --board esp32-p4-evboard \
-            --lib="." \
-            --project-option "platform=${PIOARDUINO_HYBRID_PLATFORM_URL}" \
-            --project-option "framework=arduino,espidf" \
-            --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
-            --project-option "build_unflags=-std=gnu++11" \
-            --project-option "build_flags=-std=gnu++20"
+          set -euo pipefail
+
+          project_dir="${RUNNER_TEMP}/scout-hybrid-p4"
+          rm -rf "$project_dir"
+          mkdir -p "$project_dir/src" "$project_dir/lib/Scout"
+
+          rsync -a --delete --exclude ".git" --exclude ".pio" ./ "$project_dir/lib/Scout/"
+          cp examples/Basic/Basic.ino "$project_dir/src/main.cpp"
+
+          cat > "$project_dir/platformio.ini" <<EOF
+          [env:esp32-p4-evboard]
+          platform = ${PIOARDUINO_HYBRID_PLATFORM_URL}
+          board = esp32-p4-evboard
+          framework = arduino, espidf
+          lib_deps =
+              https://github.com/ZekStack/strata.git#${STRATA_VERSION}
+          build_unflags = -std=gnu++11
+          build_flags = -std=gnu++20
+          EOF
+
+          pio run --project-dir "$project_dir" -e esp32-p4-evboard
 
   arduino-cli:
     runs-on: [self-hosted, zekstack-ci]
