@@ -158,6 +158,7 @@ jobs:
     needs: [metadata, source-audit, host-tests]
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         board: [esp32dev, esp32-s3-devkitc-1, esp32-c3-devkitm-1, esp32-p4-evboard]
     steps:
@@ -197,7 +198,7 @@ jobs:
 
   build-hybrid-p4:
     runs-on: [self-hosted, zekstack-ci]
-    needs: [metadata, source-audit, host-tests]
+    needs: build-examples
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -264,9 +265,10 @@ jobs:
 
   arduino-cli:
     runs-on: [self-hosted, zekstack-ci]
-    needs: [metadata, source-audit, host-tests]
+    needs: build-hybrid-p4
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         board:
           - fqbn: esp32:esp32:esp32
