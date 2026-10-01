@@ -454,10 +454,8 @@ DnsPtrAnswer parsePtrResponse(
 	return result;
 }
 
-
-DnsPtrAnswer parseMdnsPtrResponse(
-    const uint8_t *data, size_t length, const uint8_t expectedIpv4[4]
-) {
+DnsPtrAnswer
+parseMdnsPtrResponse(const uint8_t *data, size_t length, const uint8_t expectedIpv4[4]) {
 	DnsPtrAnswer result{};
 	if (data == nullptr || expectedIpv4 == nullptr || length < 12 || read16(data) != 0) {
 		return result;
@@ -472,10 +470,9 @@ DnsPtrAnswer parseMdnsPtrResponse(
 	if (questions > 1) {
 		return result;
 	}
-	const uint32_t recordCount =
-	    static_cast<uint32_t>(read16(data + 6)) +
-	    static_cast<uint32_t>(read16(data + 8)) +
-	    static_cast<uint32_t>(read16(data + 10));
+	const uint32_t recordCount = static_cast<uint32_t>(read16(data + 6)) +
+	                             static_cast<uint32_t>(read16(data + 8)) +
+	                             static_cast<uint32_t>(read16(data + 10));
 
 	char expected[64]{};
 	std::snprintf(
