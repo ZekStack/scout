@@ -1627,8 +1627,7 @@ ProviderRunStats runMdnsProvider(
 			    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
 			const uint64_t retentionFloorMs =
 			    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
-			const uint32_t queryDivisor =
-			    static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+			const uint32_t queryDivisor = static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
 			uint32_t baseTimeout = config.queryTimeoutMs / queryDivisor;
 			baseTimeout = std::max<uint32_t>(1, baseTimeout);
 
