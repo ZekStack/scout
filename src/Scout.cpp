@@ -1501,6 +1501,13 @@ struct ScoutImpl {
 		);
 		const bool continueRun = stats.budgetYielded && !stats.cancelled && mdnsState.active;
 		accumulateProviderStats(diag.mdns, stats);
+		{
+			ScoutLock lock(mutex);
+			if (lock) {
+				diag.mdnsHostnameQueries += stats.hostnameQueries;
+				diag.mdnsHostnameResponses += stats.hostnameResponses;
+			}
+		}
 		flushIdentityIfDirty();
 		return continueRun;
 	}
@@ -2366,10 +2373,16 @@ struct ScoutImpl {
 		      incoming.providers.icmp.maxTargetsPerRun == 0)) ||
 		    (incoming.providers.mdns.enabled &&
 		     (incoming.providers.mdns.intervalMs < MinScanIntervalMs ||
-		      incoming.providers.mdns.queryTimeoutMs == 0 ||
-		      incoming.providers.mdns.maxResults == 0 ||
-		      incoming.providers.mdns.maxServiceTypes == 0 ||
-		      incoming.providers.mdns.maxServiceQueriesPerRun == 0)) ||
+		      (!incoming.providers.mdns.serviceDiscoveryEnabled &&
+		       !incoming.providers.mdns.hostnameDiscoveryEnabled) ||
+		      (incoming.providers.mdns.serviceDiscoveryEnabled &&
+		       (incoming.providers.mdns.queryTimeoutMs == 0 ||
+		        incoming.providers.mdns.maxResults == 0 ||
+		        incoming.providers.mdns.maxServiceTypes == 0 ||
+		        incoming.providers.mdns.maxServiceQueriesPerRun == 0)) ||
+		      (incoming.providers.mdns.hostnameDiscoveryEnabled &&
+		       (incoming.providers.mdns.hostnameQueryTimeoutMs == 0 ||
+		        incoming.providers.mdns.maxHostnameTargetsPerRun == 0)))) ||
 		    (incoming.providers.ssdp.enabled &&
 		     (incoming.providers.ssdp.intervalMs < MinScanIntervalMs ||
 		      incoming.providers.ssdp.responseWindowMs == 0 ||
@@ -3071,6 +3084,78 @@ ScoutResult Scout::preferredName(const ScoutMacAddress &mac, ScoutPreferredName 
 	out.source = ScoutNameSource::None;
 	return ScoutResult::success("MAC address fallback");
 }
+
+ScoutResult Scout::preferredName(const ScoutIdentityGroup &group, ScoutPreferredName &out) const {
+	resetInPlace(out);
+	if (group.memberCount == 0 || group.memberCount > SCOUT_MAX_IDENTITY_GROUP_MEMBERS) {
+		return ScoutResult::failure(ScoutStatus::InvalidConfig, "identity group is invalid");
+	}
+	if (!_impl) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+
+	ScoutLock lock(_impl->mutex);
+	if (!lock) {
+		return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+	}
+	if (!_impl->initialized) {
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+
+	bool resolvedMember = false;
+	bool hasPreferred = false;
+	ScoutMacAddress fallbackMac{};
+	int bestPriority = 1000;
+	for (size_t member = 0; member < group.memberCount; ++member) {
+		if (group.members[member].kind != ScoutIdentityKind::Mac ||
+		    !group.members[member].mac.valid()) {
+			continue;
+		}
+		const size_t index = _impl->findDeviceByMac(group.members[member].mac.bytes);
+		if (index == SIZE_MAX) {
+			continue;
+		}
+		if (!resolvedMember) {
+			fallbackMac = group.members[member].mac;
+		}
+		resolvedMember = true;
+		if (!_impl->devices[index].details) {
+			continue;
+		}
+		ScoutPreferredName candidate{};
+		if (!scout_internal::selectPreferredName(*_impl->devices[index].details, candidate)) {
+			continue;
+		}
+		const int priority = scout_internal::preferredNamePriority(candidate.source);
+		if (!hasPreferred || priority < bestPriority) {
+			out = candidate;
+			bestPriority = priority;
+			hasPreferred = true;
+		}
+	}
+
+	if (hasPreferred) {
+		return ScoutResult::success();
+	}
+	if (!resolvedMember) {
+		return ScoutResult::failure(ScoutStatus::NotFound, "identity group has no current members");
+	}
+
+	std::snprintf(
+	    out.value,
+	    sizeof(out.value),
+	    "%02X:%02X:%02X:%02X:%02X:%02X",
+	    static_cast<unsigned>(fallbackMac.bytes[0]),
+	    static_cast<unsigned>(fallbackMac.bytes[1]),
+	    static_cast<unsigned>(fallbackMac.bytes[2]),
+	    static_cast<unsigned>(fallbackMac.bytes[3]),
+	    static_cast<unsigned>(fallbackMac.bytes[4]),
+	    static_cast<unsigned>(fallbackMac.bytes[5])
+	);
+	out.source = ScoutNameSource::None;
+	return ScoutResult::success("MAC address fallback");
+}
+
 
 size_t Scout::identityGroupCount() const {
 	if (!_impl) {
