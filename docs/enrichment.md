@@ -12,7 +12,7 @@ The default provider set is intentionally useful on a PSRAM-equipped ESP32:
 | --- | --- | --- |
 | ARP | enabled | Discover directly connected IPv4 endpoints and their MAC addresses. |
 | ICMP | enabled | Actively confirm already-known IPv4 endpoints. |
-| mDNS / DNS-SD | enabled | Learn hostnames, friendly instance names, services, TXT metadata and IPv6 aliases. |
+| mDNS / DNS-SD | enabled | Learn hostnames through direct reverse PTR queries plus friendly instance names, services, TXT metadata and IPv6 aliases. |
 | SSDP / UPnP | enabled | Learn friendly names, manufacturer/model data and stable UDN identifiers. |
 | OUI | enabled when a resolver is supplied | Resolve a globally administered MAC prefix to a vendor. |
 | NBNS | disabled | Enrich legacy Windows/NAS devices with a NetBIOS name. |
@@ -29,10 +29,11 @@ does not imply that all network protocols are run during every ARP sweep.
 For scalar details that multiple providers can report, Scout uses deterministic source precedence
 instead of last-writer-wins updates. SSDP/UPnP outranks mDNS for manufacturer/model-style fields,
 while observations from the same source continue to refresh or update their own values. mDNS
-record retention also covers a complete bounded service-query rotation (with one scheduling
+service-record retention also covers a complete bounded service-query rotation (with one scheduling
 interval of headroom, bounded by `fallbackMaxAgeMs`) so short DNS-SD TTLs do not make names and
-services flap merely because Scout intentionally rotates service types. This retention is metadata
-only and never keeps a MAC identity online.
+services flap merely because Scout intentionally rotates service types. Direct mDNS hostname PTR
+records use their advertised TTL, with `fallbackMaxAgeMs` only when the reply provides no TTL.
+This retention is metadata only and never keeps a MAC identity online.
 
 ## PSRAM-first bounds
 
@@ -94,7 +95,36 @@ Scout stores multiple names with provenance instead of overwriting one protocol 
 7. vendor;
 8. MAC-address fallback.
 
-The consuming application can ignore this helper and choose its own display policy.
+The consuming application can ignore this helper and choose its own display policy. The overload
+that accepts a `ScoutIdentityGroup` evaluates every current MAC member with this same ranking, so
+a useful name learned on one adapter is not hidden by an unnamed first member.
+
+## Direct mDNS hostname discovery
+
+DNS-SD service discovery is not the only way a device can expose a local hostname. For every
+already-known IPv4 endpoint, Scout can also send a bounded reverse-PTR query for the endpoint's
+`in-addr.arpa` name to `224.0.0.251:5353`. This allows a device such as a phone to contribute
+`Gabi-iPhone.local` even when it advertises none of Scout's queried DNS-SD service types.
+
+The direct query requests a unicast response and uses a short-lived UDP socket bound to the
+endpoint's exact local ESP-NETIF address. Replies are accepted only from the target IPv4 address
+and UDP port 5353, then normal Scout endpoint ownership checks run again before the observation is
+committed. A delayed answer therefore cannot attach a hostname to an IPv4 address that has moved
+to another MAC.
+
+Direct hostname discovery and DNS-SD can be controlled independently:
+
+```cpp
+ScoutConfig config;
+config.providers.mdns.serviceDiscoveryEnabled = true;
+config.providers.mdns.hostnameDiscoveryEnabled = true;
+config.providers.mdns.hostnameQueryTimeoutMs = 120;
+config.providers.mdns.maxHostnameTargetsPerRun = 8;
+```
+
+The hostname target cursor rotates between runs and survives caller-driven budget yields. The
+`mdnsHostnameQueries` and `mdnsHostnameResponses` diagnostics expose the direct-query coverage.
+Disabling DNS-SD service discovery does not disable direct hostname discovery.
 
 ## mDNS ownership
 
