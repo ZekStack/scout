@@ -14,7 +14,7 @@ def properties_version(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tag", default="", help="Optional release tag, such as v0.1.0")
+    parser.add_argument("--tag", default="", help="Optional release tag, such as v0.1.1")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]

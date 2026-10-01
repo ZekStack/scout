@@ -10,17 +10,17 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC
 
 ## Why use Scout?
 
-* **Flexible execution** - run Scout from its own background FreeRTOS task or drive the same scheduler from an application-owned task.
-* **Public lwIP path** - active ARP requests and lookups run through ESP-NETIF's TCP/IP-context bridge instead of touching private lwIP ARP structures.
-* **MAC-first identity** - devices are keyed by MAC address while IPv4/IPv6 aliases are tracked as per-interface endpoints.
-* **Rich enrichment** - learns friendly names, hostnames, services, manufacturer/model data and stable protocol identifiers.
-* **Conservative physical identity** - strong evidence can group multiple MAC identities without destructively merging their network records.
-* **Bounded registry lifetime** - stale observations expire after the configurable `deviceMaxAgeMs`, and endpoint ownership is deduplicated across devices.
-* **Coverage-aware** - reports when Scout can or cannot observe an eligible ARP-capable interface.
-* **Bounded work** - device capacity, subnet size, ARP batch size, response wait, and scan cadence are explicit.
-* **PSRAM-first** - Scout-owned movable storage and the Scout task stack prefer external memory by default.
-* **Application-neutral** - Scout does not define online/offline thresholds, persistence, automation semantics, or Hitec-specific behavior.
-* **Strata-owned runtime** - memory placement, task ownership, and synchronization use Strata.
+- **Flexible execution** - run Scout from its own background FreeRTOS task or drive the same scheduler from an application-owned task.
+- **Public lwIP path** - active ARP requests and lookups run through ESP-NETIF's TCP/IP-context bridge instead of touching private lwIP ARP structures.
+- **MAC-first identity** - devices are keyed by MAC address while IPv4/IPv6 aliases are tracked as per-interface endpoints.
+- **Rich enrichment** - learns friendly names, hostnames, services, manufacturer/model data and stable protocol identifiers.
+- **Conservative physical identity** - strong evidence can group multiple MAC identities without destructively merging their network records.
+- **Bounded registry lifetime** - stale observations expire after the configurable `deviceMaxAgeMs`, and endpoint ownership is deduplicated across devices.
+- **Coverage-aware** - reports when Scout can or cannot observe an eligible ARP-capable interface.
+- **Bounded work** - device capacity, subnet size, ARP batch size, response wait, and scan cadence are explicit.
+- **PSRAM-first** - Scout-owned movable storage and the Scout task stack prefer external memory by default.
+- **Application-neutral** - Scout does not define online/offline thresholds, persistence, automation semantics, or Hitec-specific behavior.
+- **Strata-owned runtime** - memory placement, task ownership, and synchronization use Strata.
 
 ## Install
 
@@ -41,7 +41,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/scout.git#v0.1.0
+  https://github.com/ZekStack/scout.git#v0.1.1
   https://github.com/ZekStack/strata.git#v0.1.3
 
 build_flags =
@@ -195,14 +195,14 @@ Serial.println(Strata::toString(diag.taskStackRegion));
 
 ## Discovery model
 
-Scout v0.1.0 starts with active ARP discovery.
+Scout v0.1.1 starts with active ARP discovery.
 
 For each eligible interface, Scout calculates the directly connected IPv4 subnet, rejects scans larger than `maxHostsPerSubnet`, and processes targets in small batches. Direct lwIP calls such as `etharp_request()`, `etharp_find_addr()`, and interface lookup execute through `esp_netif_tcpip_exec()` in the lwIP TCP/IP context.
 
 Scout distinguishes two ARP observation sources:
 
-* `ArpCache` - the same mapping already existed before Scout's active request.
-* `ArpProbe` - the mapping appeared or changed during the active probe window.
+- `ArpCache` - the same mapping already existed before Scout's active request.
+- `ArpProbe` - the mapping appeared or changed during the active probe window.
 
 Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
 
@@ -236,15 +236,15 @@ A presence layer built on Scout should suppress offline inference while coverage
 > [!IMPORTANT]
 > Scout reports network observations, not application-level online/offline state.
 
-* `scanNow()` schedules an immediate scan and returns; it does not block until the subnet sweep completes.
-* In BackgroundTask mode, event callbacks run from the Scout task. In CallerDriven mode, they run from the task calling `process()`. Keep them short. Explicit `deinit()` from the active callback context returns `Busy`; destroying the `Scout` object from its callback is supported through lazy deferred cleanup on a separate Strata-owned task.
-* Scout never retains lwIP `struct netif` or ARP-table pointers outside the TCP/IP-context callback.
-* Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
-* A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
-* Scout performs no persistence, port scanning, or heuristic device-type classification. OUI lookup is supported through an application-provided resolver so Scout does not ship a stale vendor database.
-* Rich `ScoutDeviceDetails` snapshots are intentionally large; Scout allocates them lazily per enriched device, and applications should keep reusable snapshot buffers in PSRAM rather than on a small task stack.
-* Failure to allocate a rich detail record does not discard the compact MAC registry entry; `enrichmentAllocationFailures` reports that pressure.
-* `PreferExternal` is deliberately different from `RequireExternal`; smaller/non-PSRAM systems can still use the compact registry, but applications should tune enabled enrichment providers and capacities to their available internal memory.
+- `scanNow()` schedules an immediate scan and returns; it does not block until the subnet sweep completes.
+- In BackgroundTask mode, event callbacks run from the Scout task. In CallerDriven mode, they run from the task calling `process()`. Keep them short. Explicit `deinit()` from the active callback context returns `Busy`; destroying the `Scout` object from its callback is supported through lazy deferred cleanup on a separate Strata-owned task.
+- Scout never retains lwIP `struct netif` or ARP-table pointers outside the TCP/IP-context callback.
+- Large directly connected networks are skipped when their usable host count exceeds `maxHostsPerSubnet`.
+- A device can have more than one IPv4 endpoint when it is observed through multiple local interfaces.
+- Scout performs no persistence, port scanning, or heuristic device-type classification. OUI lookup is supported through an application-provided resolver so Scout does not ship a stale vendor database.
+- Rich `ScoutDeviceDetails` snapshots are intentionally large; Scout allocates them lazily per enriched device, and applications should keep reusable snapshot buffers in PSRAM rather than on a small task stack.
+- Failure to allocate a rich detail record does not discard the compact MAC registry entry; `enrichmentAllocationFailures` reports that pressure.
+- `PreferExternal` is deliberately different from `RequireExternal`; smaller/non-PSRAM systems can still use the compact registry, but applications should tune enabled enrichment providers and capacities to their available internal memory.
 
 ## API overview
 
@@ -282,19 +282,19 @@ scout.deinit();
 
 ## Examples
 
-| Example | Description |
-| --- | --- |
-| `WiFiDiscovery` | Connect a Wi-Fi-capable ESP32 and perform a real discovery scan after setting credentials. |
-| `Basic` | Initialize Scout with an interface already started by the application. |
-| `Events` | Observe scan, device, coverage, and error events. |
-| `Registry` | Enumerate the device registry, inspect endpoints, and look up a device by MAC address. |
-| `ManualScan` | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`. |
-| `CallerDriven` | Run Scout from an application-owned task without creating the normal Scout scheduler task. |
-| `Diagnostics` | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics. |
-| `MultiInterface` | Inspect devices observed through multiple eligible ESP-NETIF interfaces. |
-| `EnrichedDiscovery` | Inspect preferred names, vendor/manufacturer/model data and discovered services. |
-| `IdentityGroups` | Inspect strong physical-device groups and their MAC-level members. |
-| `NetworkDeviceManagerStyle` | Project Scout data into the simple fields a non-technical device UI would consume. |
+| Example                     | Description                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------ |
+| `WiFiDiscovery`             | Connect a Wi-Fi-capable ESP32 and perform a real discovery scan after setting credentials. |
+| `Basic`                     | Initialize Scout with an interface already started by the application.                     |
+| `Events`                    | Observe scan, device, coverage, and error events.                                          |
+| `Registry`                  | Enumerate the device registry, inspect endpoints, and look up a device by MAC address.     |
+| `ManualScan`                | Disable the initial scan and explicitly request non-blocking scans with `scanNow()`.       |
+| `CallerDriven`              | Run Scout from an application-owned task without creating the normal Scout scheduler task. |
+| `Diagnostics`               | Inspect scan counters, ARP statistics, memory placement, and task-stack diagnostics.       |
+| `MultiInterface`            | Inspect devices observed through multiple eligible ESP-NETIF interfaces.                   |
+| `EnrichedDiscovery`         | Inspect preferred names, vendor/manufacturer/model data and discovered services.           |
+| `IdentityGroups`            | Inspect strong physical-device groups and their MAC-level members.                         |
+| `NetworkDeviceManagerStyle` | Project Scout data into the simple fields a non-technical device UI would consume.         |
 
 For a first scan on a Wi-Fi-capable board, set the credentials in `examples/WiFiDiscovery/WiFiDiscovery.ino` and start with:
 
@@ -318,26 +318,26 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 
 ## Documentation
 
-| Document | Description |
-| --- | --- |
-| [`docs/architecture.md`](docs/architecture.md) | Responsibility boundaries, task ownership, identity, and coverage. |
-| [`docs/discovery.md`](docs/discovery.md) | ARP scan flow and observation semantics. |
-| [`docs/memory.md`](docs/memory.md) | Strata integration and external-memory policy. |
-| [`docs/enrichment.md`](docs/enrichment.md) | ICMP, mDNS, SSDP/UPnP, OUI, NBNS, DNS and metadata freshness. |
-| [`docs/identity.md`](docs/identity.md) | Physical-device relations, confidence and non-destructive grouping. |
+| Document                                       | Description                                                         |
+| ---------------------------------------------- | ------------------------------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md) | Responsibility boundaries, task ownership, identity, and coverage.  |
+| [`docs/discovery.md`](docs/discovery.md)       | ARP scan flow and observation semantics.                            |
+| [`docs/memory.md`](docs/memory.md)             | Strata integration and external-memory policy.                      |
+| [`docs/enrichment.md`](docs/enrichment.md)     | ICMP, mDNS, SSDP/UPnP, OUI, NBNS, DNS and metadata freshness.       |
+| [`docs/identity.md`](docs/identity.md)         | Physical-device relations, confidence and non-destructive grouping. |
 
 ## Compatibility
 
-| Item | Support |
-| --- | --- |
-| Framework | Arduino ESP32 |
-| Platform | PIOArduino ESP32 platform `55.03.39` |
-| Language | C++20 |
-| Network layer | ESP-NETIF and public lwIP ARP APIs |
+| Item          | Support                                                                    |
+| ------------- | -------------------------------------------------------------------------- |
+| Framework     | Arduino ESP32                                                              |
+| Platform      | PIOArduino ESP32 platform `55.03.39`                                       |
+| Language      | C++20                                                                      |
+| Network layer | ESP-NETIF and public lwIP ARP APIs                                         |
 | Memory policy | `PreferExternal` by default for Scout-owned movable storage and task stack |
-| Dependencies | Strata `v0.1.3` compatibility fix |
-| Exceptions | Not used for Scout public error handling |
-| Status | `0.1.0` |
+| Dependencies  | Strata `v0.1.3` compatibility fix                                          |
+| Exceptions    | Not used for Scout public error handling                                   |
+| Status        | `0.1.0`                                                                    |
 
 ## License
 
