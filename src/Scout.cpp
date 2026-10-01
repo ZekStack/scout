@@ -3156,7 +3156,6 @@ ScoutResult Scout::preferredName(const ScoutIdentityGroup &group, ScoutPreferred
 	return ScoutResult::success("MAC address fallback");
 }
 
-
 size_t Scout::identityGroupCount() const {
 	if (!_impl) {
 		return 0;
