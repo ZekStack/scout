@@ -1,5 +1,6 @@
 #include "internal/ScoutProviders.h"
 #include "internal/ScoutNetwork.h"
+#include "internal/ScoutDns.h"
 
 #include <esp_netif.h>
 #include <mdns.h>
@@ -23,6 +24,7 @@ namespace {
 enum class Scenario {
 	None,
 	Nbns,
+	MdnsHostname,
 	SsdpUnrelated,
 	SsdpConflict,
 	SsdpBudget,
@@ -35,6 +37,8 @@ std::map<int, int> socketTypes;
 std::map<int, uint32_t> boundAddresses;
 std::map<int, bool> datagramDelivered;
 int udpSendCount = 0;
+uint32_t lastUdpDestination = 0;
+uint16_t lastUdpDestinationPort = 0;
 int streamSocketCount = 0;
 uint32_t lastStreamBind = 0;
 uint32_t receiveDelayMs = 2;
@@ -78,6 +82,8 @@ void resetHarness(Scenario nextScenario) {
 	boundAddresses.clear();
 	datagramDelivered.clear();
 	udpSendCount = 0;
+	lastUdpDestination = 0;
+	lastUdpDestinationPort = 0;
 	streamSocketCount = 0;
 	lastStreamBind = 0;
 	receiveDelayMs = 2;
@@ -156,6 +162,43 @@ uint32_t senderForFd(int fd) {
 		return ipv4("192.168.2.43");
 	}
 	return ipv4("192.168.1.42");
+}
+
+std::vector<uint8_t> mdnsHostnameResponse() {
+	const uint8_t address[4] = {192, 168, 1, 42};
+	uint8_t query[128]{};
+	const size_t queryLength =
+	    scout_internal::buildMdnsPtrQuery(address, query, sizeof(query));
+	assert(queryLength > 0);
+
+	std::vector<uint8_t> response(256, 0);
+	std::memcpy(response.data(), query, queryLength);
+	response[2] = 0x84;
+	response[3] = 0;
+	response[6] = 0;
+	response[7] = 1;
+	size_t offset = queryLength;
+	response[offset++] = 0xC0;
+	response[offset++] = 0x0C;
+	response[offset++] = 0;
+	response[offset++] = 12;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 120;
+	response[offset++] = 0;
+	response[offset++] = 19;
+	response[offset++] = 11;
+	std::memcpy(response.data() + offset, "Gabi-iPhone", 11);
+	offset += 11;
+	response[offset++] = 5;
+	std::memcpy(response.data() + offset, "local", 5);
+	offset += 5;
+	response[offset++] = 0;
+	response.resize(offset);
+	return response;
 }
 
 std::string httpResponse() {
@@ -268,6 +311,43 @@ void testMdnsEnumerationResumesIntoServiceQuery() {
 	assert(!second.budgetYielded);
 	assert(!state.active);
 	assert(mdnsQueryCount == 3);
+}
+
+void testDirectMdnsHostnameDiscovery() {
+	resetHarness(Scenario::MdnsHostname);
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutMdnsConfig config{};
+	config.enabled = true;
+	config.serviceDiscoveryEnabled = false;
+	config.hostnameDiscoveryEnabled = true;
+	config.hostnameQueryTimeoutMs = 20;
+	config.maxHostnameTargetsPerRun = 1;
+
+	scout_internal::MdnsProviderState state{};
+	const auto stats = scout_internal::runMdnsProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+
+	assert(!state.active);
+	assert(stats.hostnameQueries == 1);
+	assert(stats.hostnameResponses == 1);
+	assert(stats.observations == 1);
+	assert(mdnsQueryCount == 0);
+	assert(udpSendCount == 1);
+	assert(lastUdpDestination == ipv4("224.0.0.251"));
+	assert(lastUdpDestinationPort == 5353);
+	assert(boundAddresses[10] == ipv4("192.168.1.1"));
+	assert(observations.size() == 1);
+	assert(observations[0].source == ScoutObservationSource::Mdns);
+	assert(observations[0].nameCount == 1);
+	assert(observations[0].names[0].source == ScoutNameSource::MdnsHostname);
+	assert(std::strcmp(observations[0].names[0].value, "Gabi-iPhone.local") == 0);
 }
 
 void testSsdpRejectsUnrelatedLocation() {
@@ -560,8 +640,20 @@ int scout_test_bind(int fd, const sockaddr *address, socklen_t) {
 	return 0;
 }
 
-ssize_t scout_test_sendto(int, const void *, size_t length, int, const sockaddr *, socklen_t) {
+ssize_t scout_test_sendto(
+    int,
+    const void *,
+    size_t length,
+    int,
+    const sockaddr *destination,
+    socklen_t
+) {
 	udpSendCount++;
+	if (destination != nullptr) {
+		const auto *ipv4Destination = reinterpret_cast<const sockaddr_in *>(destination);
+		lastUdpDestination = ipv4Destination->sin_addr.s_addr;
+		lastUdpDestinationPort = ntohs(ipv4Destination->sin_port);
+	}
 	return static_cast<ssize_t>(length);
 }
 
@@ -573,6 +665,20 @@ ssize_t scout_test_recvfrom(
     sockaddr *source,
     socklen_t *sourceLength
 ) {
+	if (scenario == Scenario::MdnsHostname && !datagramDelivered[fd]) {
+		const auto response = mdnsHostnameResponse();
+		assert(response.size() <= length);
+		std::memcpy(buffer, response.data(), response.size());
+		auto *sender = reinterpret_cast<sockaddr_in *>(source);
+		sender->sin_family = AF_INET;
+		sender->sin_port = htons(5353);
+		sender->sin_addr.s_addr = ipv4("192.168.1.42");
+		if (sourceLength != nullptr) {
+			*sourceLength = sizeof(sockaddr_in);
+		}
+		datagramDelivered[fd] = true;
+		return static_cast<ssize_t>(response.size());
+	}
 	if (scenario == Scenario::Nbns) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(receiveDelayMs));
 		errno = EAGAIN;
@@ -736,6 +842,7 @@ esp_err_t collectInterfaces(
 int main() {
 	testNbnsRetriesBudgetInterruptedBatch();
 	testMdnsEnumerationResumesIntoServiceQuery();
+	testDirectMdnsHostnameDiscovery();
 	testSsdpRejectsUnrelatedLocation();
 	testSsdpConflictKeepsUsnIdentityAndLocalBind();
 	testSsdpPreservesObservationWhenDescriptionBudgetExpires();
