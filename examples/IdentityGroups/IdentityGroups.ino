@@ -33,11 +33,15 @@ void loop() {
 			continue;
 		}
 
+		ScoutPreferredName preferred;
+		const bool hasName = scout.preferredName(group, preferred);
+
 		Serial.printf(
-		    "group %llu members=%u confidence=%u\n",
+		    "group %llu members=%u confidence=%u name=%s\n",
 		    static_cast<unsigned long long>(group.runtimeId),
 		    static_cast<unsigned>(group.memberCount),
-		    static_cast<unsigned>(group.confidence)
+		    static_cast<unsigned>(group.confidence),
+		    hasName ? preferred.value : "(unavailable)"
 		);
 
 		for (size_t member = 0; member < group.memberCount; ++member) {
