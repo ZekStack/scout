@@ -1515,10 +1515,10 @@ ProviderRunStats runMdnsProvider(
 		state.serviceDiscoveryComplete = !config.serviceDiscoveryEnabled;
 		state.serviceTypeCount = 0;
 		state.remainingQueries = 0;
-		state.hostnameRemaining =
-		    config.hostnameDiscoveryEnabled
-		        ? std::min(targetCount, config.maxHostnameTargetsPerRun)
-		        : 0;
+		state.hostnameRemaining = 0;
+		if (config.hostnameDiscoveryEnabled) {
+			state.hostnameRemaining = std::min(targetCount, config.maxHostnameTargetsPerRun);
+		}
 
 		if (config.serviceDiscoveryEnabled) {
 			const size_t serviceTypeCapacity =
@@ -1562,8 +1562,7 @@ ProviderRunStats runMdnsProvider(
 				recordProviderStop(stats, control);
 				return stats;
 			}
-			const bool enumerationBudgetLimited =
-			    enumerationTimeout < desiredEnumerationTimeout;
+			const bool enumerationBudgetLimited = enumerationTimeout < desiredEnumerationTimeout;
 			mdns_result_t *serviceTypes = nullptr;
 			const esp_err_t enumerationResult = mdns_query_ptr(
 			    "_services._dns-sd",
@@ -1573,7 +1572,8 @@ ProviderRunStats runMdnsProvider(
 			    &serviceTypes
 			);
 			if (enumerationResult == ESP_OK) {
-				for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
+				for (mdns_result_t *result = serviceTypes; result != nullptr;
+				     result = result->next) {
 					const char *descriptor =
 					    result->instance_name != nullptr ? result->instance_name : result->hostname;
 					char service[SCOUT_SERVICE_TYPE_SIZE] = {};
@@ -1627,9 +1627,9 @@ ProviderRunStats runMdnsProvider(
 			    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
 			const uint64_t retentionFloorMs =
 			    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
-			uint32_t baseTimeout =
-			    config.queryTimeoutMs /
+			const uint32_t queryDivisor =
 			    static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+			uint32_t baseTimeout = config.queryTimeoutMs / queryDivisor;
 			baseTimeout = std::max<uint32_t>(1, baseTimeout);
 
 			while (state.remainingQueries > 0) {
@@ -1697,8 +1697,7 @@ ProviderRunStats runMdnsProvider(
 				recordProviderStop(stats, control);
 				break;
 			}
-			const uint32_t timeout =
-			    providerRemainingMs(control, config.hostnameQueryTimeoutMs);
+			const uint32_t timeout = providerRemainingMs(control, config.hostnameQueryTimeoutMs);
 			if (timeout == 0) {
 				recordProviderStop(stats, control);
 				break;
