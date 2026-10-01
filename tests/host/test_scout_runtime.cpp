@@ -575,6 +575,42 @@ void testFormattingHelpers() {
 	assert(tiny[0] == '\0');
 }
 
+void testMdnsSubproviderValidation() {
+	{
+		Scout scout;
+		ScoutConfig config;
+		config.scanOnInit = false;
+		config.providers.mdns.enabled = true;
+		config.providers.mdns.serviceDiscoveryEnabled = false;
+		config.providers.mdns.hostnameDiscoveryEnabled = false;
+		assert(scout.init(config).status == ScoutStatus::InvalidConfig);
+	}
+	{
+		Scout scout;
+		ScoutConfig config;
+		config.scanOnInit = false;
+		config.providers.mdns.enabled = true;
+		config.providers.mdns.serviceDiscoveryEnabled = false;
+		config.providers.mdns.hostnameDiscoveryEnabled = true;
+		config.providers.mdns.queryTimeoutMs = 0;
+		config.providers.mdns.maxResults = 0;
+		config.providers.mdns.maxServiceTypes = 0;
+		config.providers.mdns.maxServiceQueriesPerRun = 0;
+		assert(scout.init(config).status == ScoutStatus::Ok);
+		assert(scout.deinit().status == ScoutStatus::Ok);
+	}
+	{
+		Scout scout;
+		ScoutConfig config;
+		config.scanOnInit = false;
+		config.providers.mdns.enabled = true;
+		config.providers.mdns.serviceDiscoveryEnabled = false;
+		config.providers.mdns.hostnameDiscoveryEnabled = true;
+		config.providers.mdns.hostnameQueryTimeoutMs = 0;
+		assert(scout.init(config).status == ScoutStatus::InvalidConfig);
+	}
+}
+
 void testInvalidSsdpHttpTimeout() {
 	Scout scout;
 	ScoutConfig config;
@@ -1313,6 +1349,7 @@ int main() {
 	testScalarEnrichmentSourcePrecedence();
 	testStaleProviderObservationAndDiagnostics();
 	testFormattingHelpers();
+	testMdnsSubproviderValidation();
 	testInvalidSsdpHttpTimeout();
 	testIdentityGroupingKeepsModerateRelationsSeparate();
 	testIdentityGroupConfidenceRequiresCertainConnectivity();
