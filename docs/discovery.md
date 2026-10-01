@@ -59,7 +59,7 @@ MAC identity is never deduplicated using IPv4 alone. A reused `(interface, IPv4)
 After ARP updates the MAC registry, Scout runs independent bounded providers:
 
 - ICMP actively confirms already-known IPv4 endpoints and advances confirmation timestamps on replies;
-- mDNS/DNS-SD learns hostnames, instance names, services, TXT metadata and dual-stack IPv6 aliases;
+- mDNS learns hostnames directly from bounded reverse-PTR queries while DNS-SD learns instance names, services, TXT metadata and dual-stack IPv6 aliases;
 - SSDP/UPnP learns discovery headers plus bounded friendly-name/manufacturer/model/serial/UDN description metadata;
 - optional NBNS learns legacy NetBIOS names;
 - optional reverse DNS learns resolver-provided hostnames;
