@@ -59,6 +59,8 @@ struct ProviderRunStats {
 	uint64_t resolverUnavailable = 0;
 	uint64_t identityConflicts = 0;
 	uint64_t topologyRestarts = 0;
+	uint64_t hostnameQueries = 0;
+	uint64_t hostnameResponses = 0;
 	size_t plannedUnits = 0;
 	size_t workUnits = 0;
 	bool budgetYielded = false;
@@ -87,10 +89,13 @@ struct MdnsProviderState {
 	bool active = false;
 	uint64_t topologyGeneration = 0;
 	bool enumerationComplete = false;
+	bool serviceDiscoveryComplete = false;
 	ProviderMdnsServiceType serviceTypes[ProviderMaxMdnsServiceTypes]{};
 	size_t serviceTypeCount = 0;
 	size_t serviceCursor = 0;
 	size_t remainingQueries = 0;
+	size_t hostnameCursor = 0;
+	size_t hostnameRemaining = 0;
 };
 
 struct SsdpProviderState {
