@@ -446,11 +446,15 @@ struct ScoutIcmpConfig {
 struct ScoutMdnsConfig {
 	bool enabled = true;
 	bool initializeIfNeeded = true;
+	bool serviceDiscoveryEnabled = true;
+	bool hostnameDiscoveryEnabled = true;
 	uint32_t intervalMs = 2U * 60U * 1000U;
 	uint32_t queryTimeoutMs = 3000;
+	uint32_t hostnameQueryTimeoutMs = 120;
 	size_t maxResults = 128;
 	size_t maxServiceTypes = 64;
 	size_t maxServiceQueriesPerRun = 24;
+	size_t maxHostnameTargetsPerRun = 8;
 	uint64_t fallbackMaxAgeMs = 10ULL * 60ULL * 1000ULL;
 };
 
@@ -563,6 +567,8 @@ struct ScoutDiagnostics {
 	uint64_t providerTopologyRestarts = 0;
 	uint64_t ssdpIdentityConflicts = 0;
 	uint64_t dnsResolverUnavailable = 0;
+	uint64_t mdnsHostnameQueries = 0;
+	uint64_t mdnsHostnameResponses = 0;
 	uint64_t metadataLimitDrops = 0;
 	uint64_t nameLimitDrops = 0;
 	uint64_t serviceLimitDrops = 0;
@@ -629,6 +635,7 @@ class Scout {
 	ScoutResult deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const;
 	ScoutResult findDetailsByMac(const ScoutMacAddress &mac, ScoutDeviceDetails &out) const;
 	ScoutResult preferredName(const ScoutMacAddress &mac, ScoutPreferredName &out) const;
+	ScoutResult preferredName(const ScoutIdentityGroup &group, ScoutPreferredName &out) const;
 
 	size_t identityGroupCount() const;
 	ScoutResult identityGroupAt(size_t index, ScoutIdentityGroup &out) const;
