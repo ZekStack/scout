@@ -21,7 +21,7 @@ env:
   PIOARDUINO_PLATFORM_VERSION: 55.03.39
   PIOARDUINO_VERSION: 6.1.19
   PIOARDUINO_HYBRID_VERSION: 6.2.0
-  STRATA_VERSION: v0.1.3
+  STRATA_REF: 2e6702ce7c48f61923b4f4142dc416bdfb7fc726
 
 jobs:
   whitespace:
@@ -190,7 +190,7 @@ jobs:
                 --lib="." \
                 --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
                 --project-option "framework=arduino" \
-                --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
+                --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_REF}" \
                 --project-option "build_unflags=-std=gnu++11" \
                 --project-option "build_flags=-std=gnu++20"
             fi
@@ -251,7 +251,7 @@ jobs:
           board = esp32-p4-evboard
           framework = arduino, espidf
           lib_deps =
-              https://github.com/ZekStack/strata.git#${STRATA_VERSION}
+              https://github.com/ZekStack/strata.git#${STRATA_REF}
           build_unflags =
               -std=gnu++11
               -std=gnu++17
@@ -322,9 +322,10 @@ jobs:
           mkdir -p "$SKETCHBOOK_DIR/libraries/Scout"
           rsync -a --delete --exclude ".git" ./ "$SKETCHBOOK_DIR/libraries/Scout/"
           rm -rf "$SKETCHBOOK_DIR/libraries/Strata"
-          git clone --depth 1 --branch "${STRATA_VERSION}" \
-            https://github.com/ZekStack/strata.git \
-            "$SKETCHBOOK_DIR/libraries/Strata"
+          git init "$SKETCHBOOK_DIR/libraries/Strata"
+          git -C "$SKETCHBOOK_DIR/libraries/Strata" remote add origin https://github.com/ZekStack/strata.git
+          git -C "$SKETCHBOOK_DIR/libraries/Strata" fetch --depth 1 origin "${STRATA_REF}"
+          git -C "$SKETCHBOOK_DIR/libraries/Strata" checkout --detach FETCH_HEAD
 
       - name: Build examples (${{ matrix.board.name }})
         env:

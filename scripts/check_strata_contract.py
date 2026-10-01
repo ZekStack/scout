@@ -22,8 +22,8 @@ def reject_tree(needle: str, message: str) -> None:
 
 require(
     "library.json",
-    '"Strata": "https://github.com/ZekStack/strata.git#v0.1.3"',
-    "Scout must pin released Strata v0.1.3",
+    '"Strata": "https://github.com/ZekStack/strata.git#2e6702ce7c48f61923b4f4142dc416bdfb7fc726"',
+    "Scout must pin the validated Strata 0.1.3 source revision",
 )
 require(
     "src/Scout.h",
