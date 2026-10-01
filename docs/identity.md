@@ -101,6 +101,10 @@ for (size_t i = 0; i < scout.identityGroupCount(); ++i) {
 
     // group.members[] contains the MAC-level Scout keys.
     // group.evidence[] explains why the group was formed.
+    ScoutPreferredName preferred;
+    if (scout.preferredName(group, preferred)) {
+        // Uses the best-ranked discovered name across every current member.
+    }
 }
 ```
 
