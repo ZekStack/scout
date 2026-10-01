@@ -370,6 +370,102 @@ queryPtr(const ProviderTarget &target, uint32_t timeoutMs, const ProviderRunCont
 	return parsePtrResponse(response, static_cast<size_t>(received), transactionId, ipv4Bytes);
 }
 
+DnsPtrAnswer queryMdnsPtr(const ProviderTarget &target, uint32_t timeoutMs) {
+	DnsPtrAnswer result{};
+	if (target.interfaceKey[0] == '\0' || !target.ipv4.valid()) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	esp_netif_t *netif = esp_netif_get_handle_from_ifkey(target.interfaceKey);
+	if (netif == nullptr) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	esp_netif_ip_info_t ipInfo{};
+	if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK || ipInfo.ip.addr == 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	const int fd = openBoundUdpSocket(ipInfo.ip.addr, timeoutMs);
+	if (fd < 0) {
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	in_addr multicastInterface{};
+	multicastInterface.s_addr = ipInfo.ip.addr;
+	if (setsockopt(
+	        fd,
+	        IPPROTO_IP,
+	        IP_MULTICAST_IF,
+	        &multicastInterface,
+	        sizeof(multicastInterface)
+	    ) != 0) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	uint8_t request[128]{};
+	uint8_t ipv4Bytes[4]{};
+	std::memcpy(ipv4Bytes, &target.ipv4.value, sizeof(ipv4Bytes));
+	const size_t requestLength = buildMdnsPtrQuery(ipv4Bytes, request, sizeof(request));
+	if (requestLength == 0) {
+		close(fd);
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+
+	sockaddr_in destination{};
+	destination.sin_family = AF_INET;
+	destination.sin_port = htons(5353);
+	if (inet_pton(AF_INET, "224.0.0.251", &destination.sin_addr) != 1) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+	if (sendto(
+	        fd,
+	        request,
+	        requestLength,
+	        0,
+	        reinterpret_cast<const sockaddr *>(&destination),
+	        sizeof(destination)
+	    ) < 0) {
+		close(fd);
+		result.status = DnsParseStatus::NetworkError;
+		return result;
+	}
+
+	uint8_t response[768]{};
+	sockaddr_in sender{};
+	socklen_t senderLength = sizeof(sender);
+	const int received = recvfrom(
+	    fd,
+	    response,
+	    sizeof(response),
+	    0,
+	    reinterpret_cast<sockaddr *>(&sender),
+	    &senderLength
+	);
+	const int socketError = errno;
+	close(fd);
+
+	if (received <= 0) {
+		result.status = socketError == EAGAIN || socketError == EWOULDBLOCK
+		                    ? DnsParseStatus::Timeout
+		                    : DnsParseStatus::NetworkError;
+		return result;
+	}
+	if (sender.sin_addr.s_addr != target.ipv4.value || sender.sin_port != htons(5353)) {
+		result.status = DnsParseStatus::Malformed;
+		return result;
+	}
+	return parseMdnsPtrResponse(response, static_cast<size_t>(received), ipv4Bytes);
+}
+
 DnsAAnswer queryA(
     const ProviderTarget &target,
     const char *hostname,
@@ -1395,11 +1491,9 @@ ProviderRunStats runMdnsProvider(
     const ProviderRunControl *control
 ) {
 	ProviderRunStats stats{};
-	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr) {
-		state.active = false;
-		state.enumerationComplete = false;
-		state.serviceTypeCount = 0;
-		state.remainingQueries = 0;
+	if (!config.enabled || targets == nullptr || targetCount == 0 || sink == nullptr ||
+	    (!config.serviceDiscoveryEnabled && !config.hostnameDiscoveryEnabled)) {
+		state = {};
 		return stats;
 	}
 	if (providerShouldStop(control)) {
@@ -1407,7 +1501,7 @@ ProviderRunStats runMdnsProvider(
 		return stats;
 	}
 #if SCOUT_HAS_MDNS
-	if (config.initializeIfNeeded) {
+	if (config.serviceDiscoveryEnabled && config.initializeIfNeeded) {
 		const esp_err_t initResult = mdns_init();
 		if (initResult != ESP_OK && initResult != ESP_ERR_INVALID_STATE) {
 			stats.errors++;
@@ -1417,165 +1511,272 @@ ProviderRunStats runMdnsProvider(
 
 	if (!state.active) {
 		state.active = true;
-		state.enumerationComplete = false;
+		state.enumerationComplete = !config.serviceDiscoveryEnabled;
+		state.serviceDiscoveryComplete = !config.serviceDiscoveryEnabled;
 		state.serviceTypeCount = 0;
 		state.remainingQueries = 0;
-		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
-		constexpr struct {
-			const char *service;
-			const char *proto;
-		} CommonServices[] = {
-		    {"_http", "_tcp"},        {"_https", "_tcp"},
-		    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
-		    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
-		    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
-		    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
-		    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
-		    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
-		    {"_hap", "_tcp"},         {"_matter", "_tcp"},
-		    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
-		    {"_esphomelib", "_tcp"},
-		};
-		for (const auto &service : CommonServices) {
-			addServiceType(
-			    state.serviceTypes,
-			    state.serviceTypeCount,
-			    serviceTypeCapacity,
-			    service.service,
-			    service.proto
-			);
+		state.hostnameRemaining =
+		    config.hostnameDiscoveryEnabled
+		        ? std::min(targetCount, config.maxHostnameTargetsPerRun)
+		        : 0;
+
+		if (config.serviceDiscoveryEnabled) {
+			const size_t serviceTypeCapacity =
+			    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+			constexpr struct {
+				const char *service;
+				const char *proto;
+			} CommonServices[] = {
+			    {"_http", "_tcp"},        {"_https", "_tcp"},
+			    {"_workstation", "_tcp"}, {"_device-info", "_tcp"},
+			    {"_airplay", "_tcp"},     {"_raop", "_tcp"},
+			    {"_googlecast", "_tcp"},  {"_ipp", "_tcp"},
+			    {"_ipps", "_tcp"},        {"_printer", "_tcp"},
+			    {"_ssh", "_tcp"},         {"_sftp-ssh", "_tcp"},
+			    {"_smb", "_tcp"},         {"_home-assistant", "_tcp"},
+			    {"_hap", "_tcp"},         {"_matter", "_tcp"},
+			    {"_matterc", "_udp"},     {"_arduino", "_tcp"},
+			    {"_esphomelib", "_tcp"},
+			};
+			for (const auto &service : CommonServices) {
+				addServiceType(
+				    state.serviceTypes,
+				    state.serviceTypeCount,
+				    serviceTypeCapacity,
+				    service.service,
+				    service.proto
+				);
+			}
 		}
 	}
 
-	if (!state.enumerationComplete) {
-		const size_t serviceTypeCapacity = std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
-		const uint32_t desiredEnumerationTimeout =
-		    std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
-		const uint32_t enumerationTimeout = providerRemainingMs(control, desiredEnumerationTimeout);
-		if (enumerationTimeout == 0) {
-			recordProviderStop(stats, control);
-			return stats;
-		}
-		const bool enumerationBudgetLimited = enumerationTimeout < desiredEnumerationTimeout;
-		mdns_result_t *serviceTypes = nullptr;
-		const esp_err_t enumerationResult = mdns_query_ptr(
-		    "_services._dns-sd",
-		    "_udp",
-		    enumerationTimeout,
-		    serviceTypeCapacity,
-		    &serviceTypes
-		);
-		if (enumerationResult == ESP_OK) {
-			for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
-				const char *descriptor =
-				    result->instance_name != nullptr ? result->instance_name : result->hostname;
-				char service[SCOUT_SERVICE_TYPE_SIZE] = {};
-				char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
-				if (splitServiceDescriptor(
-				        descriptor,
-				        service,
-				        sizeof(service),
-				        proto,
-				        sizeof(proto)
-				    )) {
-					if (!addServiceType(
-					        state.serviceTypes,
-					        state.serviceTypeCount,
-					        serviceTypeCapacity,
-					        service,
-					        proto
-					    ) &&
-					    state.serviceTypeCount >= serviceTypeCapacity) {
-						stats.dropped++;
-					}
-				}
-			}
-			mdns_query_results_free(serviceTypes);
-		} else if (enumerationResult == ESP_ERR_TIMEOUT) {
-			if (enumerationBudgetLimited && providerShouldStop(control)) {
+	if (!state.serviceDiscoveryComplete) {
+		if (!state.enumerationComplete) {
+			const size_t serviceTypeCapacity =
+			    std::min(config.maxServiceTypes, MaxMdnsServiceTypes);
+			const uint32_t desiredEnumerationTimeout =
+			    std::max<uint32_t>(20, config.queryTimeoutMs / 4U);
+			const uint32_t enumerationTimeout =
+			    providerRemainingMs(control, desiredEnumerationTimeout);
+			if (enumerationTimeout == 0) {
 				recordProviderStop(stats, control);
 				return stats;
 			}
-			stats.timeouts++;
-		} else {
-			stats.errors++;
-		}
-		state.enumerationComplete = true;
-		if (providerShouldStop(control)) {
-			recordProviderStop(stats, control);
-			return stats;
-		}
-	}
-
-	if (state.serviceTypeCount == 0) {
-		state.active = false;
-		state.enumerationComplete = false;
-		return stats;
-	}
-
-	if (state.remainingQueries == 0) {
-		state.remainingQueries = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
-	}
-	stats.plannedUnits = state.remainingQueries;
-	const size_t runQueryCount = std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
-	const uint64_t retentionFloorMs =
-	    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
-	uint32_t baseTimeout =
-	    config.queryTimeoutMs / static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
-	baseTimeout = std::max<uint32_t>(1, baseTimeout);
-
-	while (state.remainingQueries > 0) {
-		if (providerShouldStop(control)) {
-			recordProviderStop(stats, control);
-			break;
-		}
-		const uint32_t perQueryTimeout = providerRemainingMs(control, baseTimeout);
-		if (perQueryTimeout == 0) {
-			recordProviderStop(stats, control);
-			break;
-		}
-		const size_t i = state.serviceCursor % state.serviceTypeCount;
-		mdns_result_t *results = nullptr;
-		stats.workUnits++;
-		const esp_err_t queryResult = mdns_query_ptr(
-		    state.serviceTypes[i].service,
-		    state.serviceTypes[i].proto,
-		    perQueryTimeout,
-		    config.maxResults,
-		    &results
-		);
-		state.serviceCursor = (state.serviceCursor + 1) % state.serviceTypeCount;
-		state.remainingQueries--;
-		if (queryResult != ESP_OK) {
-			if (queryResult == ESP_ERR_TIMEOUT) {
+			const bool enumerationBudgetLimited =
+			    enumerationTimeout < desiredEnumerationTimeout;
+			mdns_result_t *serviceTypes = nullptr;
+			const esp_err_t enumerationResult = mdns_query_ptr(
+			    "_services._dns-sd",
+			    "_udp",
+			    enumerationTimeout,
+			    serviceTypeCapacity,
+			    &serviceTypes
+			);
+			if (enumerationResult == ESP_OK) {
+				for (mdns_result_t *result = serviceTypes; result != nullptr; result = result->next) {
+					const char *descriptor =
+					    result->instance_name != nullptr ? result->instance_name : result->hostname;
+					char service[SCOUT_SERVICE_TYPE_SIZE] = {};
+					char proto[SCOUT_SERVICE_PROTO_SIZE] = {};
+					if (splitServiceDescriptor(
+					        descriptor,
+					        service,
+					        sizeof(service),
+					        proto,
+					        sizeof(proto)
+					    )) {
+						if (!addServiceType(
+						        state.serviceTypes,
+						        state.serviceTypeCount,
+						        serviceTypeCapacity,
+						        service,
+						        proto
+						    ) &&
+						    state.serviceTypeCount >= serviceTypeCapacity) {
+							stats.dropped++;
+						}
+					}
+				}
+				mdns_query_results_free(serviceTypes);
+			} else if (enumerationResult == ESP_ERR_TIMEOUT) {
+				if (enumerationBudgetLimited && providerShouldStop(control)) {
+					recordProviderStop(stats, control);
+					return stats;
+				}
 				stats.timeouts++;
 			} else {
 				stats.errors++;
 			}
-			continue;
+			state.enumerationComplete = true;
+			if (providerShouldStop(control)) {
+				recordProviderStop(stats, control);
+				return stats;
+			}
 		}
-		for (mdns_result_t *result = results; result != nullptr; result = result->next) {
-			emitMdnsResult(
-			    *result,
-			    targets,
-			    targetCount,
-			    config,
-			    retentionFloorMs,
-			    sink,
-			    context,
-			    stats
-			);
+
+		if (state.serviceTypeCount == 0) {
+			state.serviceDiscoveryComplete = true;
+			state.enumerationComplete = false;
+		} else {
+			if (state.remainingQueries == 0) {
+				state.remainingQueries =
+				    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+			}
+			stats.plannedUnits += state.remainingQueries;
+			const size_t runQueryCount =
+			    std::min(state.serviceTypeCount, config.maxServiceQueriesPerRun);
+			const uint64_t retentionFloorMs =
+			    mdnsRetentionFloorMs(config, state.serviceTypeCount, runQueryCount);
+			uint32_t baseTimeout =
+			    config.queryTimeoutMs /
+			    static_cast<uint32_t>(std::max<size_t>(1, runQueryCount));
+			baseTimeout = std::max<uint32_t>(1, baseTimeout);
+
+			while (state.remainingQueries > 0) {
+				if (providerShouldStop(control)) {
+					recordProviderStop(stats, control);
+					break;
+				}
+				const uint32_t perQueryTimeout = providerRemainingMs(control, baseTimeout);
+				if (perQueryTimeout == 0) {
+					recordProviderStop(stats, control);
+					break;
+				}
+				const size_t i = state.serviceCursor % state.serviceTypeCount;
+				mdns_result_t *results = nullptr;
+				stats.workUnits++;
+				const esp_err_t queryResult = mdns_query_ptr(
+				    state.serviceTypes[i].service,
+				    state.serviceTypes[i].proto,
+				    perQueryTimeout,
+				    config.maxResults,
+				    &results
+				);
+				state.serviceCursor = (state.serviceCursor + 1) % state.serviceTypeCount;
+				state.remainingQueries--;
+				if (queryResult != ESP_OK) {
+					if (queryResult == ESP_ERR_TIMEOUT) {
+						stats.timeouts++;
+					} else {
+						stats.errors++;
+					}
+					continue;
+				}
+				for (mdns_result_t *result = results; result != nullptr; result = result->next) {
+					emitMdnsResult(
+					    *result,
+					    targets,
+					    targetCount,
+					    config,
+					    retentionFloorMs,
+					    sink,
+					    context,
+					    stats
+					);
+				}
+				mdns_query_results_free(results);
+			}
+
+			if (state.remainingQueries == 0) {
+				state.serviceDiscoveryComplete = true;
+				state.enumerationComplete = false;
+				state.serviceTypeCount = 0;
+			}
 		}
-		mdns_query_results_free(results);
+	}
+
+	if (providerShouldStop(control)) {
+		recordProviderStop(stats, control);
+		return stats;
+	}
+
+	if (config.hostnameDiscoveryEnabled) {
+		stats.plannedUnits += state.hostnameRemaining;
+		while (state.hostnameRemaining > 0) {
+			if (providerShouldStop(control)) {
+				recordProviderStop(stats, control);
+				break;
+			}
+			const uint32_t timeout =
+			    providerRemainingMs(control, config.hostnameQueryTimeoutMs);
+			if (timeout == 0) {
+				recordProviderStop(stats, control);
+				break;
+			}
+			const bool budgetLimited = timeout < config.hostnameQueryTimeoutMs;
+			const size_t index = state.hostnameCursor % targetCount;
+			const auto &target = targets[index];
+
+			stats.workUnits++;
+			stats.hostnameQueries++;
+			const DnsPtrAnswer answer = queryMdnsPtr(target, timeout);
+
+			if (budgetLimited && answer.status == DnsParseStatus::Timeout &&
+			    providerShouldStop(control)) {
+				recordProviderStop(stats, control);
+				break;
+			}
+
+			state.hostnameCursor = (state.hostnameCursor + 1) % targetCount;
+			state.hostnameRemaining--;
+			switch (answer.status) {
+			case DnsParseStatus::Ok: {
+				const uint64_t now = providerNowMs();
+				const uint64_t expiresAt =
+				    expiryFromTtl(now, answer.ttlSeconds, config.fallbackMaxAgeMs);
+				EnrichmentObservation observation{};
+				observation.source = ScoutObservationSource::Mdns;
+				observation.ipv4 = target.ipv4;
+				observation.interfaceIndex = target.interfaceIndex;
+				copyText(
+				    observation.interfaceKey,
+				    sizeof(observation.interfaceKey),
+				    target.interfaceKey
+				);
+				addName(
+				    observation,
+				    ScoutNameSource::MdnsHostname,
+				    answer.hostname,
+				    now,
+				    expiresAt
+				);
+				sink(target.mac, observation, context);
+				stats.observations++;
+				stats.hostnameResponses++;
+				break;
+			}
+			case DnsParseStatus::NoRecord:
+				stats.noRecords++;
+				break;
+			case DnsParseStatus::Timeout:
+				stats.timeouts++;
+				break;
+			case DnsParseStatus::Malformed:
+				stats.malformedResponses++;
+				break;
+			case DnsParseStatus::ServerError:
+				stats.serverErrors++;
+				break;
+			case DnsParseStatus::ResolverUnavailable:
+				stats.resolverUnavailable++;
+				break;
+			case DnsParseStatus::NetworkError:
+				stats.errors++;
+				stats.transportErrors++;
+				break;
+			}
+		}
 	}
 
 	if (providerShouldStop(control)) {
 		recordProviderStop(stats, control);
 	}
-	if (!stats.cancelled && state.remainingQueries == 0) {
-		state.active = false;
-		state.enumerationComplete = false;
-		state.serviceTypeCount = 0;
+	if (!stats.cancelled && state.serviceDiscoveryComplete && state.hostnameRemaining == 0) {
+		const size_t serviceCursor = state.serviceCursor;
+		const size_t hostnameCursor = state.hostnameCursor;
+		state = {};
+		state.serviceCursor = serviceCursor;
+		state.hostnameCursor = hostnameCursor;
 	}
 #else
 	(void)config;
