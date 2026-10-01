@@ -34,7 +34,8 @@ void loop() {
 		}
 
 		ScoutPreferredName preferred;
-		const bool hasName = scout.preferredName(group, preferred);
+		const ScoutResult preferredNameResult = scout.preferredName(group, preferred);
+		const bool hasName = static_cast<bool>(preferredNameResult);
 
 		Serial.printf(
 		    "group %llu members=%u confidence=%u name=%s\n",
