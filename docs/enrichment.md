@@ -32,8 +32,9 @@ while observations from the same source continue to refresh or update their own 
 service-record retention also covers a complete bounded service-query rotation (with one scheduling
 interval of headroom, bounded by `fallbackMaxAgeMs`) so short DNS-SD TTLs do not make names and
 services flap merely because Scout intentionally rotates service types. Direct mDNS hostname PTR
-records use their advertised TTL, with `fallbackMaxAgeMs` only when the reply provides no TTL.
-This retention is metadata only and never keeps a MAC identity online.
+records use their advertised TTL. A zero TTL is treated as an mDNS goodbye and kept only for a
+one-second removal grace period; `fallbackMaxAgeMs` does not extend a successfully decoded direct
+PTR record. This retention is metadata only and never keeps a MAC identity online.
 
 ## PSRAM-first bounds
 
