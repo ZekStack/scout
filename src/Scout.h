@@ -446,16 +446,16 @@ struct ScoutIcmpConfig {
 struct ScoutMdnsConfig {
 	bool enabled = true;
 	bool initializeIfNeeded = true;
-	bool serviceDiscoveryEnabled = true;
-	bool hostnameDiscoveryEnabled = true;
 	uint32_t intervalMs = 2U * 60U * 1000U;
 	uint32_t queryTimeoutMs = 3000;
-	uint32_t hostnameQueryTimeoutMs = 120;
 	size_t maxResults = 128;
 	size_t maxServiceTypes = 64;
 	size_t maxServiceQueriesPerRun = 24;
-	size_t maxHostnameTargetsPerRun = 8;
 	uint64_t fallbackMaxAgeMs = 10ULL * 60ULL * 1000ULL;
+	bool serviceDiscoveryEnabled = true;
+	bool hostnameDiscoveryEnabled = true;
+	uint32_t hostnameQueryTimeoutMs = 120;
+	size_t maxHostnameTargetsPerRun = 8;
 };
 
 struct ScoutSsdpConfig {
