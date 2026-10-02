@@ -41,6 +41,7 @@ constexpr size_t MaxProviderTargetsPerRun = 32;
 constexpr size_t MaxSsdpDescriptionFetches = ProviderMaxSsdpDescriptionFetches;
 constexpr size_t NbnsBatchSize = 8;
 constexpr uint32_t SocketPollMs = 50;
+constexpr uint64_t MdnsGoodbyeGraceMs = 1000ULL;
 
 using MdnsServiceType = ProviderMdnsServiceType;
 
@@ -87,6 +88,13 @@ uint32_t providerRemainingMs(const ProviderRunControl *control, uint32_t fallbac
 uint64_t expiryFromTtl(uint64_t now, uint32_t ttlSeconds, uint64_t fallbackMs) {
 	if (ttlSeconds == 0) {
 		return now + fallbackMs;
+	}
+	return now + static_cast<uint64_t>(ttlSeconds) * 1000ULL;
+}
+
+uint64_t mdnsRecordExpiry(uint64_t now, uint32_t ttlSeconds) {
+	if (ttlSeconds == 0) {
+		return now + MdnsGoodbyeGraceMs;
 	}
 	return now + static_cast<uint64_t>(ttlSeconds) * 1000ULL;
 }
@@ -1720,8 +1728,7 @@ ProviderRunStats runMdnsProvider(
 			switch (answer.status) {
 			case DnsParseStatus::Ok: {
 				const uint64_t now = providerNowMs();
-				const uint64_t expiresAt =
-				    expiryFromTtl(now, answer.ttlSeconds, config.fallbackMaxAgeMs);
+				const uint64_t expiresAt = mdnsRecordExpiry(now, answer.ttlSeconds);
 				EnrichmentObservation observation{};
 				observation.source = ScoutObservationSource::Mdns;
 				observation.ipv4 = target.ipv4;
