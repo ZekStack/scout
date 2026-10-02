@@ -12,6 +12,11 @@
 
 namespace scout_internal {
 std::atomic<int> testMdnsRuns{0};
+std::atomic<size_t> testMdnsReceivedServiceCursor{0};
+std::atomic<size_t> testMdnsReceivedHostnameCursor{0};
+std::atomic<size_t> testMdnsReceivedRemainingQueries{0};
+std::atomic<size_t> testMdnsReceivedHostnameRemaining{0};
+std::atomic<uint64_t> testMdnsReceivedTopologyGeneration{0};
 std::atomic<int> testSsdpRuns{0};
 std::atomic<int> testNbnsRuns{0};
 std::atomic<bool> testMdnsYieldNext{false};
@@ -604,6 +609,30 @@ void testMdnsSubproviderValidation() {
 		ScoutConfig config;
 		config.scanOnInit = false;
 		config.providers.mdns.enabled = true;
+		config.providers.mdns.serviceDiscoveryEnabled = true;
+		config.providers.mdns.hostnameDiscoveryEnabled = false;
+		config.providers.mdns.hostnameQueryTimeoutMs = 0;
+		config.providers.mdns.maxHostnameTargetsPerRun = 0;
+		assert(scout.init(config).status == ScoutStatus::Ok);
+		assert(scout.deinit().status == ScoutStatus::Ok);
+	}
+	{
+		Scout scout;
+		ScoutConfig config;
+		config.scanOnInit = false;
+		config.providers.mdns.enabled = false;
+		config.providers.mdns.serviceDiscoveryEnabled = false;
+		config.providers.mdns.hostnameDiscoveryEnabled = false;
+		config.providers.mdns.queryTimeoutMs = 0;
+		config.providers.mdns.hostnameQueryTimeoutMs = 0;
+		assert(scout.init(config).status == ScoutStatus::Ok);
+		assert(scout.deinit().status == ScoutStatus::Ok);
+	}
+	{
+		Scout scout;
+		ScoutConfig config;
+		config.scanOnInit = false;
+		config.providers.mdns.enabled = true;
 		config.providers.mdns.serviceDiscoveryEnabled = false;
 		config.providers.mdns.hostnameDiscoveryEnabled = true;
 		config.providers.mdns.hostnameQueryTimeoutMs = 0;
@@ -964,6 +993,35 @@ void testTopologyContinuationRestart() {
 	runtime.releaseBuffers();
 }
 
+void testMdnsTopologyContinuationRestart() {
+	ScoutImpl runtime;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.registryTopologyGeneration = 2;
+	runtime.mdnsState.active = true;
+	runtime.mdnsState.topologyGeneration = 1;
+	runtime.mdnsState.serviceCursor = 7;
+	runtime.mdnsState.hostnameCursor = 5;
+	runtime.mdnsState.remainingQueries = 3;
+	runtime.mdnsState.hostnameRemaining = 4;
+
+	scout_internal::testMdnsYieldNext.store(false);
+	scout_internal::testMdnsReceivedServiceCursor.store(0);
+	scout_internal::testMdnsReceivedHostnameCursor.store(0);
+	scout_internal::testMdnsReceivedRemainingQueries.store(SIZE_MAX);
+	scout_internal::testMdnsReceivedHostnameRemaining.store(SIZE_MAX);
+	scout_internal::testMdnsReceivedTopologyGeneration.store(0);
+
+	(void)runtime.performMdnsProvider(UINT64_MAX);
+
+	assert(runtime.diag.providerTopologyRestarts == 1);
+	assert(scout_internal::testMdnsReceivedServiceCursor.load() == 7);
+	assert(scout_internal::testMdnsReceivedHostnameCursor.load() == 5);
+	assert(scout_internal::testMdnsReceivedRemainingQueries.load() == 0);
+	assert(scout_internal::testMdnsReceivedHostnameRemaining.load() == 0);
+	assert(scout_internal::testMdnsReceivedTopologyGeneration.load() == 2);
+	runtime.releaseBuffers();
+}
+
 void testIdentityRelationEvictsLowerConfidence() {
 	ScoutImpl runtime;
 	ScoutConfig config = runtime.config;
@@ -1234,6 +1292,11 @@ ProviderRunStats runMdnsProvider(
 ) {
 	ProviderRunStats stats{};
 	testMdnsRuns.fetch_add(1);
+	testMdnsReceivedServiceCursor.store(state.serviceCursor);
+	testMdnsReceivedHostnameCursor.store(state.hostnameCursor);
+	testMdnsReceivedRemainingQueries.store(state.remainingQueries);
+	testMdnsReceivedHostnameRemaining.store(state.hostnameRemaining);
+	testMdnsReceivedTopologyGeneration.store(state.topologyGeneration);
 	if (testMdnsYieldNext.exchange(false)) {
 		stats.budgetYielded = true;
 		state.active = true;
@@ -1360,6 +1423,7 @@ int main() {
 	testMdnsBudgetContinuation();
 	testOuiBudgetContinuation();
 	testTopologyContinuationRestart();
+	testMdnsTopologyContinuationRestart();
 	testIdentityRelationEvictsLowerConfidence();
 	testTruncatedInterfacesDisableCoverage();
 	testProviderBudgetContinuation();
