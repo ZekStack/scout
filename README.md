@@ -24,7 +24,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC
 
 ## Install
 
-Scout `0.1.0` requires the Strata `v0.1.3` compatibility fix, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
+Scout `0.1.1` requires the Strata `v0.1.3` compatibility fix, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
 
 ### PlatformIO
 
@@ -349,7 +349,7 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 | Memory policy | `PreferExternal` by default for Scout-owned movable storage and task stack |
 | Dependencies  | Strata `v0.1.3` compatibility fix                                          |
 | Exceptions    | Not used for Scout public error handling                                   |
-| Status        | `0.1.0`                                                                    |
+| Status        | `0.1.1`                                                                    |
 
 ## License
 
