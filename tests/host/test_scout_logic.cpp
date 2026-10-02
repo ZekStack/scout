@@ -69,6 +69,30 @@ void testPublicDefaultsAndValueTypes() {
 	assert(config.providers.mdns.hostnameDiscoveryEnabled);
 	assert(config.providers.mdns.hostnameQueryTimeoutMs > 0);
 	assert(config.providers.mdns.maxHostnameTargetsPerRun > 0);
+
+	ScoutMdnsConfig legacyMdns{
+	    true,
+	    true,
+	    120000U,
+	    3000U,
+	    128,
+	    64,
+	    24,
+	    600000ULL,
+	};
+	assert(legacyMdns.enabled);
+	assert(legacyMdns.initializeIfNeeded);
+	assert(legacyMdns.intervalMs == 120000U);
+	assert(legacyMdns.queryTimeoutMs == 3000U);
+	assert(legacyMdns.maxResults == 128);
+	assert(legacyMdns.maxServiceTypes == 64);
+	assert(legacyMdns.maxServiceQueriesPerRun == 24);
+	assert(legacyMdns.fallbackMaxAgeMs == 600000ULL);
+	assert(legacyMdns.serviceDiscoveryEnabled);
+	assert(legacyMdns.hostnameDiscoveryEnabled);
+	assert(legacyMdns.hostnameQueryTimeoutMs == 120U);
+	assert(legacyMdns.maxHostnameTargetsPerRun == 8);
+
 	assert(config.providers.ssdp.enabled);
 	assert(!config.providers.nbns.enabled);
 	assert(!config.providers.reverseDns.enabled);
