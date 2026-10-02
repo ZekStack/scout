@@ -460,16 +460,16 @@ void testDirectMdnsHostnameBudgetRetry() {
 	ScoutMdnsConfig config{};
 	config.serviceDiscoveryEnabled = false;
 	config.hostnameDiscoveryEnabled = true;
-	config.hostnameQueryTimeoutMs = 20;
+	config.hostnameQueryTimeoutMs = 100;
 	config.maxHostnameTargetsPerRun = 1;
 
 	scout_internal::MdnsProviderState state{};
 	std::atomic<bool> stopRequested{false};
 	mdnsForceTimeout = true;
-	receiveDelayMs = 2;
+	receiveDelayMs = 60;
 	const scout_internal::ProviderRunControl limited{
 	    &stopRequested,
-	    nowMs() + 1,
+	    nowMs() + 50,
 	    nullptr,
 	};
 	const auto first = scout_internal::runMdnsProvider(
