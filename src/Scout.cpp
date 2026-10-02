@@ -1482,9 +1482,11 @@ struct ScoutImpl {
 	bool performMdnsProvider(uint64_t deadlineAt = UINT64_MAX) {
 		const uint64_t generation = topologyGenerationSnapshot();
 		if (mdnsState.active && mdnsState.topologyGeneration != generation) {
-			const size_t cursor = mdnsState.serviceCursor;
+			const size_t serviceCursor = mdnsState.serviceCursor;
+			const size_t hostnameCursor = mdnsState.hostnameCursor;
 			mdnsState = {};
-			mdnsState.serviceCursor = cursor;
+			mdnsState.serviceCursor = serviceCursor;
+			mdnsState.hostnameCursor = hostnameCursor;
 			recordTopologyRestart();
 		}
 		mdnsState.topologyGeneration = generation;
