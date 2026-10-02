@@ -36,6 +36,7 @@ DnsAAnswer parseAResponse(
 );
 
 size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out, size_t capacity);
+size_t buildMdnsPtrQuery(const uint8_t ipv4[4], uint8_t *out, size_t capacity);
 
 DnsPtrAnswer parsePtrResponse(
     const uint8_t *data,
@@ -43,5 +44,7 @@ DnsPtrAnswer parsePtrResponse(
     uint16_t transactionId,
     const uint8_t expectedIpv4[4] = nullptr
 );
+DnsPtrAnswer
+parseMdnsPtrResponse(const uint8_t *data, size_t length, const uint8_t expectedIpv4[4]);
 
 } // namespace scout_internal

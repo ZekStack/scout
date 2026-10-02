@@ -341,6 +341,21 @@ size_t buildPtrQuery(uint16_t transactionId, const uint8_t ipv4[4], uint8_t *out
 	return offset;
 }
 
+size_t buildMdnsPtrQuery(const uint8_t ipv4[4], uint8_t *out, size_t capacity) {
+	const size_t length = buildPtrQuery(0, ipv4, out, capacity);
+	if (length == 0) {
+		return 0;
+	}
+	out[2] = 0;
+	out[3] = 0;
+	// Request a unicast response so Scout can use a short-lived socket bound to
+	// the selected interface instead of competing with the process-global mDNS
+	// responder on UDP/5353.
+	out[length - 2] = 0x80;
+	out[length - 1] = 0x01;
+	return length;
+}
+
 DnsPtrAnswer parsePtrResponse(
     const uint8_t *data, size_t length, uint16_t transactionId, const uint8_t expectedIpv4[4]
 ) {
@@ -416,6 +431,92 @@ DnsPtrAnswer parsePtrResponse(
 			return result;
 		}
 		if (type == 12 && klass == 1) {
+			size_t ignored = 0;
+			if (!decodeName(
+			        data,
+			        length,
+			        offset,
+			        result.hostname,
+			        sizeof(result.hostname),
+			        ignored,
+			        offset + rdLength
+			    ) ||
+			    ignored > rdLength || result.hostname[0] == '\0') {
+				return DnsPtrAnswer{};
+			}
+			result.status = DnsParseStatus::Ok;
+			result.ttlSeconds = ttl;
+			return result;
+		}
+		offset += rdLength;
+	}
+	result.status = DnsParseStatus::NoRecord;
+	return result;
+}
+
+DnsPtrAnswer
+parseMdnsPtrResponse(const uint8_t *data, size_t length, const uint8_t expectedIpv4[4]) {
+	DnsPtrAnswer result{};
+	if (data == nullptr || expectedIpv4 == nullptr || length < 12 || read16(data) != 0) {
+		return result;
+	}
+	const uint16_t flags = read16(data + 2);
+	if ((flags & 0x8000U) == 0 || (flags & 0x7800U) != 0 || (flags & 0x0200U) != 0 ||
+	    (flags & 0x000FU) != 0) {
+		return result;
+	}
+
+	const uint16_t questions = read16(data + 4);
+	if (questions > 1) {
+		return result;
+	}
+	const uint32_t recordCount = static_cast<uint32_t>(read16(data + 6)) +
+	                             static_cast<uint32_t>(read16(data + 8)) +
+	                             static_cast<uint32_t>(read16(data + 10));
+
+	char expected[64]{};
+	std::snprintf(
+	    expected,
+	    sizeof(expected),
+	    "%u.%u.%u.%u.in-addr.arpa",
+	    static_cast<unsigned>(expectedIpv4[3]),
+	    static_cast<unsigned>(expectedIpv4[2]),
+	    static_cast<unsigned>(expectedIpv4[1]),
+	    static_cast<unsigned>(expectedIpv4[0])
+	);
+
+	size_t offset = 12;
+	char name[256]{};
+	if (questions == 1) {
+		size_t consumed = 0;
+		if (!decodeName(data, length, offset, name, sizeof(name), consumed, length) ||
+		    offset + consumed + 4 > length || strcasecmp(name, expected) != 0) {
+			return result;
+		}
+		const uint16_t type = read16(data + offset + consumed);
+		const uint16_t klass = read16(data + offset + consumed + 2);
+		if (type != 12 || (klass & 0x7FFFU) != 1) {
+			return result;
+		}
+		offset += consumed + 4;
+	}
+
+	for (uint32_t i = 0; i < recordCount; ++i) {
+		size_t consumed = 0;
+		if (!decodeName(data, length, offset, name, sizeof(name), consumed, length) ||
+		    offset + consumed + 10 > length) {
+			return DnsPtrAnswer{};
+		}
+		offset += consumed;
+		const uint16_t type = read16(data + offset);
+		const uint16_t klass = read16(data + offset + 2);
+		const uint32_t ttl = read32(data + offset + 4);
+		const uint16_t rdLength = read16(data + offset + 8);
+		offset += 10;
+		if (offset + rdLength > length) {
+			return DnsPtrAnswer{};
+		}
+		if (type == 12 && (klass & 0x7FFFU) == 1 && strcasecmp(name, expected) == 0) {
 			size_t ignored = 0;
 			if (!decodeName(
 			        data,

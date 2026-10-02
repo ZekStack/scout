@@ -65,6 +65,34 @@ void testPublicDefaultsAndValueTypes() {
 	assert(config.taskStackBytes == 32U * 1024U);
 	assert(config.providers.icmp.enabled);
 	assert(config.providers.mdns.enabled);
+	assert(config.providers.mdns.serviceDiscoveryEnabled);
+	assert(config.providers.mdns.hostnameDiscoveryEnabled);
+	assert(config.providers.mdns.hostnameQueryTimeoutMs > 0);
+	assert(config.providers.mdns.maxHostnameTargetsPerRun > 0);
+
+	ScoutMdnsConfig legacyMdns{
+	    true,
+	    true,
+	    120000U,
+	    3000U,
+	    128,
+	    64,
+	    24,
+	    600000ULL,
+	};
+	assert(legacyMdns.enabled);
+	assert(legacyMdns.initializeIfNeeded);
+	assert(legacyMdns.intervalMs == 120000U);
+	assert(legacyMdns.queryTimeoutMs == 3000U);
+	assert(legacyMdns.maxResults == 128);
+	assert(legacyMdns.maxServiceTypes == 64);
+	assert(legacyMdns.maxServiceQueriesPerRun == 24);
+	assert(legacyMdns.fallbackMaxAgeMs == 600000ULL);
+	assert(legacyMdns.serviceDiscoveryEnabled);
+	assert(legacyMdns.hostnameDiscoveryEnabled);
+	assert(legacyMdns.hostnameQueryTimeoutMs == 120U);
+	assert(legacyMdns.maxHostnameTargetsPerRun == 8);
+
 	assert(config.providers.ssdp.enabled);
 	assert(!config.providers.nbns.enabled);
 	assert(!config.providers.reverseDns.enabled);
@@ -319,6 +347,14 @@ void testEnrichmentUpsertPreferredNameAndExpiry() {
 	assert(scout_internal::selectPreferredName(details, preferred));
 	assert(preferred.source == ScoutNameSource::SsdpFriendlyName);
 	assert(std::strcmp(preferred.value, "Living Room TV") == 0);
+	assert(
+	    scout_internal::preferredNamePriority(ScoutNameSource::SsdpFriendlyName) <
+	    scout_internal::preferredNamePriority(ScoutNameSource::MdnsInstance)
+	);
+	assert(
+	    scout_internal::preferredNamePriority(ScoutNameSource::MdnsInstance) <
+	    scout_internal::preferredNamePriority(ScoutNameSource::MdnsHostname)
+	);
 
 	const auto firstExpiry = scout_internal::expireEnrichment(details, 950);
 	assert(
@@ -431,6 +467,88 @@ void testDnsPtrCodec() {
 	const auto malformed =
 	    scout_internal::parsePtrResponse(response, offset, transactionId, address);
 	assert(malformed.status == scout_internal::DnsParseStatus::Malformed);
+}
+
+
+void testMdnsPtrCodec() {
+	const uint8_t address[4] = {192, 168, 1, 42};
+	uint8_t query[128]{};
+	const size_t queryLength =
+	    scout_internal::buildMdnsPtrQuery(address, query, sizeof(query));
+	assert(queryLength > 20);
+	assert(query[0] == 0 && query[1] == 0);
+	assert(query[2] == 0 && query[3] == 0);
+	assert(query[queryLength - 2] == 0x80 && query[queryLength - 1] == 0x01);
+
+	uint8_t response[256]{};
+	std::memcpy(response, query, queryLength);
+	response[2] = 0x84; // response + authoritative answer
+	response[3] = 0;
+	response[6] = 0;
+	response[7] = 1;
+	size_t offset = queryLength;
+	response[offset++] = 0xC0;
+	response[offset++] = 0x0C;
+	response[offset++] = 0;
+	response[offset++] = 12;
+	response[offset++] = 0;
+	response[offset++] = 1;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 0;
+	response[offset++] = 120;
+	response[offset++] = 0;
+	response[offset++] = 14;
+	response[offset++] = 6;
+	std::memcpy(response + offset, "device", 6);
+	offset += 6;
+	response[offset++] = 5;
+	std::memcpy(response + offset, "local", 5);
+	offset += 5;
+	response[offset++] = 0;
+
+	const auto parsed = scout_internal::parseMdnsPtrResponse(response, offset, address);
+	assert(parsed.status == scout_internal::DnsParseStatus::Ok);
+	assert(std::strcmp(parsed.hostname, "device.local") == 0);
+	assert(parsed.ttlSeconds == 120);
+
+	// mDNS responders may omit the question and return the matching record in
+	// the additional section. The direct hostname codec accepts that form too.
+	uint8_t questionless[256]{};
+	questionless[2] = 0x84;
+	questionless[11] = 1; // ARCOUNT
+	size_t questionlessOffset = 12;
+	const size_t qnameLength = queryLength - 12 - 4;
+	std::memcpy(questionless + questionlessOffset, query + 12, qnameLength);
+	questionlessOffset += qnameLength;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 12;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 1;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 30;
+	questionless[questionlessOffset++] = 0;
+	questionless[questionlessOffset++] = 14;
+	questionless[questionlessOffset++] = 6;
+	std::memcpy(questionless + questionlessOffset, "iphone", 6);
+	questionlessOffset += 6;
+	questionless[questionlessOffset++] = 5;
+	std::memcpy(questionless + questionlessOffset, "local", 5);
+	questionlessOffset += 5;
+	questionless[questionlessOffset++] = 0;
+
+	const auto questionlessParsed =
+	    scout_internal::parseMdnsPtrResponse(questionless, questionlessOffset, address);
+	assert(questionlessParsed.status == scout_internal::DnsParseStatus::Ok);
+	assert(std::strcmp(questionlessParsed.hostname, "iphone.local") == 0);
+	assert(questionlessParsed.ttlSeconds == 30);
+
+	const uint8_t otherAddress[4] = {192, 168, 1, 43};
+	const auto wrongAddress =
+	    scout_internal::parseMdnsPtrResponse(response, offset, otherAddress);
+	assert(wrongAddress.status == scout_internal::DnsParseStatus::Malformed);
 }
 
 void testDnsACodec() {
@@ -946,6 +1064,7 @@ int main() {
 	testMergeDeviceInfo();
 	testEnrichmentUpsertPreferredNameAndExpiry();
 	testDnsPtrCodec();
+	testMdnsPtrCodec();
 	testDnsACodec();
 	testPersistentIdentityClaims();
 	testPersistentIdentityMergeTimestamps();

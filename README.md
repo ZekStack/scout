@@ -207,8 +207,11 @@ Scout distinguishes two ARP observation sources:
 Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
 
 After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP
-confirmation, mDNS/DNS-SD names and services, SSDP/UPnP metadata, optional NBNS/reverse-DNS names,
-IPv6 aliases, and OUI vendor information without changing higher-level presence policy. Provider
+confirmation, direct mDNS reverse-PTR hostnames, DNS-SD names and services, SSDP/UPnP metadata,
+optional NBNS/reverse-DNS names, IPv6 aliases, and OUI vendor information without changing
+higher-level presence policy. Direct mDNS hostname lookup is independent of DNS-SD service
+advertisement, so already-known endpoints can expose a `.local` hostname even when they publish
+none of Scout's queried services. Provider
 results are discarded if their captured `(interface, IPv4)` endpoint has since moved to another
 MAC, and IP-only enrichment does not extend registry `lastSeenAtMs`. Bounded providers rotate
 through targets/service types across runs instead of repeatedly starting from entry zero. Reverse
@@ -277,6 +280,15 @@ if (scout.deviceAt(0, device)) {
 }
 
 ScoutDiagnostics diag = scout.diagnostics();
+
+for (size_t i = 0; i < scout.identityGroupCount(); ++i) {
+	ScoutIdentityGroup group;
+	ScoutPreferredName preferred;
+	if (scout.identityGroupAt(i, group) && scout.preferredName(group, preferred)) {
+		// preferred.value is selected across every current MAC member.
+	}
+}
+
 scout.deinit();
 ```
 

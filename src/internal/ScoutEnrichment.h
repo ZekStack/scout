@@ -65,6 +65,7 @@ bool upsertIpv6(ScoutEndpoint &endpoint, const ScoutIpv6Address &address);
 ScoutDeviceChange expireEnrichment(ScoutDeviceDetails &details, uint64_t nowMs);
 void mergeDeviceDetails(ScoutDeviceDetails &target, const ScoutDeviceDetails &source);
 
+int preferredNamePriority(ScoutNameSource source);
 bool selectPreferredName(const ScoutDeviceDetails &details, ScoutPreferredName &out);
 
 bool parseSsdpResponse(const char *data, size_t length, SsdpResponseInfo &out);

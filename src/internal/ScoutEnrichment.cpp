@@ -390,6 +390,10 @@ bool hasMatchingServiceFingerprint(
 
 } // namespace
 
+int preferredNamePriority(ScoutNameSource source) {
+	return namePriority(source);
+}
+
 bool textEqualsIgnoreCase(const char *left, const char *right) {
 	if (left == nullptr || right == nullptr) {
 		return left == right;
