@@ -50,9 +50,9 @@ enum class ScoutStatus : uint8_t {
 	Timeout,
 	NetworkUnavailable,
 	DeviceLimitReached,
-	BufferTooSmall,
 	InternalError,
 	NotFound,
+	BufferTooSmall,
 };
 
 enum class ScoutState : uint8_t {
