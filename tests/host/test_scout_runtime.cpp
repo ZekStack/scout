@@ -160,6 +160,12 @@ void testLifecycleSnapshots() {
 	assert(scout.deviceAt(0, device).status == ScoutStatus::NotFound);
 	assert(scout.findByMac({}, device).status == ScoutStatus::InvalidConfig);
 	assert(std::strcmp(scout.statusToString(ScoutStatus::NotFound), "not_found") == 0);
+	assert(std::strcmp(scout.statusToString(ScoutStatus::BufferTooSmall), "buffer_too_small") == 0);
+
+	ScoutRegistrySnapshotInfo emptyRegistry{};
+	assert(scout.snapshotDevices(nullptr, 0, emptyRegistry).status == ScoutStatus::Ok);
+	assert(emptyRegistry.count == 0);
+	assert(emptyRegistry.requiredCapacity == 0);
 
 	Gate resetGate;
 	Strata::TestHooks::resetTask = [&] { resetGate.pause(); };
@@ -328,6 +334,68 @@ void testRegistryAgingAndDeduplication() {
 		}
 	}
 	assert(expiredEvent);
+	runtime.releaseBuffers();
+}
+
+void testAtomicRegistrySnapshot() {
+	ScoutImpl runtime;
+	runtime.config.maxDevices = 4;
+	assert(runtime.allocateBuffers(runtime.config));
+	runtime.initialized = true;
+	runtime.coverageKnown = true;
+	runtime.coverageAvailable = true;
+
+	scout_internal::InterfaceSnapshot interfaceSnapshot{};
+	interfaceSnapshot.index = 1;
+	std::strcpy(interfaceSnapshot.name, "test");
+	std::strcpy(interfaceSnapshot.key, "TEST_1");
+
+	const uint8_t firstMac[6] = {0x02, 0x10, 0x20, 0x30, 0x40, 0x01};
+	const uint8_t secondMac[6] = {0x02, 0x10, 0x20, 0x30, 0x40, 0x02};
+	runtime.observe(
+	    interfaceSnapshot,
+	    lwip_htonl(0xC0A80121U),
+	    firstMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+	runtime.observe(
+	    interfaceSnapshot,
+	    lwip_htonl(0xC0A80122U),
+	    secondMac,
+	    ScoutObservationSource::ArpProbe,
+	    true,
+	    1
+	);
+
+	ScoutRegistrySnapshotInfo snapshotInfo{};
+	ScoutDeviceInfo tooSmall[1]{};
+	const ScoutResult tooSmallResult =
+	    runtime.snapshotDevices(tooSmall, 1, snapshotInfo);
+	assert(tooSmallResult.status == ScoutStatus::BufferTooSmall);
+	assert(snapshotInfo.count == 0);
+	assert(snapshotInfo.requiredCapacity == 2);
+	assert(snapshotInfo.coverageAvailable);
+	assert(snapshotInfo.topologyGeneration != 0);
+	const uint64_t generationBeforeCompaction = snapshotInfo.topologyGeneration;
+
+	assert(runtime.snapshotDevices(nullptr, 2, snapshotInfo).status == ScoutStatus::InvalidConfig);
+	assert(snapshotInfo.requiredCapacity == 2);
+
+	ScoutDeviceInfo snapshot[2]{};
+	assert(runtime.snapshotDevices(snapshot, 2, snapshotInfo).status == ScoutStatus::Ok);
+	assert(snapshotInfo.count == 2);
+	assert(snapshotInfo.requiredCapacity == 2);
+	assert(snapshotInfo.topologyGeneration == generationBeforeCompaction);
+
+	runtime.removeDeviceAtLocked(0);
+	assert(runtime.snapshotDevices(snapshot, 2, snapshotInfo).status == ScoutStatus::Ok);
+	assert(snapshotInfo.count == 1);
+	assert(snapshotInfo.requiredCapacity == 1);
+	assert(snapshotInfo.topologyGeneration != generationBeforeCompaction);
+	assert(snapshot[0].mac == scout_internal::macFromBytes(secondMac));
+
 	runtime.releaseBuffers();
 }
 
@@ -1407,6 +1475,7 @@ int main() {
 	testLifecycleSnapshots();
 	testScanStatusAndCoverage();
 	testRegistryAgingAndDeduplication();
+	testAtomicRegistrySnapshot();
 	testEndpointReplacementDiagnostics();
 	testLazyDetailsAllocation();
 	testScalarEnrichmentSourcePrecedence();

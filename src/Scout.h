@@ -52,6 +52,7 @@ enum class ScoutStatus : uint8_t {
 	DeviceLimitReached,
 	InternalError,
 	NotFound,
+	BufferTooSmall,
 };
 
 enum class ScoutState : uint8_t {
@@ -275,6 +276,13 @@ struct ScoutDeviceInfo {
 	uint64_t lastConfirmedAtMs = 0;
 	uint32_t observationSources = 0;
 	uint32_t observationCount = 0;
+};
+
+struct ScoutRegistrySnapshotInfo {
+	size_t count = 0;
+	size_t requiredCapacity = 0;
+	uint64_t topologyGeneration = 0;
+	bool coverageAvailable = false;
 };
 
 struct ScoutDeviceName {
@@ -527,6 +535,9 @@ struct ScoutConfig {
 struct ScoutProviderDiagnostics {
 	uint64_t runs = 0;
 	uint64_t observations = 0;
+	uint64_t confirmedObservations = 0;
+	uint64_t plannedUnits = 0;
+	uint64_t workUnits = 0;
 	uint64_t errors = 0;
 	uint64_t transportErrors = 0;
 	uint64_t descriptionErrors = 0;
@@ -630,6 +641,9 @@ class Scout {
 
 	size_t deviceCount() const;
 	ScoutResult deviceAt(size_t index, ScoutDeviceInfo &out) const;
+	ScoutResult snapshotDevices(
+	    ScoutDeviceInfo *out, size_t capacity, ScoutRegistrySnapshotInfo &snapshot
+	) const;
 	ScoutResult findByMac(const ScoutMacAddress &mac, ScoutDeviceInfo &out) const;
 
 	ScoutResult deviceDetailsAt(size_t index, ScoutDeviceDetails &out) const;

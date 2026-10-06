@@ -24,7 +24,7 @@ Scout discovers devices on directly connected IPv4 networks, keeps a bounded MAC
 
 ## Install
 
-Scout `0.1.1` requires the Strata `v0.1.3` compatibility fix, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
+Scout `0.1.2` requires the Strata `v0.1.3` compatibility fix, C++20, and Arduino ESP32 core `3.3.9`. PlatformIO builds use the pinned PIOArduino platform below.
 
 ### PlatformIO
 
@@ -41,7 +41,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/scout.git#v0.1.1
+  https://github.com/ZekStack/scout.git#v0.1.2
   https://github.com/ZekStack/strata.git#v0.1.3
 
 build_flags =
@@ -195,7 +195,7 @@ Serial.println(Strata::toString(diag.taskStackRegion));
 
 ## Discovery model
 
-Scout v0.1.1 starts with active ARP discovery.
+Scout v0.1.2 starts with active ARP discovery.
 
 For each eligible interface, Scout calculates the directly connected IPv4 subnet, rejects scans larger than `maxHostsPerSubnet`, and processes targets in small batches. Direct lwIP calls such as `etharp_request()`, `etharp_find_addr()`, and interface lookup execute through `esp_netif_tcpip_exec()` in the lwIP TCP/IP context.
 
@@ -204,7 +204,7 @@ Scout distinguishes two ARP observation sources:
 - `ArpCache` - the same mapping already existed before Scout's active request.
 - `ArpProbe` - the mapping appeared or changed during the active probe window.
 
-Only an `ArpProbe` observation advances `lastConfirmedAtMs`. A pre-existing ARP cache entry is useful discovery evidence, but Scout does not claim that it proves a fresh response.
+A fresh `ArpProbe` observation advances `lastConfirmedAtMs`; a pre-existing ARP cache entry is useful discovery evidence but does not prove a fresh response. Fresh ICMP, direct mDNS/DNS-SD, SSDP and NBNS replies may also advance the confirmation timestamp, while reverse DNS and OUI enrichment do not.
 
 After ARP establishes MAC/IP/interface truth, independently scheduled providers add ICMP
 confirmation, direct mDNS reverse-PTR hostnames, DNS-SD names and services, SSDP/UPnP metadata,
@@ -276,8 +276,11 @@ scout.scanNow();
 
 ScoutDeviceInfo device;
 if (scout.deviceAt(0, device)) {
-	// Consume a snapshot.
+	// Consume one compact device snapshot.
 }
+
+// For a coherent full-registry view, keep a suitably sized ScoutDeviceInfo
+// buffer outside a small task stack and pass it to snapshotDevices().
 
 ScoutDiagnostics diag = scout.diagnostics();
 
@@ -349,7 +352,7 @@ CI runs the host suite with address and undefined-behavior sanitizers before the
 | Memory policy | `PreferExternal` by default for Scout-owned movable storage and task stack |
 | Dependencies  | Strata `v0.1.3` compatibility fix                                          |
 | Exceptions    | Not used for Scout public error handling                                   |
-| Status        | `0.1.1`                                                                    |
+| Status        | `0.1.2`                                                                    |
 
 ## License
 

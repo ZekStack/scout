@@ -32,7 +32,9 @@ registry mutation and event delivery synchronously from that caller-owned task. 
 queues immediate work in both modes.
 
 Runtime publication, teardown and public snapshot queries are protected with a Strata recursive
-mutex. Callbacks are never invoked while the registry mutex is held.
+mutex. `snapshotDevices()` captures the compact registry, coverage availability and topology
+generation under one lock so consumers cannot observe a mixed generation while devices expire or
+the bounded registry compacts. Callbacks are never invoked while the registry mutex is held.
 
 Background-task shutdown is cooperative: `deinit()` requests stop, waits for the Scout task to
 reach its external-deletion handoff, and then resets the Strata task from the caller context. In
@@ -97,7 +99,9 @@ Device records are also time-bounded. `deviceMaxAgeMs` removes records that have
 
 Heavy names, services and metadata live outside the compact event snapshot in lazily created
 `ScoutDeviceDetails`. Providers run on independent schedules and feed normalized observations
-back through Scout's synchronized registry path. Bounded providers rotate persistent cursors
+back through Scout's synchronized registry path. Fresh device-originated ICMP, mDNS/DNS-SD, SSDP
+and NBNS responses may advance confirmation timestamps; indirect reverse-DNS and OUI enrichment
+never does. Bounded providers rotate persistent cursors
 across their work sets so a per-run budget cannot permanently starve later targets. Continuations
 carry the registry-topology generation that created them; endpoint/device changes invalidate and
 restart positional runs rather than resuming an old cursor against reordered data.
