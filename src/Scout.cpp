@@ -779,6 +779,9 @@ struct ScoutImpl {
 		}
 		target.runs++;
 		target.observations += run.observations;
+		target.confirmedObservations += run.confirmedObservations;
+		target.plannedUnits += run.plannedUnits;
+		target.workUnits += run.workUnits;
 		target.errors += run.errors;
 		target.transportErrors += run.transportErrors;
 		target.descriptionErrors += run.descriptionErrors;
@@ -798,6 +801,42 @@ struct ScoutImpl {
 		if (run.cancelled) {
 			target.cancellations++;
 		}
+	}
+
+	ScoutResult snapshotDevices(
+	    ScoutDeviceInfo *out, size_t capacity, ScoutRegistrySnapshotInfo &snapshot
+	) {
+		snapshot = {};
+		ScoutLock lock(mutex);
+		if (!lock) {
+			return ScoutResult::failure(ScoutStatus::InternalError, "failed to lock Scout");
+		}
+		if (!initialized) {
+			return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+		}
+
+		snapshot.requiredCapacity = deviceCount;
+		snapshot.topologyGeneration = registryTopologyGeneration;
+		snapshot.coverageAvailable = coverageAvailable;
+
+		if (capacity < deviceCount) {
+			return ScoutResult::failure(
+			    ScoutStatus::BufferTooSmall,
+			    "registry snapshot buffer is too small"
+			);
+		}
+		if (deviceCount > 0 && out == nullptr) {
+			return ScoutResult::failure(
+			    ScoutStatus::InvalidConfig,
+			    "registry snapshot buffer is null"
+			);
+		}
+
+		for (size_t i = 0; i < deviceCount; ++i) {
+			out[i] = devices[i].info;
+		}
+		snapshot.count = deviceCount;
+		return ScoutResult::success();
 	}
 
 	size_t snapshotProviderTargets() {
@@ -2985,6 +3024,16 @@ ScoutResult Scout::deviceAt(size_t index, ScoutDeviceInfo &out) const {
 	return ScoutResult::success();
 }
 
+ScoutResult Scout::snapshotDevices(
+    ScoutDeviceInfo *out, size_t capacity, ScoutRegistrySnapshotInfo &snapshot
+) const {
+	if (!_impl) {
+		snapshot = {};
+		return ScoutResult::failure(ScoutStatus::NotInitialized, "Scout is not initialized");
+	}
+	return _impl->snapshotDevices(out, capacity, snapshot);
+}
+
 ScoutResult Scout::findByMac(const ScoutMacAddress &mac, ScoutDeviceInfo &out) const {
 	if (!mac.valid()) {
 		return ScoutResult::failure(ScoutStatus::InvalidConfig, "MAC address is invalid");
@@ -3295,6 +3344,8 @@ const char *Scout::statusToString(ScoutStatus status) const {
 		return "network_unavailable";
 	case ScoutStatus::DeviceLimitReached:
 		return "device_limit_reached";
+	case ScoutStatus::BufferTooSmall:
+		return "buffer_too_small";
 	case ScoutStatus::InternalError:
 		return "internal_error";
 	case ScoutStatus::NotFound:
