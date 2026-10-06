@@ -27,9 +27,13 @@ Scout therefore distinguishes:
 - ArpCache: the same stable mapping existed before the request;
 - ArpProbe: the mapping was absent before the request, or changed during the probe window.
 
-Only ArpProbe updates lastConfirmedAtMs in the current implementation.
+Only fresh device-originated evidence advances `lastConfirmedAtMs`. For ARP that means
+`ArpProbe`, never a pre-existing `ArpCache` mapping. ICMP replies and validated direct
+mDNS/DNS-SD, SSDP and NBNS responses also advance confirmation timestamps. Resolver-provided
+reverse DNS and OUI metadata do not.
 
-This prevents Scout from pretending that an old ARP cache entry is a fresh liveness response.
+This prevents Scout from pretending that an old ARP cache entry or indirect metadata lookup is a
+fresh liveness response.
 
 ## Continuous scanning
 
@@ -68,6 +72,12 @@ After ARP updates the MAC registry, Scout runs independent bounded providers:
 Provider schedules and network work budgets are separate from registry storage bounds. Provider
 results are applied only while their `(interface, IPv4)` target is still owned by the same MAC.
 IP-only enrichment never refreshes MAC registry retention; ARP remains the source of endpoint
-ownership and `lastSeenAtMs`, while ICMP may independently advance `lastConfirmedAtMs`. Provider
-failure does not invalidate ARP coverage and does not directly define Online/Offline state. Port
-scanning and heuristic device-type classification remain outside Scout's scope.
+ownership and `lastSeenAtMs`, while fresh direct network responses may independently advance
+`lastConfirmedAtMs`. Provider failure does not invalidate ARP coverage and does not directly
+define Online/Offline state. Port scanning and heuristic device-type classification remain
+outside Scout's scope.
+
+Consumers that need a coherent registry view should use `snapshotDevices()` instead of pairing
+`deviceCount()` with repeated `deviceAt()` calls. The snapshot copies the compact registry,
+coverage state and topology generation while holding one registry lock, so device expiration or
+compaction cannot produce a mixed-generation enumeration.
