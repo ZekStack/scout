@@ -734,6 +734,7 @@ void emitMdnsResult(
 		observation.source = ScoutObservationSource::Mdns;
 		observation.ipv4.value = ipv4;
 		observation.interfaceIndex = target->interfaceIndex;
+		observation.confirmed = true;
 		copyText(observation.interfaceKey, sizeof(observation.interfaceKey), target->interfaceKey);
 		observation.identityExpiresAtMs = expiresAt;
 		addName(observation, ScoutNameSource::MdnsHostname, result.hostname, now, expiresAt);
@@ -798,6 +799,7 @@ void emitMdnsResult(
 
 		sink(target->mac, observation, context);
 		stats.observations++;
+		stats.confirmedObservations++;
 	}
 }
 #endif
@@ -1471,6 +1473,7 @@ ProviderRunStats runIcmpProvider(
 			observation.confirmed = true;
 			sink(target.mac, observation, context);
 			stats.observations++;
+			stats.confirmedObservations++;
 		} else {
 			(void)sessionTimedOut;
 			stats.timeouts++;
@@ -1733,6 +1736,7 @@ ProviderRunStats runMdnsProvider(
 				observation.source = ScoutObservationSource::Mdns;
 				observation.ipv4 = target.ipv4;
 				observation.interfaceIndex = target.interfaceIndex;
+				observation.confirmed = true;
 				copyText(
 				    observation.interfaceKey,
 				    sizeof(observation.interfaceKey),
@@ -1747,6 +1751,7 @@ ProviderRunStats runMdnsProvider(
 				);
 				sink(target.mac, observation, context);
 				stats.observations++;
+				stats.confirmedObservations++;
 				stats.hostnameResponses++;
 				break;
 			}
@@ -1940,6 +1945,7 @@ ProviderRunStats runSsdpProvider(
 			observation.source = ScoutObservationSource::Ssdp;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
+			observation.confirmed = true;
 			copyText(
 			    observation.interfaceKey,
 			    sizeof(observation.interfaceKey),
@@ -2099,6 +2105,7 @@ ProviderRunStats runSsdpProvider(
 
 			sink(target->mac, observation, context);
 			stats.observations++;
+			stats.confirmedObservations++;
 		}
 		close(fd);
 	}
@@ -2291,6 +2298,7 @@ ProviderRunStats runNbnsProvider(
 			observation.source = ScoutObservationSource::Nbns;
 			observation.ipv4 = target->ipv4;
 			observation.interfaceIndex = target->interfaceIndex;
+			observation.confirmed = true;
 			copyText(
 			    observation.interfaceKey,
 			    sizeof(observation.interfaceKey),
@@ -2299,6 +2307,7 @@ ProviderRunStats runNbnsProvider(
 			addName(observation, ScoutNameSource::Nbns, name, now, now + config.maxAgeMs);
 			sink(target->mac, observation, context);
 			stats.observations++;
+			stats.confirmedObservations++;
 		}
 		close(fd);
 
