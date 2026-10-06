@@ -804,7 +804,9 @@ struct ScoutImpl {
 	}
 
 	ScoutResult snapshotDevices(
-	    ScoutDeviceInfo *out, size_t capacity, ScoutRegistrySnapshotInfo &snapshot
+	    ScoutDeviceInfo *out,
+	    size_t capacity,
+	    ScoutRegistrySnapshotInfo &snapshot
 	) {
 		snapshot = {};
 		ScoutLock lock(mutex);
