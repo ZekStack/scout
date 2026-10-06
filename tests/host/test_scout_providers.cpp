@@ -41,6 +41,7 @@ uint32_t lastUdpDestination = 0;
 uint16_t lastUdpDestinationPort = 0;
 uint32_t mdnsHostnameTtlSeconds = 120;
 bool mdnsForceTimeout = false;
+bool nbnsRespond = false;
 std::map<int, std::vector<uint8_t>> sentUdpPayloads;
 std::map<int, uint32_t> mdnsTargetAddresses;
 std::vector<uint32_t> mdnsQueriedAddresses;
@@ -91,6 +92,7 @@ void resetHarness(Scenario nextScenario) {
 	lastUdpDestinationPort = 0;
 	mdnsHostnameTtlSeconds = 120;
 	mdnsForceTimeout = false;
+	nbnsRespond = false;
 	sentUdpPayloads.clear();
 	mdnsTargetAddresses.clear();
 	mdnsQueriedAddresses.clear();
@@ -234,6 +236,35 @@ std::vector<uint8_t> mdnsHostnameResponse(int fd) {
 	return response;
 }
 
+std::vector<uint8_t> nbnsNodeStatusResponse() {
+	std::vector<uint8_t> response(42, 0);
+	response[0] = 0x40;
+	response[1] = 0x00;
+	response[2] = 0x80;
+	response[3] = 0x00;
+	response[6] = 0x00;
+	response[7] = 0x01;
+
+	size_t offset = 12;
+	response[offset++] = 0x00;
+	response[offset++] = 0x00;
+	response[offset++] = 0x21;
+	response[offset++] = 0x00;
+	response[offset++] = 0x01;
+	offset += 4;
+	response[offset++] = 0x00;
+	response[offset++] = 19;
+	response[offset++] = 1;
+	std::memset(response.data() + offset, ' ', 15);
+	std::memcpy(response.data() + offset, "WORKSTATION", 11);
+	offset += 15;
+	response[offset++] = 0x00;
+	response[offset++] = 0x00;
+	response[offset++] = 0x00;
+	assert(offset == response.size());
+	return response;
+}
+
 std::string httpResponse() {
 	std::string body;
 	if (scenario == Scenario::SsdpConflict) {
@@ -300,6 +331,36 @@ void testNbnsRetriesBudgetInterruptedBatch() {
 	assert(!second.budgetYielded);
 	assert(!state.active);
 	assert(udpSendCount == 2);
+}
+
+void testNbnsResponseConfirmsTarget() {
+	resetHarness(Scenario::Nbns);
+	nbnsRespond = true;
+	receiveDelayMs = 0;
+	auto target = makeTarget("ETH_DEF", 1, "192.168.1.42", 1);
+	ScoutNbnsConfig config{};
+	config.enabled = true;
+	config.maxTargetsPerRun = 1;
+	config.responseWindowMs = 1;
+
+	scout_internal::NbnsProviderState state{};
+	const auto stats = scout_internal::runNbnsProvider(
+	    &target,
+	    1,
+	    state,
+	    config,
+	    &captureObservation,
+	    nullptr,
+	    nullptr
+	);
+
+	assert(stats.observations == 1);
+	assert(stats.confirmedObservations == 1);
+	assert(observations.size() == 1);
+	assert(observations[0].source == ScoutObservationSource::Nbns);
+	assert(observations[0].confirmed);
+	assert(observations[0].nameCount == 1);
+	assert(std::strcmp(observations[0].names[0].value, "WORKSTATION") == 0);
 }
 
 void testMdnsEnumerationResumesIntoServiceQuery() {
@@ -371,6 +432,7 @@ void testDirectMdnsHostnameDiscovery() {
 	assert(stats.hostnameQueries == 1);
 	assert(stats.hostnameResponses == 1);
 	assert(stats.observations == 1);
+	assert(stats.confirmedObservations == 1);
 	assert(mdnsQueryCount == 0);
 	assert(udpSendCount == 1);
 	assert(lastUdpDestination == ipv4("224.0.0.251"));
@@ -378,6 +440,7 @@ void testDirectMdnsHostnameDiscovery() {
 	assert(boundAddresses[10] == ipv4("192.168.1.1"));
 	assert(observations.size() == 1);
 	assert(observations[0].source == ScoutObservationSource::Mdns);
+	assert(observations[0].confirmed);
 	assert(observations[0].nameCount == 1);
 	assert(observations[0].names[0].source == ScoutNameSource::MdnsHostname);
 	assert(std::strcmp(observations[0].names[0].value, "Gabi-iPhone.local") == 0);
@@ -529,8 +592,10 @@ void testSsdpRejectsUnrelatedLocation() {
 	);
 	assert(stats.descriptionErrors == 1);
 	assert(stats.dropped == 1);
+	assert(stats.confirmedObservations == 1);
 	assert(streamSocketCount == 0);
 	assert(observations.size() == 1);
+	assert(observations[0].confirmed);
 	assert(std::strcmp(observations[0].upnpUdn, "uuid:origin") == 0);
 }
 
@@ -849,6 +914,21 @@ ssize_t scout_test_recvfrom(
 			return static_cast<ssize_t>(response.size());
 		}
 	}
+	if (scenario == Scenario::Nbns && nbnsRespond && !datagramDelivered[fd]) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(receiveDelayMs));
+		const auto response = nbnsNodeStatusResponse();
+		assert(response.size() <= length);
+		std::memcpy(buffer, response.data(), response.size());
+		auto *sender = reinterpret_cast<sockaddr_in *>(source);
+		sender->sin_family = AF_INET;
+		sender->sin_port = htons(137);
+		sender->sin_addr.s_addr = ipv4("192.168.1.42");
+		if (sourceLength != nullptr) {
+			*sourceLength = sizeof(sockaddr_in);
+		}
+		datagramDelivered[fd] = true;
+		return static_cast<ssize_t>(response.size());
+	}
 	if (scenario == Scenario::Nbns) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(receiveDelayMs));
 		errno = EAGAIN;
@@ -1011,6 +1091,7 @@ esp_err_t collectInterfaces(
 
 int main() {
 	testNbnsRetriesBudgetInterruptedBatch();
+	testNbnsResponseConfirmsTarget();
 	testMdnsEnumerationResumesIntoServiceQuery();
 	testDirectMdnsHostnameDiscovery();
 	testDirectMdnsHostnameGoodbyeTtl();
