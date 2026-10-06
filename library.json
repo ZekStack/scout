@@ -1,6 +1,6 @@
 {
   "name": "Scout",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Continuous local-network discovery and observation library for ESP32.",
   "keywords": [
     "esp32",
