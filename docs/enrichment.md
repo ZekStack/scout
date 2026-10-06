@@ -205,7 +205,9 @@ Within one SSDP run, duplicate `LOCATION` values are deduplicated per interface,
 advertisements from one device cannot consume the whole description-fetch budget without
 collapsing identical private addresses that exist on different local networks. Provider
 diagnostics expose `transportErrors` separately from `descriptionErrors`, while the existing
-timeout, malformed, server-error and dropped counters retain the failure class.
+timeout, malformed, server-error and dropped counters retain the failure class. Each provider also
+reports cumulative observations, confirmed observations, planned work units and attempted work
+units so consumers can measure confirmation coverage and scheduling pressure.
 
 ## OUI vendor lookup
 
@@ -236,9 +238,10 @@ scan interval, so short DNS/mDNS/SSDP lifetimes do not remain valid until the ne
 Expiring strong identity evidence immediately marks the identity graph dirty so stale
 Strong/Certain groups are removed.
 
-ARP observations alone advance registry-retention `lastSeenAtMs`. ICMP can advance
-`lastConfirmedAtMs`, while mDNS, SSDP, NBNS and reverse DNS enrich the currently ARP-owned
-endpoint without extending the MAC record's retention lifetime.
+ARP observations alone advance registry-retention `lastSeenAtMs`. Fresh ICMP replies and
+validated direct mDNS/DNS-SD, SSDP and NBNS responses can advance `lastConfirmedAtMs` while
+still leaving MAC-record retention under ARP ownership. Reverse DNS and OUI enrichment never
+count as direct confirmation.
 
 ## Reverse DNS
 
